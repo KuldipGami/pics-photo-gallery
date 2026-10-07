@@ -164,6 +164,20 @@ class Thumbnails extends EventEmitter {
     return this.schedule(item, kind, 'high')
   }
 
+  /** Thumbnail bytes for background analysis: the cached copy, else generated at background priority. */
+  async ensure(item) {
+    const name = this.name(item, 'thumb')
+    if (this.cached.has(name)) {
+      try {
+        return await fsp.readFile(path.join(this.dir, name))
+      } catch {
+        this.cached.delete(name)
+      }
+    }
+    if (this.isFailed(name)) return null
+    return this.schedule(item, 'thumb', 'low')
+  }
+
   /** A 1024px JPEG for face analysis: background priority, not cached. */
   render(item) {
     return this.schedule(item, 'analysis', 'low')

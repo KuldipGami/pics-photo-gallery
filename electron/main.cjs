@@ -15,6 +15,10 @@ const { Store } = require('./store.cjs')
 const { Library, idOf, keyOf } = require('./library.cjs')
 const { Thumbnails } = require('./thumbs.cjs')
 const { FaceIndex } = require('./faces.cjs')
+const { Albums } = require('./albums.cjs')
+const { Duplicates } = require('./duplicates.cjs')
+const { Places } = require('./places.cjs')
+const { SmartIndex } = require('./smart.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
 
 registerScheme()
@@ -73,6 +77,7 @@ const store = new Store(path.join(userData, 'settings.json'), {
   thumbSize: 180,
   highPerformanceGpu: true,
   faceRecognition: true,
+  smartSearch: true,
   window: { width: 1360, height: 860 },
 })
 
@@ -90,35 +95,79 @@ let library
 let thumbs
 /** @type {FaceIndex} */
 let faces
+/** @type {Albums} */
+let albums
+/** @type {Duplicates} */
+let dupes
+/** @type {Places} */
+let places
+/** @type {SmartIndex} */
+let smart
+let placesData = { places: [], byItem: {} }
+
+const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, 'models') : path.join(__dirname, '..', 'models')
 
 function startServices() {
   library = new Library(path.join(userData, 'library.json'))
   thumbs = new Thumbnails(path.join(userData, 'thumbnails'))
-  // Face analysis waits until every preview exists, so it never slows down browsing.
+  // Background analysis (faces, search, duplicates) waits until every preview exists, so it never
+  // slows down browsing.
+  const idle = () => thumbs.background.pending === 0
   faces = new FaceIndex(path.join(userData, 'faces.json'), {
-    canRun: () => thumbs.background.pending === 0,
+    canRun: idle,
     render: (item) => thumbs.render(item),
-    modelsDir: app.isPackaged ? path.join(process.resourcesPath, 'models') : path.join(__dirname, '..', 'models'),
+    modelsDir: MODELS_DIR,
     adapterFile: path.join(userData, 'face-engine.json'),
   })
   faces.enabled = store.get('faceRecognition') !== false
+  smart = new SmartIndex(path.join(userData, 'smart.bin'), {
+    canRun: idle,
+    thumb: (item) => thumbs.ensure(item),
+    modelsDir: MODELS_DIR,
+    adapterFile: path.join(userData, 'smart-engine.json'),
+    hintFile: path.join(userData, 'face-engine.json'),
+  })
+  smart.enabled = store.get('smartSearch') !== false
+  dupes = new Duplicates(path.join(userData, 'duplicates.json'), { canRun: idle, thumb: (item) => thumbs.ensure(item) })
+  albums = new Albums(path.join(userData, 'albums.json'))
+  places = new Places(path.join(MODELS_DIR, 'places.json.gz'))
+
+  let placesTimer = null
+  const updatePlaces = () => {
+    clearTimeout(placesTimer)
+    placesTimer = setTimeout(() => {
+      placesData = places.group(library.list)
+      send('places:changed', placesData)
+    }, 400)
+  }
   library.on('changed', () => {
     send('library:changed', { items: library.list })
     thumbs.warmUp(library.list)
+    updatePlaces()
   })
   library.on('status', (status) => send('scan:status', status))
   library.on('scanned', async () => {
     await thumbs.prune(library.list)
     thumbs.prefetch(library.list)
     faces.sync(library.list)
+    smart.sync(library.list)
+    dupes.sync(library.list)
   })
   thumbs.on('progress', (progress) => {
     send('thumbs:progress', progress)
-    if (progress.pending === 0) faces.pump()
+    if (progress.pending === 0) {
+      faces.pump()
+      smart.pump()
+      dupes.pump()
+    }
   })
   thumbs.on('duration', (id, seconds) => library.patch(id, { duration: seconds }))
   faces.on('changed', () => send('people:changed', faces.snapshot()))
   faces.on('progress', (progress) => send('people:progress', progress))
+  smart.on('progress', (progress) => send('smart:progress', progress))
+  dupes.on('changed', () => send('dupes:changed', dupes.snapshot()))
+  dupes.on('progress', (progress) => send('dupes:progress', progress))
+  albums.on('changed', () => send('albums:changed', albums.snapshot()))
 }
 
 /** @type {BrowserWindow | null} */
@@ -136,6 +185,7 @@ const settingsPayload = () => ({
   thumbSize: store.get('thumbSize'),
   highPerformanceGpu: store.get('highPerformanceGpu') !== false,
   faceRecognition: store.get('faceRecognition') !== false,
+  smartSearch: store.get('smartSearch') !== false,
 })
 
 let viewerOpen = false
@@ -274,6 +324,11 @@ ipcMain.handle('app:state', () => ({
   settings: settingsPayload(),
   people: faces.snapshot(),
   peopleProgress: faces.progressInfo(),
+  albums: albums.snapshot(),
+  places: placesData,
+  dupes: dupes.snapshot(),
+  dupesProgress: dupes.progressInfo(),
+  smartProgress: smart.progressInfo(),
   version: app.getVersion(),
 }))
 
@@ -343,6 +398,31 @@ ipcMain.handle('people:hide-many', (_e, ids, hidden) => faces.setHiddenMany(idLi
 ipcMain.handle('people:matches', (_e, id) => (isPersonId(id) ? faces.matches(id) : []))
 ipcMain.handle('people:suggestions', () => faces.suggestions())
 
+// ---------- albums ----------
+
+const isAlbumId = (v) => typeof v === 'string' && /^a[0-9a-f]{10}$/.test(v)
+
+ipcMain.handle('albums:create', (_e, name, ids) => albums.create(typeof name === 'string' ? name : '', itemsFor(idList(ids))))
+ipcMain.handle('albums:rename', (_e, id, name) => {
+  if (isAlbumId(id) && typeof name === 'string') albums.rename(id, name)
+})
+ipcMain.handle('albums:delete', (_e, id) => {
+  if (isAlbumId(id)) albums.remove(id)
+})
+ipcMain.handle('albums:add', (_e, id, ids) => (isAlbumId(id) ? albums.add(id, itemsFor(idList(ids))) : 0))
+ipcMain.handle('albums:remove-items', (_e, id, ids) => {
+  if (isAlbumId(id)) albums.removeItems(id, idList(ids))
+})
+ipcMain.handle('albums:cover', (_e, id, itemId) => {
+  const [item] = itemsFor(itemId)
+  if (isAlbumId(id) && item) albums.setCover(id, item)
+})
+
+// ---------- duplicates & search ----------
+
+ipcMain.handle('dupes:dismiss', (_e, ids) => dupes.dismiss(idList(ids)))
+ipcMain.handle('smart:search', (_e, query) => (typeof query === 'string' ? smart.search(query.slice(0, 200)) : { ids: [], scores: [] }))
+
 ipcMain.handle('library:rescan', () => scan())
 
 ipcMain.handle('folders:add', (_e, paths) => addFolders(paths))
@@ -364,6 +444,10 @@ ipcMain.handle('settings:set', (_e, patch) => {
   if (typeof patch.faceRecognition === 'boolean') {
     allowed.faceRecognition = patch.faceRecognition
     faces.setEnabled(patch.faceRecognition)
+  }
+  if (typeof patch.smartSearch === 'boolean') {
+    allowed.smartSearch = patch.smartSearch
+    smart.setEnabled(patch.smartSearch)
   }
   store.set(allowed)
   if (allowed.theme) applyTheme()
@@ -387,6 +471,9 @@ ipcMain.handle('items:trash', async (_e, ids) => {
     setFavorites(removed, false)
     library.remove(removed)
     faces.removeItems(removed)
+    albums.forget(removed)
+    smart.sync(library.list)
+    dupes.sync(library.list)
   }
   return { removed: removed.length, failed }
 })
@@ -439,6 +526,7 @@ ipcMain.handle('items:menu', (event, id, ids) => {
       label: allFav ? 'Remove from favorites' : multi ? `Add ${targets.length} to favorites` : 'Add to favorites',
       click: () => setFavorites(targets, !allFav),
     },
+    { label: multi ? `Add ${targets.length} to album…` : 'Add to album…', click: action('album') },
     ...(multi
       ? []
       : [
@@ -510,10 +598,13 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
   startServices()
   handleProtocol({ library, thumbs })
-  await Promise.all([library.load(), faces.load()])
+  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load()])
+  placesData = places.group(library.list)
   createWindow()
   thumbs.prefetch(library.list)
   faces.sync(library.list)
+  smart.sync(library.list)
+  dupes.sync(library.list)
   watchFolders()
   scan()
 
@@ -532,4 +623,7 @@ app.on('before-quit', () => {
   store.saveNow()
   thumbs?.dispose()
   faces?.dispose()
+  smart?.dispose()
+  dupes?.dispose()
+  albums?.saveNow()
 })

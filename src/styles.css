@@ -2164,3 +2164,352 @@ html[data-platform='darwin'] .titlebar {
   flex-shrink: 0;
   color: rgba(255, 255, 255, 0.45);
 }
+
+/* ==========================================================================
+   Sidebar: scrolling list with albums
+   ========================================================================== */
+
+.sidebar {
+  overflow: hidden;
+}
+.sidebar-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-height: 0;
+  margin: 0 -10px;
+  padding: 0 10px 8px;
+  overflow-y: auto;
+}
+.nav-heading.with-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 6px;
+}
+.nav-item.album-item {
+  height: 34px;
+  gap: 10px;
+}
+.nav-album-thumb {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--surface-3);
+  color: var(--text-3);
+}
+.nav-album-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.nav-item.album-item.drop {
+  background: var(--accent-soft);
+  color: var(--text);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* ==========================================================================
+   Albums & places
+   ========================================================================== */
+
+.album-cover-new {
+  place-items: center;
+  border: 2px dashed var(--border-strong);
+  background: transparent;
+  color: var(--text-2);
+  box-sizing: border-box;
+}
+.folder-card.album-new:hover .album-cover-new {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: none;
+}
+.album-thumb {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--surface-3);
+  color: var(--text-3);
+}
+.album-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.name-field {
+  margin: 14px 0 4px;
+}
+.places-grid {
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+}
+.place-card .folder-cover {
+  position: relative;
+  aspect-ratio: 1;
+}
+.place-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 600;
+  backdrop-filter: blur(6px);
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 28px 18px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.chip.active {
+  border-color: transparent;
+  background: var(--accent);
+  color: #fff;
+}
+.chip-count {
+  font-size: 11.5px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+.info-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.info-link:hover {
+  text-decoration: underline;
+}
+.info-map {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.info-map:hover {
+  color: #fff;
+}
+
+/* ==========================================================================
+   Duplicates
+   ========================================================================== */
+
+.dupes-scroll {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+}
+.dupes-summary {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 2px 28px 18px;
+}
+.dupes-summary-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.dupes-status {
+  color: var(--text-3);
+}
+.dupes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 0 28px 40px;
+}
+.dupes-empty {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-3);
+}
+.dupes-more {
+  align-self: center;
+}
+.dupe-group {
+  padding: 12px 14px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 330px;
+}
+.dupe-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.dupe-title {
+  font-weight: 600;
+}
+.dupe-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px;
+}
+.dupe-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.dupe-card.kept {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.dupe-thumb {
+  position: relative;
+  display: block;
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  border: 0;
+  background: var(--surface-3);
+  cursor: zoom-in;
+}
+.dupe-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.dupe-card:not(.kept) .dupe-thumb img {
+  opacity: 0.72;
+}
+.dupe-open {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.dupe-thumb:hover .dupe-open {
+  opacity: 1;
+}
+.dupe-video {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.dupe-info {
+  padding: 8px 10px 4px;
+}
+.dupe-name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dupe-meta {
+  margin-top: 1px;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dupe-keep {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  margin: 6px 10px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.dupe-keep:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.dupe-keep.on {
+  border-color: transparent;
+  background: var(--accent);
+  color: #fff;
+  cursor: default;
+}
+
+/* ==========================================================================
+   Settings: credits
+   ========================================================================== */
+
+.about.credits {
+  margin-top: 0;
+  padding-bottom: 24px;
+}
+.link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: inherit;
+  cursor: pointer;
+}
+.link:hover {
+  text-decoration: underline;
+}

@@ -40,6 +40,75 @@ export interface Settings {
   thumbSize: number
   highPerformanceGpu: boolean
   faceRecognition: boolean
+  smartSearch: boolean
+}
+
+export interface Album {
+  id: string
+  name: string
+  /** Item ids, in the order they were added. */
+  items: string[]
+  /** Chosen cover item (else the newest photo). */
+  cover: string | null
+  created: number
+  updated: number
+}
+
+export interface Place {
+  id: string
+  name: string
+  /** State / province. */
+  admin: string
+  country: string
+  /** ISO country code. */
+  cc: string
+  lat: number
+  lon: number
+  count: number
+  /** Newest item taken here. */
+  cover: string
+}
+
+export interface PlacesData {
+  places: Place[]
+  /** Item id → place id. */
+  byItem: Record<string, string>
+}
+
+export interface DuplicateGroup {
+  ids: string[]
+  /** Suggested item to keep. */
+  keep: string
+  /** Bytes per copy (exact copies only). */
+  size?: number
+}
+
+export interface DuplicatesData {
+  exact: DuplicateGroup[]
+  similar: DuplicateGroup[]
+  /** Pixel size of look-alike photos: id → [width, height]. */
+  dims: Record<string, [number, number]>
+  exactFiles: number
+  exactBytes: number
+  similarGroups: number
+}
+
+export interface DuplicatesProgress {
+  running: boolean
+  phase: 'idle' | 'hashing' | 'comparing'
+  done: number
+  total: number
+}
+
+export interface SmartProgress {
+  done: number
+  total: number
+  running: boolean
+  indexed: number
+  /** The model files are installed. */
+  available: boolean
+  error: string | null
+  engine: { device: 'gpu' | 'cpu'; adapter: number | null } | null
 }
 
 /** Normalised face rectangle [x, y, width, height] (0–1) within the photo. */
@@ -130,6 +199,11 @@ export type View =
   | { kind: 'folder'; dir: string }
   | { kind: 'people' }
   | { kind: 'person'; id: string }
+  | { kind: 'places' }
+  | { kind: 'place'; id: string }
+  | { kind: 'albums' }
+  | { kind: 'album'; id: string }
+  | { kind: 'duplicates' }
   | { kind: 'settings' }
 
 export type TypeFilter = 'all' | 'image' | 'video'

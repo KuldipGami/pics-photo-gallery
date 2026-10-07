@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FolderOpen,
   Heart,
+  ImagePlus,
   Info,
   Pause,
   Play,
@@ -18,7 +19,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { api, mediaUrl, thumbUrl } from '../api'
 import { useElementSize } from '../hooks'
 import { formatLongDate, formatTime } from '../lib/format'
-import type { FaceBox, MediaItem } from '../types'
+import type { FaceBox, MediaItem, Place } from '../types'
 import { InfoPanel, type PhotoFace } from './InfoPanel'
 import { ZoomableImage, type ZoomControls } from './ZoomableImage'
 
@@ -35,6 +36,9 @@ interface Props {
   onOpenPerson(id: string): void
   onAssignFace(face: PhotoFace): void
   onRemoveFace(face: PhotoFace): void
+  onAddToAlbum(item: MediaItem): void
+  placeOf(itemId: string): Place | undefined
+  onOpenPlace(id: string): void
 }
 
 const SLIDE_MS = 4000
@@ -66,6 +70,9 @@ export function Viewer({
   onOpenPerson,
   onAssignFace,
   onRemoveFace,
+  onAddToAlbum,
+  placeOf,
+  onOpenPlace,
 }: Props) {
   const item = items[index]
   const [showInfo, setShowInfo] = useState(() => readPref('lumen.info') === '1')
@@ -299,6 +306,9 @@ export function Viewer({
               >
                 <Heart size={18} fill={fav ? 'currentColor' : 'none'} />
               </button>
+              <button className="icon-btn" onClick={() => onAddToAlbum(item)} title="Add to album">
+                <ImagePlus size={18} />
+              </button>
               {item.type === 'image' && (
                 <button className="icon-btn" onClick={copyImage} title="Copy image (Ctrl+C)">
                   <Copy size={18} />
@@ -331,6 +341,8 @@ export function Viewer({
             item={item}
             dims={dims?.id === item.id ? dims : null}
             faces={facesIn(item.id)}
+            place={placeOf(item.id)}
+            onOpenPlace={onOpenPlace}
             onOpenPerson={onOpenPerson}
             onAssignFace={onAssignFace}
             onRemoveFace={onRemoveFace}

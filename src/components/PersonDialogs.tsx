@@ -54,7 +54,7 @@ export function PersonName({ person, onRename }: { person: Person; onRename(name
  * Handles keys for a dialog and stops them reaching grid/viewer shortcuts. Keys typed into the
  * dialog's own text fields still reach those fields (the app's shortcuts ignore inputs anyway).
  */
-function useDialogKeys(onKey: (e: KeyboardEvent) => void) {
+export function useDialogKeys(onKey: (e: KeyboardEvent) => void) {
   const ref = useRef(onKey)
   ref.current = onKey
   useEffect(() => {

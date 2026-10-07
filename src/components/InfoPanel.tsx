@@ -1,7 +1,7 @@
 import { Aperture, Calendar, ExternalLink, FileImage, Film, Folder, MapPin, UserRoundPen, UserRoundSearch, UserX, Users, X } from 'lucide-react'
 import { api } from '../api'
 import { baseName, formatBytes, formatDuration, formatExposure, formatLongDate, formatTime } from '../lib/format'
-import type { FaceBox, MediaItem } from '../types'
+import type { FaceBox, MediaItem, Place } from '../types'
 import { FaceAvatar } from './FaceAvatar'
 import { PopoverMenu } from './PopoverMenu'
 
@@ -18,6 +18,9 @@ interface Props {
   item: MediaItem
   dims: { w: number; h: number } | null
   faces: PhotoFace[]
+  /** Where it was taken (from GPS, if any). */
+  place?: Place
+  onOpenPlace(id: string): void
   onOpenPerson(id: string): void
   /** Open the person picker for this face (Who's this? / Change person). */
   onAssignFace(face: PhotoFace): void
@@ -26,7 +29,7 @@ interface Props {
   onClose(): void
 }
 
-export function InfoPanel({ item, dims, faces, onOpenPerson, onAssignFace, onRemoveFace, onHighlight, onClose }: Props) {
+export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson, onAssignFace, onRemoveFace, onHighlight, onClose }: Props) {
   const m = item.meta ?? {}
   const camera = m.model ? (m.make && !m.model.startsWith(m.make) ? `${m.make} ${m.model}` : m.model) : m.make
   const exposure = [
@@ -124,22 +127,26 @@ export function InfoPanel({ item, dims, faces, onOpenPerson, onAssignFace, onRem
       </button>
 
       {m.lat !== undefined && m.lon !== undefined && (
-        <button
-          className="info-row clickable"
-          onClick={() =>
-            api.openUrl(`https://www.openstreetmap.org/?mlat=${m.lat}&mlon=${m.lon}#map=15/${m.lat}/${m.lon}`)
-          }
-          title="Open map"
-        >
+        <div className="info-row">
           <MapPin size={18} />
           <div>
-            <div className="info-primary">Location</div>
-            <div className="info-secondary">
-              {m.lat.toFixed(5)}, {m.lon.toFixed(5)}
-            </div>
+            {place ? (
+              <button className="info-link" onClick={() => onOpenPlace(place.id)} title={`All photos from ${place.name}`}>
+                {place.name}
+              </button>
+            ) : (
+              <div className="info-primary">Location</div>
+            )}
+            {place && <div className="info-secondary">{[place.admin, place.country].filter(Boolean).join(', ')}</div>}
+            <button
+              className="info-secondary info-map"
+              onClick={() => api.openUrl(`https://www.openstreetmap.org/?mlat=${m.lat}&mlon=${m.lon}#map=15/${m.lat}/${m.lon}`)}
+              title="Open in OpenStreetMap (in your browser)"
+            >
+              {m.lat.toFixed(5)}, {m.lon.toFixed(5)} <ExternalLink size={12} />
+            </button>
           </div>
-          <ExternalLink size={14} className="info-trailing" />
-        </button>
+        </div>
       )}
     </aside>
   )

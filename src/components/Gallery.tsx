@@ -22,6 +22,8 @@ interface Props {
   onSelect(index: number, mode: 'toggle' | 'range'): void
   onSelectRange(start: number, end: number, value: boolean): void
   onZoom(direction: 1 | -1): void
+  /** Items about to be dragged (out to other apps, or onto an album in the sidebar). */
+  onDragItems?(ids: string[]): void
 }
 
 const OVERSCAN = 800
@@ -143,7 +145,11 @@ export function Gallery(props: Props) {
     e.preventDefault()
     api.showContextMenu(item.id, targets(item))
   })
-  const onThumbDrag = useEvent((item: MediaItem) => api.startDrag(targets(item)))
+  const onThumbDrag = useEvent((item: MediaItem) => {
+    const ids = targets(item)
+    props.onDragItems?.(ids)
+    api.startDrag(ids)
+  })
 
   const { rows, cell } = layout
   const first = rows.length ? findRow(rows, scrollTop - OVERSCAN) : 0

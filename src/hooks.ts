@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { api } from './api'
-import type { MediaItem, PeopleData, PeopleProgress, ScanStatus, Settings, ThumbProgress } from './types'
+import type {
+  Album,
+  DuplicatesData,
+  DuplicatesProgress,
+  MediaItem,
+  PeopleData,
+  PeopleProgress,
+  PlacesData,
+  ScanStatus,
+  Settings,
+  SmartProgress,
+  ThumbProgress,
+} from './types'
 
 export function useElementSize(ref: RefObject<HTMLElement | null>) {
   const [size, setSize] = useState({ width: 0, height: 0 })
@@ -17,8 +29,9 @@ export function useElementSize(ref: RefObject<HTMLElement | null>) {
 }
 
 const EMPTY_PEOPLE: PeopleData = { enabled: true, people: [], byItem: {}, analysed: 0, faces: 0 }
+const EMPTY_DUPES: DuplicatesData = { exact: [], similar: [], dims: {}, exactFiles: 0, exactBytes: 0, similarGroups: 0 }
 
-/** Live view of the main-process library, settings, scan status and people. */
+/** Live view of the main-process library, settings, scan status, people, albums, places… */
 export function useLibrary() {
   const [items, setItems] = useState<MediaItem[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
@@ -27,6 +40,19 @@ export function useLibrary() {
   const [version, setVersion] = useState('')
   const [people, setPeople] = useState<PeopleData>(EMPTY_PEOPLE)
   const [peopleProgress, setPeopleProgress] = useState<PeopleProgress>({ done: 0, total: 0, running: false, error: null })
+  const [albums, setAlbums] = useState<Album[]>([])
+  const [places, setPlaces] = useState<PlacesData>({ places: [], byItem: {} })
+  const [dupes, setDupes] = useState<DuplicatesData>(EMPTY_DUPES)
+  const [dupesProgress, setDupesProgress] = useState<DuplicatesProgress>({ running: false, phase: 'idle', done: 0, total: 0 })
+  const [smartProgress, setSmartProgress] = useState<SmartProgress>({
+    done: 0,
+    total: 0,
+    running: false,
+    indexed: 0,
+    available: true,
+    error: null,
+    engine: null,
+  })
 
   useEffect(() => {
     const offs = [
@@ -36,6 +62,11 @@ export function useLibrary() {
       api.onStatus(setStatus),
       api.onThumbProgress(setThumbProgress),
       api.onSettings(setSettings),
+      api.onAlbums(setAlbums),
+      api.onPlaces(setPlaces),
+      api.onDuplicates(setDupes),
+      api.onDuplicatesProgress(setDupesProgress),
+      api.onSmartProgress(setSmartProgress),
     ]
     api.getState().then((s) => {
       setItems(s.items)
@@ -44,11 +75,57 @@ export function useLibrary() {
       setVersion(s.version)
       setPeople(s.people)
       setPeopleProgress(s.peopleProgress)
+      setAlbums(s.albums)
+      setPlaces(s.places)
+      setDupes(s.dupes)
+      setDupesProgress(s.dupesProgress)
+      setSmartProgress(s.smartProgress)
     })
     return () => offs.forEach((off) => off())
   }, [])
 
-  return { items, settings, setSettings, status, thumbProgress, version, people, peopleProgress }
+  return {
+    items,
+    settings,
+    setSettings,
+    status,
+    thumbProgress,
+    version,
+    people,
+    peopleProgress,
+    albums,
+    places,
+    dupes,
+    dupesProgress,
+    smartProgress,
+  }
+}
+
+/**
+ * Finds items by what's in them for each phrase (debounced). `matches` is phrase → item id → score
+ * once results for exactly these phrases are in; until then `pending` is true.
+ */
+export function useSmartSearch(phrases: string[]) {
+  const key = phrases.join('\n')
+  const [result, setResult] = useState<{ key: string; matches: Map<string, Map<string, number>> } | null>(null)
+  useEffect(() => {
+    if (!key) return
+    let live = true
+    const t = setTimeout(async () => {
+      const matches = new Map<string, Map<string, number>>()
+      for (const phrase of key.split('\n')) {
+        const res = await api.smartSearch(phrase)
+        matches.set(phrase, new Map(res.ids.map((id, i) => [id, res.scores[i]])))
+      }
+      if (live) setResult({ key, matches })
+    }, 250)
+    return () => {
+      live = false
+      clearTimeout(t)
+    }
+  }, [key])
+  const ready = !!key && result?.key === key
+  return { matches: ready ? result.matches : null, pending: !!key && !ready }
 }
 
 /** Returns a stable function that always calls the latest `fn`. */

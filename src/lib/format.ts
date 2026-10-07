@@ -13,7 +13,6 @@ const monthFmt = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'nume
 const shortMonthFmt = new Intl.DateTimeFormat(undefined, { month: 'short', year: 'numeric' })
 const longDateFmt = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
 const timeFmt = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
-const monthNameFmt = new Intl.DateTimeFormat(undefined, { month: 'long' })
 
 export function formatDayHeader(ts: number) {
   const diff = Math.round((startOfDay(Date.now()) - startOfDay(ts)) / DAY)
@@ -78,35 +77,3 @@ export function summarize(items: MediaItem[]) {
 }
 
 export const baseName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() || p
-
-// ---------- search ----------
-
-const searchCache = new WeakMap<MediaItem, string>()
-
-function searchText(item: MediaItem) {
-  let text = searchCache.get(item)
-  if (text === undefined) {
-    const d = new Date(item.date)
-    text = [
-      item.name,
-      baseName(item.dir),
-      monthNameFmt.format(d),
-      d.getFullYear(),
-      item.meta?.make,
-      item.meta?.model,
-      item.type === 'video' ? 'video' : 'photo',
-      item.ext,
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase()
-    searchCache.set(item, text)
-  }
-  return text
-}
-
-export const searchTokens = (query: string) => query.toLowerCase().split(/\s+/).filter(Boolean)
-export const matchesSearch = (item: MediaItem, tokens: string[]) => {
-  const text = searchText(item)
-  return tokens.every((t) => text.includes(t))
-}

@@ -96,7 +96,12 @@ async function readExif(file) {
   }
 }
 
-/** Reads duration + creation time from the `mvhd` box of an MP4/MOV file. */
+const MAX_MOOV = 16 * 1024 * 1024
+// ISO 6709 position as phones write it: "+42.3601-071.0589+012.345/" (Apple: com.apple.quicktime.
+// location.ISO6709 in moov/meta; Android: moov/udta/©xyz). Searching the moov box finds either.
+const ISO6709 = /([+-]\d{1,2}\.\d{2,})([+-]\d{1,3}\.\d{2,})/
+
+/** Reads duration, creation time (`mvhd` box) and GPS position from an MP4/MOV file. */
 async function readMp4(file) {
   let fh
   try {
@@ -117,14 +122,14 @@ async function readMp4(file) {
       }
       if (boxSize < headerLen) return null
       if (type === 'moov') {
-        const end = pos + boxSize
-        let child = pos + headerLen
-        while (child + 8 <= end) {
-          await fh.read(hdr, 0, 8, child)
-          const childSize = hdr.readUInt32BE(0)
-          if (hdr.toString('latin1', 4, 8) === 'mvhd') {
-            const b = Buffer.alloc(32)
-            await fh.read(b, 0, 32, child + 8)
+        const moov = Buffer.alloc(Math.min(boxSize - headerLen, MAX_MOOV))
+        await fh.read(moov, 0, moov.length, pos + headerLen)
+        const out = {}
+        let child = 0
+        while (child + 8 <= moov.length) {
+          const childSize = moov.readUInt32BE(child)
+          if (moov.toString('latin1', child + 4, child + 8) === 'mvhd' && child + 40 <= moov.length) {
+            const b = moov.subarray(child + 8, child + 40)
             let created, timescale, duration
             if (b[0] === 1) {
               created = Number(b.readBigUInt64BE(4))
@@ -136,15 +141,20 @@ async function readMp4(file) {
               duration = b.readUInt32BE(16)
             }
             const createdMs = created ? MAC_EPOCH + created * 1000 : NaN
-            return {
-              duration: timescale ? duration / timescale : undefined,
-              created: validDate(createdMs) ? createdMs : undefined,
-            }
+            if (timescale) out.duration = duration / timescale
+            if (validDate(createdMs)) out.created = createdMs
+            break
           }
-          if (childSize < 8) return null
+          if (childSize < 8) break
           child += childSize
         }
-        return null
+        const gps = moov.toString('latin1').match(ISO6709)
+        if (gps) {
+          const lat = Number(gps[1])
+          const lon = Number(gps[2])
+          if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && (lat || lon)) out.gps = { lat, lon }
+        }
+        return out
       }
       pos += boxSize
     }
@@ -184,6 +194,7 @@ async function buildItem(file, st) {
     if (mp4) {
       if (mp4.duration) item.duration = mp4.duration
       if (mp4.created) item.date = mp4.created
+      if (mp4.gps) item.meta = { lat: mp4.gps.lat, lon: mp4.gps.lon }
     }
   }
   return item

@@ -17,7 +17,11 @@ A modern photo & video gallery for your desktop. Built with Electron, React and 
   - **Faces** tab per person, least-similar faces first, so wrong matches surface at the top.
   - **Move to…** another person or a new one, **Not this person**, **Use as cover**, **Remove person** — on photos or individual faces.
   - In the viewer's details panel every face gets a chip (unrecognised ones say "Who's this?"); hover it to outline the face in the photo. Faces are found and recognised on the GPU with **InsightFace** (SCRFD-10G detector + ArcFace ResNet-50, "buffalo_l") on ONNX Runtime / DirectML; nothing is uploaded, and *Settings → People* shows where the model runs and can turn it off or delete all face data. The InsightFace pretrained models are licensed for **non-commercial use only**.
-- **Library tools** — Favorites, Recently added, Folders, search (name, person, folder, month, year, camera), multi-select (Ctrl/Shift-click), move to Recycle Bin, copy image, drag files out to other apps, right-click menu.
+- **Search by what's in the photo** — type “beach”, “dog”, “birthday cake” or “receipt” and Lumen finds matching photos and videos, with no tags needed. Words that name a person, place or date filter strictly, so “goa beach 2023” means beach photos taken in Goa in 2023. It uses Google's **SigLIP** model (Apache 2.0) on the GPU through ONNX Runtime / DirectML (about 8 ms per photo on an RTX 4070); nothing is uploaded.
+- **Places** — photos and videos with a GPS position, grouped by town and filterable by country, plus the place name in the details panel. Place names come from a bundled copy of **GeoNames** (161k towns, CC BY 4.0) and are looked up offline. Phone videos' locations are read too.
+- **Albums** — your own collections. Add items from the selection bar, the right-click menu or the viewer, or drag them onto an album in the sidebar. You can rename an album, change its cover or remove items; deleting an album never deletes files.
+- **Duplicates** — **exact copies** (identical bytes; extra copies can be removed in one click) and **look-alikes** (the same picture resized, re-saved by a messenger, edited or shot in a burst). The original or sharpest copy is suggested, you can keep a different one, and "Not duplicates" hides a group for good. Removed files go to the Recycle Bin.
+- **Library tools** — Favorites, Recently added, Folders, search (name, person, place, folder, month, year, camera, content), multi-select (Ctrl/Shift-click), move to Recycle Bin, copy image, drag files out to other apps, right-click menu.
 - **Windows 11 look** — Mica window material, light/dark/system theme, accent colors.
 - **Uses the discrete GPU** (e.g. NVIDIA RTX) on dual-graphics laptops — see *Settings → Performance*, which also shows the GPU in use.
 - **Version badge** in the title bar. Launching a newer build while an older one (1.2+) is open closes the old one automatically.
@@ -31,7 +35,10 @@ npm run models
 npm run dev
 ```
 
-`npm run models` downloads the face-recognition models (InsightFace buffalo_l, ~182 MB extracted) into `models/`.
+`npm run models` downloads into `models/`:
+- the face-recognition models (InsightFace buffalo_l, ~182 MB extracted);
+- the smart-search model (SigLIP base, fp16 ONNX, ~392 MB), plus its two calibration numbers read from Google's checkpoint;
+- the GeoNames town list, reduced to `places.json.gz` (~2 MB).
 
 `npm run dev` starts Vite with hot reload for the UI and restarts Electron when files in `electron/` change.
 
@@ -72,7 +79,11 @@ electron/          main process (CommonJS, no build step)
   face-engine.cjs  InsightFace engine process: SCRFD detection, 5-point alignment, ArcFace
                    512-d faceprints on ONNX Runtime (DirectML GPU, fastest adapter picked)
   faces-cluster.cjs  groups faceprints into people (worker thread; density-based, incremental)
-models/            InsightFace models (npm run models; bundled into the installer)
+  smart.cjs        smart search: SigLIP embedding per item (smart.bin), text queries, ranking
+  smart-engine.cjs SigLIP engine process (image + text encoders, SentencePiece tokenizer, DirectML)
+  places.cjs       offline reverse geocoding (GeoNames), photos grouped by town
+  duplicates.cjs   exact copies (content hash) and look-alikes (128-bit visual hash), cached
+  albums.cjs       albums (albums.json)
   protocol.cjs     gallery:// protocol (files, thumbnails, range requests for video)
   preload.cjs      safe bridge exposed to the UI as window.lumen
 src/               React UI (Vite)
@@ -80,6 +91,7 @@ src/               React UI (Vite)
   components/      Gallery, Viewer, FoldersView, SettingsView, …
   lib/             date formatting, grid layout, video thumbnail fallback
 resources/         app icon (icon.svg → icon.png via `npm run icon`)
+models/            AI models + place names (npm run models; bundled into the installer)
 ```
 
 ## How previews stay fast
@@ -99,5 +111,5 @@ Measured on a 2,000-file library (1,800 × 12 MP JPEGs + 200 × 1080p videos):
 - Windows picks the integrated GPU for Chromium by default; Lumen sets `force_high_performance_gpu`, which roughly halves HEVC/H.264 video preview time on an RTX 4070.
 - On-screen previews always jump the queue; while you fling or drag the scrubber, nothing loads until you land.
 
-Settings, the library index and the thumbnail cache live in `%APPDATA%\Lumen`.
+Settings, the library index, the thumbnail cache, faces, albums, the search index and the duplicate cache live in `%APPDATA%\Lumen`.
 Lumen never modifies your files — the only write action is *Move to Recycle Bin*, which always asks first.

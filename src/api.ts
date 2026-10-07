@@ -1,12 +1,17 @@
 import type {
+  Album,
+  DuplicatesData,
+  DuplicatesProgress,
   GpuInfo,
   MediaItem,
   PairSuggestion,
   PeopleData,
   PeopleProgress,
   PersonMatch,
+  PlacesData,
   ScanStatus,
   Settings,
+  SmartProgress,
   Theme,
   ThumbProgress,
 } from './types'
@@ -22,7 +27,28 @@ export interface LumenApi {
     version: string
     people: PeopleData
     peopleProgress: PeopleProgress
+    albums: Album[]
+    places: PlacesData
+    dupes: DuplicatesData
+    dupesProgress: DuplicatesProgress
+    smartProgress: SmartProgress
   }>
+  /** Resolves to the new album's id. */
+  createAlbum(name: string, ids: string[]): Promise<string>
+  renameAlbum(id: string, name: string): Promise<void>
+  deleteAlbum(id: string): Promise<void>
+  /** Resolves to how many were new to the album. */
+  addToAlbum(id: string, ids: string[]): Promise<number>
+  removeFromAlbum(id: string, ids: string[]): Promise<void>
+  setAlbumCover(id: string, itemId: string): Promise<void>
+  onAlbums(cb: (albums: Album[]) => void): Unsubscribe
+  onPlaces(cb: (places: PlacesData) => void): Unsubscribe
+  dismissDuplicates(ids: string[]): Promise<void>
+  onDuplicates(cb: (data: DuplicatesData) => void): Unsubscribe
+  onDuplicatesProgress(cb: (progress: DuplicatesProgress) => void): Unsubscribe
+  /** Items whose content matches the text, best first, with a 0–1 match score. */
+  smartSearch(query: string): Promise<{ ids: string[]; scores: number[] }>
+  onSmartProgress(cb: (progress: SmartProgress) => void): Unsubscribe
   renamePerson(id: string, name: string): Promise<void>
   hidePerson(id: string, hidden: boolean): Promise<void>
   mergePeople(fromIds: string[], intoId: string): Promise<void>
@@ -52,6 +78,7 @@ export interface LumenApi {
       thumbSize: number
       highPerformanceGpu: boolean
       faceRecognition: boolean
+      smartSearch: boolean
     }>,
   ): Promise<void>
   setFavorite(ids: string[], value: boolean): Promise<void>
@@ -71,7 +98,7 @@ export interface LumenApi {
   onStatus(cb: (status: ScanStatus) => void): Unsubscribe
   onThumbProgress(cb: (progress: ThumbProgress) => void): Unsubscribe
   onSettings(cb: (settings: Settings) => void): Unsubscribe
-  onMenuAction(cb: (payload: { action: 'open' | 'delete'; id: string; ids: string[] }) => void): Unsubscribe
+  onMenuAction(cb: (payload: { action: 'open' | 'delete' | 'album'; id: string; ids: string[] }) => void): Unsubscribe
 }
 
 declare global {

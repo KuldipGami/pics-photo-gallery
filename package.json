@@ -1,7 +1,7 @@
 {
   "name": "lumen",
   "productName": "Lumen",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "A modern photo & video gallery for your desktop",
   "private": true,
   "type": "module",
@@ -39,7 +39,11 @@
         "from": "models",
         "to": "models",
         "filter": [
-          "*.onnx"
+          "*.onnx",
+          "places.json.gz",
+          "siglip/*.onnx",
+          "siglip/tokenizer.json",
+          "siglip/calibration.json"
         ]
       }
     ],

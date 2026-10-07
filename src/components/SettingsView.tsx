@@ -1,8 +1,24 @@
-import { Check, Cpu, FolderOpen, FolderPlus, Gpu, HardDrive, Monitor, Moon, RefreshCw, RotateCcw, ScanFace, Sun, X } from 'lucide-react'
+import {
+  Check,
+  Cpu,
+  FolderOpen,
+  FolderPlus,
+  Gpu,
+  HardDrive,
+  Monitor,
+  Moon,
+  RefreshCw,
+  RotateCcw,
+  ScanFace,
+  ScanSearch,
+  Sparkles,
+  Sun,
+  X,
+} from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
-import type { GpuInfo, MediaItem, PeopleData, PeopleProgress, Settings, Theme } from '../types'
+import type { GpuInfo, MediaItem, PeopleData, PeopleProgress, Settings, SmartProgress, Theme } from '../types'
 import type { ConfirmOptions } from './Overlays'
 
 export const ACCENTS = ['#5b8cff', '#8b5cf6', '#ec4899', '#f97316', '#10b981', '#06b6d4']
@@ -27,13 +43,15 @@ interface Props {
   version: string
   people: PeopleData
   peopleProgress: PeopleProgress
+  smartProgress: SmartProgress
   onAddFolder(): void
   onToast(text: string): void
   onConfirm(options: ConfirmOptions): void
 }
 
-export function SettingsView({ settings, items, version, people, peopleProgress, onAddFolder, onToast, onConfirm }: Props) {
+export function SettingsView({ settings, items, version, people, peopleProgress, smartProgress, onAddFolder, onToast, onConfirm }: Props) {
   const engine = peopleProgress.engine
+  const smartEngine = smartProgress.engine
   const [cache, setCache] = useState<{ bytes: number; files: number } | null>(null)
   const [gpu, setGpu] = useState<GpuInfo | null>(null)
   useEffect(() => {
@@ -197,6 +215,56 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
         </section>
 
         <section className="card">
+          <h2>Search</h2>
+          <div className="setting-row">
+            <div>
+              <div>Search by what's in the photo</div>
+              <div className="setting-hint">
+                Find photos by describing them — “beach”, “dog”, “birthday cake”, “receipt”. Photos are analysed on this
+                computer (on the GPU) — nothing is uploaded.
+              </div>
+            </div>
+            <button
+              role="switch"
+              aria-checked={settings.smartSearch}
+              className={`switch${settings.smartSearch ? ' on' : ''}`}
+              onClick={() => api.setSettings({ smartSearch: !settings.smartSearch })}
+            >
+              <span />
+            </button>
+          </div>
+          <div className="setting-row">
+            <span className="with-icon">
+              <Sparkles size={16} /> Search model
+            </span>
+            <div className="setting-value">
+              <span className="gpu-name">Google SigLIP</span>
+              {!smartProgress.available ? (
+                <span className="pill">Not installed</span>
+              ) : smartEngine ? (
+                <span className={`pill${smartEngine.device === 'gpu' ? ' ok' : ''}`}>
+                  {smartEngine.device === 'gpu' ? 'Running on GPU (DirectML)' : 'Running on CPU'}
+                </span>
+              ) : (
+                <span className="pill">Starts when needed</span>
+              )}
+            </div>
+          </div>
+          <div className="setting-row">
+            <span className="with-icon">
+              <ScanSearch size={16} /> Ready to search
+            </span>
+            <div className="setting-value">
+              {formatCount(smartProgress.indexed)} of {formatCount(items.length)} items
+              {smartProgress.running && smartProgress.total
+                ? ` · preparing ${Math.floor((smartProgress.done / smartProgress.total) * 100)}%`
+                : ''}
+            </div>
+          </div>
+          {smartProgress.error && <p className="hint">Smart search couldn't start: {smartProgress.error}</p>}
+        </section>
+
+        <section className="card">
           <h2>Performance</h2>
           <div className="setting-row">
             <span className="with-icon">
@@ -275,6 +343,13 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
         </section>
 
         <p className="about">Lumen {version} · Your photos never leave this computer.</p>
+        <p className="about credits">
+          Faces: InsightFace buffalo_l (non-commercial licence) · Smart search: Google SigLIP (Apache 2.0) · Place names:{' '}
+          <button className="link" onClick={() => api.openUrl('https://www.geonames.org/')}>
+            GeoNames
+          </button>{' '}
+          (CC BY 4.0)
+        </p>
       </div>
     </div>
   )
