@@ -929,7 +929,6 @@ async function runOrganize(action, skipped) {
   if (action === 'folders') {
     if (!o.root) return { done: 0, errors: ['Choose where the dated folders go first.'] }
     const plan = organize.planFolders(organize.organizeSource(kept, o.root, o.roots), o.root, o.folderPattern)
-    send('organize:progress', { done: 0, total: plan.length })
     const res = await organize.executePlan(plan, { copy: o.copy })
     ownFiles(res.files.map((f) => f.to))
     if (res.files.length) {
@@ -940,7 +939,6 @@ async function runOrganize(action, skipped) {
   }
   if (action === 'rename') {
     const plan = organize.planRenames(kept, o.renamePattern, o.deviceNamesOnly)
-    send('organize:progress', { done: 0, total: plan.length })
     const res = await organize.executePlan(plan)
     ownFiles(res.files.map((f) => f.to))
     if (res.files.length) {
