@@ -45,6 +45,7 @@ export function useLibrary() {
   const [places, setPlaces] = useState<PlacesData>({ places: [], byItem: {} })
   const [dupes, setDupes] = useState<DuplicatesData>(EMPTY_DUPES)
   const [history, setHistory] = useState<HistoryEntry[]>([])
+  const [launch, setLaunch] = useState<{ folder?: string; duplicates?: boolean } | null>(null)
   const [dupesProgress, setDupesProgress] = useState<DuplicatesProgress>({ running: false, phase: 'idle', done: 0, total: 0 })
   const [smartProgress, setSmartProgress] = useState<SmartProgress>({
     done: 0,
@@ -84,6 +85,7 @@ export function useLibrary() {
       setDupesProgress(s.dupesProgress)
       setSmartProgress(s.smartProgress)
       setHistory(s.history)
+      setLaunch(s.launch ?? null)
     })
     return () => offs.forEach((off) => off())
   }, [])
@@ -103,6 +105,7 @@ export function useLibrary() {
     dupesProgress,
     smartProgress,
     history,
+    launch,
   }
 }
 

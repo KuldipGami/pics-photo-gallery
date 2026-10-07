@@ -683,6 +683,61 @@ class FaceIndex extends EventEmitter {
     this.edited()
   }
 
+  /**
+   * Files Lumen moved or renamed keep their faces: re-key photos and faces from old to new item
+   * ids (face ids are "<item id>:<n>"), and follow chosen cover faces.
+   */
+  remapIds(map) {
+    let changed = false
+    const covers = new Map()
+    for (const p of this.people.values()) if (p.cover) covers.set(p.cover, p)
+    for (const [oldId, newId] of map) {
+      if (oldId === newId) continue
+      const rec = this.items.get(oldId)
+      if (rec) {
+        this.items.delete(oldId)
+        rec.faces = rec.faces.map((fid) => {
+          const nid = newId + fid.slice(fid.indexOf(':'))
+          const face = this.faces.get(fid)
+          if (face) {
+            this.faces.delete(fid)
+            face.id = nid
+            face.item = newId
+            this.faces.set(nid, face)
+          }
+          const p = covers.get(fid)
+          if (p) p.cover = nid
+          return nid
+        })
+        this.items.set(newId, rec)
+        changed = true
+      }
+      if (this.legacy.has(oldId)) {
+        this.legacy.set(newId, this.legacy.get(oldId))
+        this.legacy.delete(oldId)
+        changed = true
+      }
+    }
+    if (changed) {
+      this.edits++
+      this.saveSoon(2000)
+      this.changed()
+    }
+  }
+
+  /** A file's date changed without its picture changing (date fixes): keep its faces. */
+  retime(changes) {
+    let changed = false
+    for (const { id, mtime } of changes) {
+      const rec = this.items.get(id)
+      if (rec && rec.m !== mtime) {
+        rec.m = mtime
+        changed = true
+      }
+    }
+    if (changed) this.saveSoon(2000)
+  }
+
   setEnabled(enabled) {
     this.enabled = enabled
     if (enabled) {

@@ -139,6 +139,21 @@ class Albums extends EventEmitter {
     this.changed()
   }
 
+  /** Files Lumen moved or renamed stay in their albums: old path → new path. */
+  remapPaths(map) {
+    let changed = false
+    for (const album of this.albums) {
+      album.paths = album.paths.map((p) => {
+        const to = map.get(keyOf(p))
+        if (!to) return p
+        changed = true
+        return to
+      })
+      if (album.cover && map.has(keyOf(album.cover))) album.cover = map.get(keyOf(album.cover))
+    }
+    if (changed) this.changed()
+  }
+
   /** Files moved to the Recycle Bin leave every album. */
   forget(itemIds) {
     const drop = new Set(itemIds)

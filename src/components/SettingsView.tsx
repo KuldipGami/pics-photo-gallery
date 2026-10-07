@@ -1,6 +1,7 @@
 import {
   Check,
   Cpu,
+  FolderMinus,
   FolderOpen,
   FolderPlus,
   Gpu,
@@ -21,6 +22,14 @@ import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
 import type { GpuInfo, MediaItem, PeopleData, PeopleProgress, Settings, SmartProgress, Theme } from '../types'
 import type { ConfirmOptions } from './Overlays'
+
+function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange(): void; disabled?: boolean; label?: string }) {
+  return (
+    <button role="switch" aria-checked={on} aria-label={label} disabled={disabled} className={`switch${on ? ' on' : ''}`} onClick={onChange}>
+      <span />
+    </button>
+  )
+}
 
 export const ACCENTS = ['#5b8cff', '#8b5cf6', '#ec4899', '#f97316', '#10b981', '#06b6d4']
 
@@ -391,6 +400,167 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
             )}
           </div>
         </section>
+
+        <section className="card">
+          <h2>Skip during scans</h2>
+          <div className="setting-row column">
+            <div className="setting-row-head">
+              <div>
+                <div>Folders to always skip</div>
+                <div className="setting-hint">For example app caches, sticker folders or a backup you don't want checked. Subfolders are skipped too.</div>
+              </div>
+              <button
+                className="btn ghost"
+                onClick={async () => {
+                  const picked = await api.pickFolders('Folders to always skip when scanning')
+                  if (picked.length) api.setSettings({ skippedFolders: [...settings.skippedFolders, ...picked] })
+                }}
+              >
+                <FolderMinus size={15} /> Add folder…
+              </button>
+            </div>
+            {settings.skippedFolders.length > 0 && (
+              <div className="folder-list">
+                {settings.skippedFolders.map((f) => (
+                  <div key={f} className="folder-row">
+                    <FolderMinus size={18} />
+                    <div className="folder-row-text">
+                      <div className="folder-row-path">{f}</div>
+                    </div>
+                    <button
+                      className="icon-btn"
+                      title="Stop skipping this folder"
+                      onClick={() => api.setSettings({ skippedFolders: settings.skippedFolders.filter((x) => x !== f) })}
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="setting-row column">
+            <div>
+              <div>File types to scan</div>
+              <div className="setting-hint">Switch off types you never want checked. Applies from the next scan.</div>
+            </div>
+            <div className="file-types">
+              {settings.fileTypes.map((t) => {
+                const on = !settings.skippedTypes.includes(t.key)
+                return (
+                  <div key={t.key} className="file-type">
+                    <div>
+                      <div>{t.label}</div>
+                      <div className="setting-hint">{t.extensions.map((x) => x.toUpperCase()).join('  ')}</div>
+                    </div>
+                    <Toggle
+                      on={on}
+                      label={t.label}
+                      onChange={() =>
+                        api.setSettings({ skippedTypes: on ? [...settings.skippedTypes, t.key] : settings.skippedTypes.filter((k) => k !== t.key) })
+                      }
+                    />
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+          <div className="setting-row">
+            <div>
+              <div>Skip tiny files · {settings.minFileKB ? `under ${settings.minFileKB} KB` : 'off'}</div>
+              <div className="setting-hint">
+                {settings.minFileKB ? `Files under ${settings.minFileKB} KB are skipped (stickers, icons, tiny thumbnails)` : 'Off: files of any size are scanned'}
+              </div>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={500}
+              step={10}
+              aria-label="Skip files smaller than"
+              value={settings.minFileKB}
+              onChange={(e) => api.setSettings({ minFileKB: Number(e.target.value) })}
+            />
+          </div>
+        </section>
+
+        <section className="card">
+          <h2>Watch for new duplicates</h2>
+          <div className="setting-row">
+            <div>
+              <div>Watch the library folders</div>
+              <div className="setting-hint">
+                Notifies you when a new photo or video is a copy of one you already have, for example a WhatsApp download of a photo you took.
+              </div>
+            </div>
+            <Toggle on={settings.watchFolders} onChange={() => api.setSettings({ watchFolders: !settings.watchFolders })} />
+          </div>
+          <div className={`setting-row${settings.watchFolders ? '' : ' disabled'}`}>
+            <div>
+              <div>Keep watching in the notification area when closed</div>
+              <div className="setting-hint">Closing the window hides Lumen next to the clock instead of exiting.</div>
+            </div>
+            <Toggle
+              on={settings.minimizeToTray}
+              disabled={!settings.watchFolders}
+              onChange={() => api.setSettings({ minimizeToTray: !settings.minimizeToTray })}
+            />
+          </div>
+          <div className="setting-row">
+            <div>
+              <div>Start with Windows</div>
+              <div className="setting-hint">Starts quietly in the notification area when you sign in, so watching continues after a restart.</div>
+            </div>
+            <Toggle
+              on={settings.startWithWindows}
+              onChange={async () => {
+                const res = await api.setStartWithWindows(!settings.startWithWindows)
+                if (!res.ok) onToast(`Couldn't change startup: ${res.error ?? ''}`)
+              }}
+            />
+          </div>
+          {settings.watchFolders && (
+            <div className="setting-row column">
+              <div className="watch-status">
+                <span className={`dot${settings.watchStatus ? ' on' : ''}`} />
+                {settings.watchStatus || 'Not watching: no library folder exists'}
+              </div>
+              {settings.watchLog.length > 0 && (
+                <div className="watch-log">
+                  {settings.watchLog.map((line, i) => (
+                    <div key={i}>{line}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        {api.env.platform === 'win32' && (
+          <section className="card">
+            <h2>Windows integration</h2>
+            <div className="setting-row">
+              <div>
+                <div>“Scan with Lumen” in the folder right-click menu</div>
+                <div className="setting-hint">On Windows 11 it appears under “Show more options”.</div>
+              </div>
+              <Toggle
+                on={settings.contextMenu}
+                onChange={async () => {
+                  const on = !settings.contextMenu
+                  const res = await api.setContextMenu(on)
+                  onToast(
+                    !res.ok
+                      ? `Couldn't change the right-click menu: ${res.error ?? ''}`
+                      : on
+                        ? 'Added “Scan with Lumen” to the folder right-click menu.'
+                        : 'Removed the right-click menu entry.',
+                  )
+                }}
+              />
+            </div>
+          </section>
+        )}
 
         <section className="card">
           <h2>Performance</h2>

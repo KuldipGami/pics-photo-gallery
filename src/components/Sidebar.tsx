@@ -1,4 +1,4 @@
-import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, LoaderCircle, MapPin, Plus, RefreshCw, Settings, Film, Sparkles, Users } from 'lucide-react'
+import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, LoaderCircle, MapPin, Plus, RefreshCw, Settings, Film, FolderTree, Sparkles, Users } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
@@ -18,6 +18,8 @@ interface Props {
   peopleProgress: PeopleProgress
   smartProgress: SmartProgress
   dupesProgress: DuplicatesProgress
+  /** "Watching 2 folders for new duplicates" (empty when not watching). */
+  watchStatus?: string
   onNewAlbum(): void
   /** True while photos from the grid are being dragged (they can be dropped on an album). */
   canDropItems(): boolean
@@ -66,6 +68,7 @@ export function Sidebar(props: Props) {
         <div className="nav-section">
           {item('folders', 'Folders', <Folder size={18} />, counts.folders)}
           {item('cleanup', 'Clean up', <CopyX size={18} />, props.duplicateBytes > 0 ? formatBytes(props.duplicateBytes) : undefined)}
+          {item('organize', 'Organize', <FolderTree size={18} />)}
           {item('history', 'History', <History size={18} />)}
         </div>
         <div className="nav-heading with-action">
@@ -113,6 +116,12 @@ export function Sidebar(props: Props) {
       </div>
 
       <div className="nav-section">{item('settings', 'Settings', <Settings size={18} />)}</div>
+      {props.watchStatus && (
+        <div className="nav-watch" title="Lumen tells you when a new photo or video is a copy of one you already have">
+          <span className="dot on" />
+          <span>{props.watchStatus}</span>
+        </div>
+      )}
 
       <div className="scan-status">
         {status.scanning ? (

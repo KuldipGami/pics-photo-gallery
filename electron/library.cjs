@@ -14,6 +14,39 @@ const EXIF_EXT = new Set(['jpg', 'jpeg', 'jfif', 'heic', 'heif', 'tif', 'tiff', 
 const MP4_EXT = new Set(['mp4', 'm4v', 'mov', '3gp'])
 const SKIP_DIRS = new Set(['node_modules', '$recycle.bin', 'system volume information', 'appdata', '__macosx'])
 
+/**
+ * File types the user can include or skip (Settings → Skip during scans), grouped the way people
+ * think of them (from DupeLens' FileTypes). Every extension Lumen reads is in exactly one group.
+ */
+const FILE_TYPES = [
+  { key: 'jpeg', label: 'JPEG photos', extensions: ['jpg', 'jpeg', 'jfif'], video: false },
+  { key: 'heic', label: 'HEIC (iPhone) photos', extensions: ['heic', 'heif'], video: false },
+  { key: 'png', label: 'PNG images', extensions: ['png'], video: false },
+  { key: 'gif', label: 'GIF animations', extensions: ['gif'], video: false },
+  { key: 'webp', label: 'WebP / AVIF', extensions: ['webp', 'avif'], video: false },
+  { key: 'tiff', label: 'BMP / TIFF', extensions: ['bmp', 'tif', 'tiff', 'ico'], video: false },
+  { key: 'raw', label: 'RAW photos', extensions: ['dng', 'cr2', 'cr3', 'nef', 'arw', 'orf', 'rw2'], video: false },
+  { key: 'mp4', label: 'MP4 / MOV videos', extensions: ['mp4', 'mov', 'm4v'], video: true },
+  { key: 'mts', label: 'Camcorder videos (MTS)', extensions: ['mts', 'm2ts'], video: true },
+  { key: 'avi', label: 'AVI / WMV / MKV videos', extensions: ['avi', 'wmv', 'mkv'], video: true },
+  { key: 'mobile', label: '3GP / WebM / MPEG videos', extensions: ['3gp', 'webm', 'mpg', 'mpeg'], video: true },
+]
+
+/** Extensions (lower case, no dot) of the given FILE_TYPES group keys. */
+const skippedExtensions = (keys) => {
+  const want = new Set((Array.isArray(keys) ? keys : []).map((k) => String(k).toLowerCase()))
+  return new Set(FILE_TYPES.filter((g) => want.has(g.key)).flatMap((g) => g.extensions))
+}
+
+const normFolder = (x) => String(x).toLowerCase().replace(/[\\/]+$/, '')
+
+/** Skip options for scanning: { skipFolders: string[], skipTypes: string[], minBytes: number }. */
+const normSkip = (options) => ({
+  folders: (Array.isArray(options?.skipFolders) ? options.skipFolders : []).filter((x) => typeof x === 'string' && x).map(normFolder),
+  exts: skippedExtensions(options?.skipTypes),
+  minBytes: Math.max(0, Number(options?.minBytes) || 0),
+})
+
 const MIN_VALID_DATE = Date.UTC(1971, 0, 1)
 const MAC_EPOCH = Date.UTC(1904, 0, 1)
 
@@ -45,7 +78,11 @@ const isExcluded = (full, exclude) => {
   return exclude.some((x) => p === x || p.startsWith(x + path.sep))
 }
 
-async function walk(dir, out, onFound, exclude) {
+/**
+ * @param {string[]} exclude lower-cased folders left out (never the root itself)
+ * @param {Set<string>} [skipExts] extensions left out (skipped file types)
+ */
+async function walk(dir, out, onFound, exclude, skipExts) {
   let entries
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true })
@@ -57,8 +94,8 @@ async function walk(dir, out, onFound, exclude) {
     if (name.startsWith('.') || SKIP_DIRS.has(name.toLowerCase())) continue
     const full = path.join(dir, name)
     if (entry.isDirectory()) {
-      if (!isExcluded(full, exclude)) await walk(full, out, onFound, exclude)
-    } else if (entry.isFile() && isMedia(name)) {
+      if (!isExcluded(full, exclude)) await walk(full, out, onFound, exclude, skipExts)
+    } else if (entry.isFile() && isMedia(name) && !skipExts?.has(extOf(name))) {
       out.set(keyOf(full), full)
       onFound()
     }
@@ -225,6 +262,8 @@ class Library extends EventEmitter {
     this.rescanQueued = false
     this.watchers = []
     this.watchTimer = null
+    this.exclude = []
+    this.skip = normSkip(null)
   }
 
   async load() {
@@ -282,13 +321,22 @@ class Library extends EventEmitter {
     this.save()
   }
 
-  /** @param {string[]} exclude folders to leave out */
-  async scan(folders, exclude = this.exclude) {
-    this.exclude = (exclude ?? []).map((x) => x.toLowerCase().replace(/[\\/]+$/, ''))
+  /**
+   * @param {string[]} exclude folders to leave out
+   * @param {{ skipFolders?: string[], skipTypes?: string[], minBytes?: number }} [options] the
+   *   user's skip lists: folders (and their subfolders), FILE_TYPES group keys, files under a size
+   */
+  async scan(folders, exclude = this.exclude, options = this.scanOptions) {
+    this.exclude = (exclude ?? []).map(normFolder)
+    this.scanOptions = options ?? {}
+    this.skip = normSkip(this.scanOptions)
+    this.scanFolders = folders
     if (this.scanning) {
       this.rescanQueued = true
       return
     }
+    const skip = this.skip
+    const walkExclude = [...this.exclude, ...skip.folders]
     this.scanning = true
     this.found = 0
     let lastStatus = 0
@@ -311,7 +359,8 @@ class Library extends EventEmitter {
             this.found++
             emitStatus(false)
           },
-          this.exclude,
+          walkExclude,
+          skip.exts,
         )
       }
       emitStatus(true)
@@ -319,7 +368,7 @@ class Library extends EventEmitter {
       // First run: publish results progressively so the grid fills in as we go.
       const progressive = this.items.size === 0
       let lastPublish = Date.now()
-      let changed = files.size !== this.items.size
+      let changed = false
       const next = new Map()
 
       await pool([...files], 16, async ([key, file]) => {
@@ -329,6 +378,7 @@ class Library extends EventEmitter {
         } catch {
           return
         }
+        if (st.size < skip.minBytes) return // "Skip tiny files" (stickers, icons, thumbnails)
         const prev = this.items.get(key)
         // (items cached by Lumen < 1.8 lack `taken`: read their metadata again once)
         if (prev && prev.size === st.size && prev.mtime === Math.round(st.mtimeMs) && prev.taken !== undefined) {
@@ -344,6 +394,7 @@ class Library extends EventEmitter {
         }
       })
 
+      if (!changed && next.size !== this.items.size) changed = true
       if (!changed) {
         for (const key of this.items.keys()) {
           if (!next.has(key)) {
@@ -362,20 +413,42 @@ class Library extends EventEmitter {
       emitStatus(true)
       if (this.rescanQueued) {
         this.rescanQueued = false
-        this.scan(folders, this.exclude)
+        // the latest request's folders and options (one may have been added mid-scan)
+        this.scan(this.scanFolders ?? folders, this.exclude, this.scanOptions)
       } else {
         this.emit('scanned')
       }
     }
   }
 
+  /** Would walk() (from library folder `root`, lower-cased) pick up this media file? */
+  wouldScan(full, root) {
+    const segments = path.relative(root, full.toLowerCase()).split(path.sep)
+    if (segments.some((s) => s.startsWith('.') || SKIP_DIRS.has(s))) return false
+    const dir = path.dirname(full)
+    // as in walk(): files directly in the library folder are never excluded
+    return normFolder(dir) === root || !isExcluded(dir, [...this.exclude, ...this.skip.folders])
+  }
+
+  /**
+   * Watches `folders` and calls `onChange` (debounced) when media may have changed. Also emits
+   * 'file' (fullPath, 'rename' | 'change') for every media file event that a scan would include
+   * (not a skipped type, not in an excluded or skipped folder); 'rename' = created, renamed or
+   * deleted. Used by watch-alerts to check newly appeared files.
+   */
   watch(folders, onChange) {
     for (const w of this.watchers) w.close()
     this.watchers = []
     for (const folder of folders) {
       try {
-        const watcher = fs.watch(folder, { recursive: true }, (_event, filename) => {
+        const root = normFolder(folder)
+        const watcher = fs.watch(folder, { recursive: true }, (event, filename) => {
           if (filename && extOf(filename) && !isMedia(filename)) return
+          if (filename && this.skip.exts.has(extOf(filename))) return // a skipped file type: nothing to rescan
+          if (filename && isMedia(filename)) {
+            const full = path.join(folder, filename)
+            if (this.wouldScan(full, root)) this.emit('file', full, event)
+          }
           clearTimeout(this.watchTimer)
           this.watchTimer = setTimeout(onChange, 1500)
         })
@@ -393,4 +466,4 @@ const MIME = {
   '3gp': 'video/3gpp', avi: 'video/x-msvideo', wmv: 'video/x-ms-wmv', mpg: 'video/mpeg', mpeg: 'video/mpeg',
 }
 
-module.exports = { Library, idOf, keyOf, extOf, MIME }
+module.exports = { Library, idOf, keyOf, extOf, isMedia, MIME, IMAGE_EXT, VIDEO_EXT, FILE_TYPES, skippedExtensions }

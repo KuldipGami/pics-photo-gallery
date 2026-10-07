@@ -3769,3 +3769,63 @@ html[data-platform='darwin'] .titlebar {
 .clean-pad {
   padding: 0 28px;
 }
+
+/* ---------- settings: skip lists & watching (from DupeLens) ---------- */
+.file-types {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 6px 20px;
+  margin-top: 10px;
+}
+.file-type {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+}
+.setting-row.disabled > div:first-child {
+  opacity: 0.5;
+}
+.switch:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.watch-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.watch-status .dot,
+.nav-watch .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex: none;
+}
+.watch-status .dot.on,
+.nav-watch .dot.on {
+  background: #2fb36b;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #2fb36b 22%, transparent);
+}
+.watch-log {
+  margin-top: 8px;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+  display: grid;
+  gap: 3px;
+}
+.nav-watch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-2);
+}

@@ -33,7 +33,8 @@ export function ruleMarks(group: DupGroup, rule: KeepRule, isProtected: (id: str
   return group.ids.filter((id, i) => i !== keep && !isProtected(id))
 }
 
-export const groupKey = (g: DupGroup) => g.ids.join('|')
+/** Identifies a group by its members (in any order). */
+export const groupKey = (g: DupGroup) => [...g.ids].sort().join('|')
 
 // ---------- group texts ----------
 

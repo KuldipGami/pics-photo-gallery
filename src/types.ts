@@ -56,6 +56,48 @@ export interface Settings {
   carryDates: boolean
   blurThreshold: number
   largeFileMB: number
+  /** Organize: where dated folders go (null = the first library folder). */
+  organizeRoot: string | null
+  folderPattern: string
+  organizeCopy: boolean
+  renamePattern: string
+  deviceNamesOnly: boolean
+  jpegQuality: number
+  moveOriginals: boolean
+  /** "<first library folder>HEIC originals" */
+  originalsDir: string
+  /** Background: watch library folders for new duplicates. */
+  watchFolders: boolean
+  minimizeToTray: boolean
+  /** Read from Windows, not stored. */
+  startWithWindows: boolean
+  contextMenu: boolean
+  /** Scans skip these folders, file type groups (FileType keys) and files under minFileKB. */
+  skippedFolders: string[]
+  skippedTypes: string[]
+  minFileKB: number
+  fileTypes: FileType[]
+  watchStatus: string
+  watchLog: string[]
+}
+
+export interface FileType {
+  key: string
+  label: string
+  extensions: string[]
+  video: boolean
+}
+
+export interface WatchAlert {
+  file: string
+  name: string
+  match: string
+  matchName: string
+  matchId?: string
+  kind: 'exact' | 'similar'
+  text: string
+  time: number
+  line: string
 }
 
 export interface Album {
@@ -286,6 +328,7 @@ export type View =
   | { kind: 'memories' }
   | { kind: 'trip'; id: string }
   | { kind: 'cleanup' }
+  | { kind: 'organize' }
   | { kind: 'history' }
   | { kind: 'settings' }
 

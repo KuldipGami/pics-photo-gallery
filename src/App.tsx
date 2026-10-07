@@ -27,12 +27,22 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { api } from './api'
+import { api, thumbUrl } from './api'
 import { AlbumNameDialog, AlbumPicker, AlbumsView, AlbumTitle } from './components/AlbumsView'
 import { CleanupView, type CleanupTab } from './components/CleanupView'
 import { CompareView, type CompareSource } from './components/CompareView'
 import { HistoryView, historyTitle } from './components/HistoryView'
 import { MemoriesView, MemoryStrip } from './components/MemoriesView'
+import {
+  findSideways,
+  organizeConfirm,
+  organizeDoneText,
+  OrganizeView,
+  ORGANIZE_DEFAULTS,
+  type OrganizeAction,
+  type OrganizeOptions,
+  type OrganizePlan,
+} from './components/OrganizeView'
 import { FoldersView, type FolderInfo } from './components/FoldersView'
 import { FaceAvatar } from './components/FaceAvatar'
 import { Gallery } from './components/Gallery'
@@ -82,6 +92,7 @@ const TITLES: Record<View['kind'], string> = {
   albums: 'Albums',
   album: '',
   cleanup: 'Clean up',
+  organize: 'Organize',
   history: 'History',
   memories: 'Memories',
   trip: '',
@@ -104,6 +115,7 @@ export default function App() {
     dupesProgress,
     smartProgress,
     history,
+    launch,
   } = useLibrary()
   const [view, setView] = useState<View>({ kind: 'photos' })
   const [query, setQuery] = useState('')
@@ -140,6 +152,10 @@ export default function App() {
   const [compare, setCompare] = useState<CompareSource | null>(null)
   /** Moves made in this session, newest last (Ctrl+Z undoes them). */
   const [sessionMoves, setSessionMoves] = useState<string[]>([])
+  // ---------- organize (DupeLens) ----------
+  const [organizePlan, setOrganizePlan] = useState<OrganizePlan | null>(null)
+  const [organizeBusy, setOrganizeBusy] = useState(false)
+  const [organizeProgress, setOrganizeProgress] = useState<{ done: number; total: number } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const selectAnchor = useRef<number | null>(null)
   const internalDrag = useRef(false)
@@ -558,6 +574,110 @@ export default function App() {
     api.setSettings({ protectedFolders: [...settings.protectedFolders, dir] })
     toast(`Files in “${baseName(dir)}” will always be kept`)
   }
+  // Lumen moved or renamed files (Organize, History): selections and ruled groups follow them.
+  useEffect(
+    () =>
+      api.onRelocated((pairs) => {
+        const map = new Map(pairs)
+        const follow = (prev: Set<string>) => (pairs.some(([from]) => prev.has(from)) ? new Set([...prev].map((id) => map.get(id) ?? id)) : prev)
+        setMarks(follow)
+        setSelection(follow)
+        ruled.current = new Set(
+          [...ruled.current].map((key) =>
+            key
+              .split('|')
+              .map((id) => map.get(id) ?? id)
+              .sort()
+              .join('|'),
+          ),
+        )
+      }),
+    [],
+  )
+  // Organize: the plan follows the library, the choices and the Clean up selection.
+  useEffect(() => api.onOrganizeProgress(setOrganizeProgress), [])
+  useEffect(() => {
+    if (view.kind !== 'organize') return
+    let live = true
+    const t = setTimeout(() => {
+      api.organizePlan([...marks]).then((p) => live && setOrganizePlan(p))
+    }, 250)
+    return () => {
+      live = false
+      clearTimeout(t)
+    }
+  }, [view.kind, items, settings, marks])
+  const organizeOptions: OrganizeOptions = settings
+    ? {
+        folderPattern: settings.folderPattern,
+        copy: settings.organizeCopy,
+        renamePattern: settings.renamePattern,
+        deviceNamesOnly: settings.deviceNamesOnly,
+        jpegQuality: settings.jpegQuality,
+        moveOriginals: settings.moveOriginals,
+      }
+    : ORGANIZE_DEFAULTS
+  const sideways = useMemo(
+    () => (view.kind === 'organize' ? findSideways(dupes.groups, byId, marks) : []),
+    [view.kind, dupes.groups, byId, marks],
+  )
+  const organizeRun = (action: OrganizeAction, run: () => Promise<{ done: number; errors: string[] }>, turnCount?: number) => {
+    if (!organizePlan || !settings || organizeBusy) return
+    const c = organizeConfirm(action, organizePlan, organizeOptions, { turnCount, originalsDir: settings.originalsDir })
+    const go = async () => {
+      setOrganizeBusy(true)
+      try {
+        const res = await run()
+        const t = organizeDoneText(action, res.done, res.errors, settings.organizeCopy)
+        const undoable = res.done > 0 && !(action === 'folders' && settings.organizeCopy)
+        toast(t.text, { error: t.error, action: undoable ? { label: 'History', run: () => navigate({ kind: 'history' }) } : undefined })
+      } catch (err) {
+        toast(`Something went wrong: ${String((err as Error)?.message ?? err)}`, { error: true })
+      } finally {
+        setOrganizeBusy(false)
+        setOrganizeProgress(null)
+      }
+    }
+    // turning a single photo from its own row needs no extra question
+    if (action === 'turn' && (turnCount ?? 0) <= 1) return void go()
+    setConfirm({
+      title: c.title,
+      message: c.message,
+      confirmLabel: c.confirmLabel,
+      extra: c.destination ? (
+        <div className="confirm-dest">
+          <FolderOpen size={16} />
+          <span title={c.destination}>{c.destination}</span>
+        </div>
+      ) : undefined,
+      onConfirm: go,
+    })
+  }
+  const turnSideways = (ids: string[]) => {
+    const rows = sideways.filter((r) => ids.includes(r.item.id))
+    if (!rows.length) return
+    organizeRun(
+      'turn',
+      async () => {
+        let done = 0
+        const errors: string[] = []
+        for (const turns of [1, 2, 3]) {
+          const group = rows.filter((r) => r.turns === turns).map((r) => r.item.id)
+          if (!group.length) continue
+          const res = await api.rotateLossless(group, turns)
+          done += res.done
+          errors.push(...res.errors)
+        }
+        return { done, errors }
+      },
+      rows.length,
+    )
+  }
+  const setOrganizeOptions = (patch: Partial<OrganizeOptions>) => {
+    const { copy, ...rest } = patch
+    api.setSettings({ ...rest, ...(copy !== undefined ? { organizeCopy: copy } : {}) })
+  }
+
   const exportReport = async () => {
     const facts = dupes.facts as Facts
     const { html, csv } = buildReports({
@@ -638,8 +758,9 @@ export default function App() {
   const navigate = (next: View) => {
     setView(next)
     setFocus(null) // "scroll back to the photo you were viewing" is for the page you were on
+    setOpeningFolder(null)
 
-    if (['settings', 'folders', 'people', 'person', 'places', 'albums', 'cleanup', 'history', 'memories'].includes(next.kind)) setTypeFilter('all')
+    if (['settings', 'folders', 'people', 'person', 'places', 'albums', 'cleanup', 'organize', 'history', 'memories'].includes(next.kind)) setTypeFilter('all')
   }
 
   // ---------- albums ----------
@@ -893,6 +1014,37 @@ export default function App() {
   }
 
   // Native context-menu actions that need the renderer.
+  // Opened for a folder ("Scan with Lumen", command line): show it once its files are in.
+  const [openingFolder, setOpeningFolder] = useState<string | null>(null)
+  const openFolder = useEvent((dir: string) => {
+    navigate({ kind: 'folders' })
+    setOpeningFolder(dir)
+  })
+  useEffect(() => {
+    if (!openingFolder) return
+    const inside = items.filter((it) => isUnder(it.path, openingFolder))
+    if (!inside.length) return
+    const norm = (p: string) => p.toLowerCase().replace(/[\/]+$/, '')
+    const own = inside.find((it) => norm(it.dir) === norm(openingFolder))
+    navigate(own ? { kind: 'folder', dir: own.dir } : { kind: 'folders' })
+  }, [openingFolder, items])
+  const showDuplicates = useEvent(() => {
+    setCleanupTab('duplicates')
+    navigate({ kind: 'cleanup' })
+  })
+  useEffect(() => {
+    if (launch?.folder) openFolder(launch.folder)
+    if (launch?.duplicates) showDuplicates()
+  }, [launch])
+  useEffect(() => {
+    const offs = [
+      api.onOpenFolder(openFolder),
+      api.onShowDuplicates(showDuplicates),
+      api.onWatchAlert(({ alert }) => toast(`New duplicate: ${alert.text}`, { action: { label: 'Review', run: showDuplicates } })),
+    ]
+    return () => offs.forEach((off) => off())
+  }, [])
+
   const onMenuAction = useEvent(({ action, id, ids }: { action: 'open' | 'delete' | 'album'; id: string; ids: string[] }) => {
     if (action === 'open') {
       const index = visible.findIndex((it) => it.id === id)
@@ -1004,6 +1156,8 @@ export default function App() {
     subtitle = `${formatCount(albums.length)} album${albums.length === 1 ? '' : 's'}`
   } else if (view.kind === 'cleanup') {
     subtitle = 'Duplicates, blurry photos, screenshots and large files · nothing is removed without your confirmation'
+  } else if (view.kind === 'organize') {
+    subtitle = 'Fix dates, sort into dated folders, rename and convert · nothing changes without your confirmation'
   } else if (view.kind === 'history') {
     subtitle = 'Every change Lumen has made to your files'
   } else if (view.kind === 'memories') {
@@ -1507,6 +1661,26 @@ export default function App() {
         }}
       />
     )
+  } else if (view.kind === 'organize') {
+    body = (
+      <OrganizeView
+        plan={organizePlan}
+        options={organizeOptions}
+        sideways={sideways}
+        thumb={(it) => thumbUrl(it)}
+        busy={organizeBusy}
+        converting={organizeProgress}
+        originalsDir={settings?.originalsDir}
+        onFixDates={() => organizeRun('dates', () => api.runOrganize('dates', [...marks]))}
+        onOrganize={() => organizeRun('folders', () => api.runOrganize('folders', [...marks]))}
+        onRename={() => organizeRun('rename', () => api.runOrganize('rename', [...marks]))}
+        onConvert={() => organizeRun('convert', () => api.runOrganize('convert', [...marks]))}
+        onTurn={turnSideways}
+        onChangeRoot={() => api.pickOrganizeRoot()}
+        onOptions={setOrganizeOptions}
+        onOpen={(it) => setViewer({ ids: [it.id], index: 0 })}
+      />
+    )
   } else if (view.kind === 'history') {
     body = (
       <HistoryView
@@ -1610,7 +1784,7 @@ export default function App() {
         query={query}
         onQuery={(q) => {
           setQuery(q)
-          if (view.kind === 'settings' || view.kind === 'history') setView({ kind: 'photos' })
+          if (view.kind === 'settings' || view.kind === 'history' || view.kind === 'organize') setView({ kind: 'photos' })
         }}
         placeholder={
           view.kind === 'folders'
@@ -1637,6 +1811,7 @@ export default function App() {
         albums={albums}
         byId={byId}
         duplicateBytes={duplicateBytes}
+        watchStatus={settings?.watchStatus}
         status={status}
         thumbProgress={thumbProgress}
         peopleProgress={peopleProgress}

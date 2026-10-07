@@ -22,7 +22,7 @@ const trace = process.env.LUMEN_TRACE
 trace(`start v${app.getVersion()}`)
 
 const { Store } = require('./store.cjs')
-const { Library, idOf, keyOf } = require('./library.cjs')
+const { Library, idOf, keyOf, extOf, FILE_TYPES } = require('./library.cjs')
 const { Thumbnails } = require('./thumbs.cjs')
 const { FaceIndex } = require('./faces.cjs')
 const { Albums } = require('./albums.cjs')
@@ -34,9 +34,15 @@ const { History } = require('./history.cjs')
 const cleanup = require('./cleanup.cjs')
 const edits = require('./edits.cjs')
 const { isJpeg } = require('./jpeg-exif.cjs')
+const organize = require('./organize.cjs')
+const bgx = require('./background.cjs')
+const { WatchAlerts } = require('./watch-alerts.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
 
 registerScheme()
+
+// "Scan with Lumen" (folder right-click), --folder <dir>, --autoscan, --tray (started with Windows)
+const launchArgs = bgx.parseArgs(process.argv)
 
 // ---------- single instance (with hand-over to newer versions) ----------
 
@@ -132,6 +138,20 @@ const store = new Store(path.join(userData, 'settings.json'), {
   carryDates: true,
   blurThreshold: 30,
   largeFileMB: 10,
+  // Organize (from DupeLens)
+  organizeRoot: null,
+  folderPattern: organize.DEFAULTS.folderPattern,
+  organizeCopy: false,
+  renamePattern: organize.DEFAULTS.renamePattern,
+  deviceNamesOnly: true,
+  jpegQuality: 92,
+  moveOriginals: true,
+  // Background (from DupeLens)
+  watchFolders: false,
+  minimizeToTray: false,
+  skippedFolders: [],
+  skippedTypes: [],
+  minFileKB: 0,
   window: { width: 1360, height: 860 },
 })
 
@@ -162,6 +182,14 @@ let placesData = { places: [], byItem: {} }
 let editor
 /** @type {History} */
 let history
+/** @type {WatchAlerts} */
+let alerts
+/** @type {import('./background.cjs').Background} */
+let background
+/** "Scan with Lumen" is in the folder right-click menu (read from Windows at startup). */
+let contextMenuOn = false
+// Folder events that came in while Lumen was moving files itself (replayed afterwards).
+const heldFileEvents = []
 
 const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, 'models') : path.join(__dirname, '..', 'models')
 
@@ -230,7 +258,98 @@ function startServices() {
   dupes.on('changed', () => send('dupes:changed', dupes.snapshot()))
   dupes.on('progress', (progress) => send('dupes:progress', progress))
   albums.on('changed', () => send('albums:changed', albums.snapshot()))
+
+  // HEIC / RAW: sharp can't read them, so new ones are compared through their preview.
+  const NON_SHARP = new Set(['heic', 'heif', 'dng', 'cr2', 'cr3', 'nef', 'arw', 'orf', 'rw2', 'bmp', 'ico'])
+  alerts = new WatchAlerts({
+    items: () => library.list,
+    records: () => dupes.records,
+    sensitivity: () => store.get('dupeSensitivity'),
+    findCrops: () => store.get('findCrops') !== false,
+    exclude: () => [...excludedFolders(), ...store.get('skippedFolders')],
+    skipTypes: () => store.get('skippedTypes'),
+    minBytes: () => store.get('minFileKB') * 1024,
+    decode: async (file, ext) =>
+      NON_SHARP.has(ext)
+        ? thumbs.ensure({ id: idOf(file), path: file, name: path.basename(file), ext, type: 'image', mtime: Math.round((await fs.promises.stat(file)).mtimeMs) })
+        : null,
+  })
+  library.on('file', (file, event) => {
+    if (scanHolds) heldFileEvents.push([file, event])
+    else alerts.queue(file, event)
+  })
+  background = new bgx.Background({ icon: ICON })
+  alerts.on('status', (status) => {
+    if (status.watching) background.showTray()
+    else background.hideTray()
+    send('watch:status', status)
+    send('settings:changed', settingsPayload())
+  })
+  alerts.on('alert', (alert) => {
+    send('watch:alert', { alert, log: alerts.log.map((a) => a.line) })
+    send('settings:changed', settingsPayload())
+    notify(bgx.TEXTS.newDuplicateTitle, alert.text, () => {
+      showDuplicates()
+      showWindow()
+    })
+  })
+  background.on('open', showWindow)
+  background.on('stop-watching', () => {
+    store.set({ watchFolders: false })
+    alerts.stop()
+    send('settings:changed', settingsPayload())
+    if (!win?.isVisible()) showWindow() // never leave an invisible app behind
+  })
+  background.on('exit', () => app.quit())
 }
+
+/** Starts or stops watching for new duplicates to match the setting and the library folders. */
+function updateWatching() {
+  if (!alerts) return
+  if (store.get('watchFolders')) alerts.start(store.get('folders'))
+  else alerts.stop()
+}
+
+/** A Windows notification (LUMEN_NO_NOTIFY=1 keeps automated tests off the desktop). */
+const notify = (title, body, onClick) => {
+  if (process.env.LUMEN_NO_NOTIFY !== '1') background?.notify(title, body, onClick)
+}
+
+/** Files Lumen itself just wrote, moved or put back: they are not new duplicates. */
+const ownFiles = (files) => alerts?.ignore(files.filter(Boolean))
+
+function showWindow() {
+  if (quitting) return
+  if (!win) {
+    if (library) createWindow()
+    return
+  }
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+/** Lumen was asked to open a folder: add it to the library unless it's already in it, then show it. */
+async function openFolder(dir) {
+  try {
+    if (!fs.statSync(dir).isDirectory()) return
+  } catch {
+    return
+  }
+  const inLibrary = store.get('folders').some((f) => keyOf(f) === keyOf(dir) || keyOf(dir).startsWith(keyOf(f) + path.sep))
+  if (!inLibrary) await addFolders([dir])
+  launchRequest = { ...launchRequest, folder: dir }
+  send('app:open-folder', dir)
+}
+
+/** Show Clean up (after --autoscan or a duplicate notification). */
+function showDuplicates() {
+  launchRequest = { ...launchRequest, duplicates: true }
+  send('app:show-duplicates')
+}
+
+// What a window that is still loading should show first (taken by its first app:state).
+let launchRequest = null
 
 /** @type {BrowserWindow | null} */
 let win = null
@@ -257,6 +376,24 @@ const settingsPayload = () => ({
   carryDates: store.get('carryDates') !== false,
   blurThreshold: store.get('blurThreshold'),
   largeFileMB: store.get('largeFileMB'),
+  organizeRoot: store.get('organizeRoot'),
+  folderPattern: store.get('folderPattern'),
+  organizeCopy: !!store.get('organizeCopy'),
+  renamePattern: store.get('renamePattern'),
+  deviceNamesOnly: store.get('deviceNamesOnly') !== false,
+  jpegQuality: store.get('jpegQuality'),
+  moveOriginals: store.get('moveOriginals') !== false,
+  originalsDir: originalsDir(),
+  watchFolders: !!store.get('watchFolders'),
+  minimizeToTray: !!store.get('minimizeToTray'),
+  startWithWindows: startsWithWindows(),
+  contextMenu: contextMenuOn,
+  skippedFolders: store.get('skippedFolders'),
+  skippedTypes: store.get('skippedTypes'),
+  minFileKB: store.get('minFileKB'),
+  fileTypes: FILE_TYPES,
+  watchStatus: alerts?.statusText ?? '',
+  watchLog: alerts ? alerts.log.map((a) => a.line) : [],
 })
 
 let viewerOpen = false
@@ -298,8 +435,48 @@ function configureDupes() {
   })
 }
 
+// While Lumen itself moves or renames files, scans wait: a scan halfway through would drop the
+// moved files' faces, fingerprints and previews before relocate() can carry them over.
+let scanHolds = 0
+let scanWanted = false
 function scan() {
-  library.scan(store.get('folders'), excludedFolders())
+  if (scanHolds) {
+    scanWanted = true
+    return
+  }
+  library.scan(store.get('folders'), excludedFolders(), scanOptions())
+}
+
+function scanOptions() {
+  return {
+    skipFolders: store.get('skippedFolders'),
+    skipTypes: store.get('skippedTypes'),
+    minBytes: store.get('minFileKB') * 1024,
+  }
+}
+
+function startsWithWindows() {
+  try {
+    return bgx.isStartWithWindows()
+  } catch {
+    return false
+  }
+}
+
+/** Runs `task` with scans on hold (after any scan already running), then scans once. */
+async function withScansHeld(task) {
+  scanHolds++
+  try {
+    for (let i = 0; library.scanning && i < 600; i++) await new Promise((r) => setTimeout(r, 100))
+    return await task()
+  } finally {
+    if (--scanHolds === 0) {
+      scanWanted = false
+      scan()
+      // new files that arrived meanwhile still get checked (Lumen's own are ignored by now)
+      for (const [file, event] of heldFileEvents.splice(0)) alerts?.queue(file, event)
+    }
+  }
 }
 
 function watchFolders() {
@@ -341,10 +518,16 @@ function createWindow() {
     servicesReady.then(() => thumbs.warmUp(library.list))
   })
 
-  win.on('close', () => {
+  win.on('close', (e) => {
     trace('window close')
     store.set({ window: { ...win.getNormalBounds(), maximized: win.isMaximized() } })
     store.saveNow()
+    // "Keep watching in the notification area when closed"
+    if (!quitting && store.get('watchFolders') && store.get('minimizeToTray') && alerts?.watching) {
+      e.preventDefault()
+      win.hide()
+      notify(bgx.TEXTS.stillWatchingTitle, bgx.TEXTS.stillWatchingBody)
+    }
   })
   win.on('closed', () => {
     trace('window closed')
@@ -411,6 +594,7 @@ async function addFolders(paths) {
   configureDupes()
   send('settings:changed', settingsPayload())
   watchFolders()
+  updateWatching()
   scan()
   return settingsPayload()
 }
@@ -437,7 +621,13 @@ const appState = () => ({
   dupesProgress: dupes.progressInfo(),
   smartProgress: smart.progressInfo(),
   version: app.getVersion(),
+  launch: takeLaunchRequest(),
 })
+function takeLaunchRequest() {
+  const req = launchRequest
+  launchRequest = null
+  return req
+}
 
 let gpuInfo = null
 ipcMain.handle('app:gpu', async () => {
@@ -542,6 +732,7 @@ ipcMain.handle('edit:save', async (_e, id, recipe) => {
   if (!item || item.type !== 'image') return { error: 'Only photos can be edited' }
   try {
     const file = await editor.save(item, recipe)
+    ownFiles([file])
     scan() // pick the new copy up right away (the folder watcher would too, a moment later)
     return { id: idOf(file), name: path.basename(file) }
   } catch (err) {
@@ -560,6 +751,7 @@ const backupsDir = () => path.join(userData, 'backups')
  * vector, and read it again.
  */
 async function refreshEdited(paths) {
+  ownFiles(paths)
   for (const p of paths) {
     const it = library.items.get(keyOf(p))
     if (!it) continue
@@ -574,6 +766,204 @@ async function refreshEdited(paths) {
     library.items.delete(keyOf(p)) // re-read on the next scan
   }
   scan()
+}
+
+/**
+ * Files Lumen moved or renamed inside the library: an item's id is a hash of its path, so carry
+ * everything known about it (library entry, preview, fingerprint, faces, search vector, favorite,
+ * albums) over to the new path instead of analysing it again. `pairs`: [{ from, to }].
+ */
+async function relocate(pairs) {
+  const ids = new Map()
+  const paths = new Map()
+  const items = new Map(library.items)
+  const favs = new Map(store.get('favorites').map((p) => [keyOf(p), p]))
+  let favChanged = false
+  for (const { from, to } of pairs) {
+    if (!from || !to || keyOf(from) === keyOf(to)) continue
+    const it = items.get(keyOf(from))
+    const oldId = idOf(from)
+    const newId = idOf(to)
+    ids.set(oldId, newId)
+    paths.set(keyOf(from), to)
+    if (it) {
+      items.delete(keyOf(from))
+      items.set(keyOf(to), { ...it, id: newId, path: to, name: path.basename(to), dir: path.dirname(to), ext: extOf(to) })
+      for (const kind of ['thumb', 'preview']) {
+        const before = thumbs.name(it, kind)
+        if (!thumbs.cached.has(before)) continue
+        const after = before.replace(oldId, newId)
+        try {
+          await fs.promises.rename(path.join(thumbs.dir, before), path.join(thumbs.dir, after))
+          thumbs.cached.delete(before)
+          thumbs.cached.add(after)
+        } catch {}
+      }
+    }
+    for (const map of [dupes.records, smart.vectors]) {
+      if (map.has(oldId)) {
+        map.set(newId, map.get(oldId))
+        map.delete(oldId)
+      }
+    }
+    if (favs.has(keyOf(from))) {
+      favs.delete(keyOf(from))
+      favs.set(keyOf(to), to)
+      favChanged = true
+    }
+  }
+  if (!ids.size) return
+  send('items:relocated', [...ids])
+  library.setItems(items)
+  library.emit('changed')
+  library.save()
+  faces.remapIds(ids)
+  albums.remapPaths(paths)
+  dupes.saveSoon(2000)
+  smart.saveSoon(2000)
+  if (favChanged) {
+    store.set({ favorites: [...favs.values()] })
+    send('settings:changed', settingsPayload())
+  }
+}
+
+/** A file's date changed but its picture didn't (date fixes): keep its preview and analysis. */
+async function retime(changes) {
+  const items = new Map(library.items)
+  const faceChanges = []
+  for (const { path: file, mtime } of changes) {
+    const it = items.get(keyOf(file))
+    if (!it || !Number.isFinite(mtime)) continue
+    const next = { ...it, mtime: Math.round(mtime) }
+    if (!it.taken) next.date = Math.min(next.mtime, it.added)
+    items.set(keyOf(file), next)
+    for (const kind of ['thumb', 'preview']) {
+      const before = thumbs.name(it, kind)
+      if (!thumbs.cached.has(before)) continue
+      const after = thumbs.name(next, kind)
+      try {
+        await fs.promises.rename(path.join(thumbs.dir, before), path.join(thumbs.dir, after))
+        thumbs.cached.delete(before)
+        thumbs.cached.add(after)
+      } catch {}
+    }
+    for (const r of [dupes.records.get(it.id), smart.vectors.get(it.id)]) if (r) r.m = next.mtime
+    faceChanges.push({ id: it.id, mtime: next.mtime })
+  }
+  library.setItems(items)
+  library.emit('changed')
+  library.save()
+  faces.retime(faceChanges)
+}
+
+// ---------- organize (from DupeLens) ----------
+
+const organizeOptions = () => ({
+  root: store.get('organizeRoot') || store.get('folders')[0] || null,
+  roots: store.get('folders'),
+  folderPattern: store.get('folderPattern'),
+  renamePattern: store.get('renamePattern'),
+  deviceNamesOnly: store.get('deviceNamesOnly') !== false,
+  copy: !!store.get('organizeCopy'),
+  quality: store.get('jpegQuality'),
+  moveOriginals: store.get('moveOriginals') !== false,
+})
+function originalsDir() {
+  return path.join(store.get('folders')[0] ?? app.getPath('pictures'), organize.HEIC_ORIGINALS)
+}
+
+ipcMain.handle('organize:plan', (_e, skip) => {
+  const o = organizeOptions()
+  return organize.summarize(library.list, { ...o, skip: new Set(idList(skip)) })
+})
+ipcMain.handle('organize:pick-root', async () => {
+  const res = await dialog.showOpenDialog(win, { title: 'Where should the dated folders go?', properties: ['openDirectory', 'createDirectory'] })
+  if (res.canceled || !res.filePaths[0]) return null
+  store.set({ organizeRoot: res.filePaths[0] })
+  send('settings:changed', settingsPayload())
+  return res.filePaths[0]
+})
+
+/** Stats files after their dates changed (for retime). */
+async function newTimes(files) {
+  const out = []
+  for (const file of files) {
+    try {
+      out.push({ path: file, mtime: (await fs.promises.stat(file)).mtimeMs })
+    } catch {}
+  }
+  return out
+}
+
+/** A converted HEIC whose original went aside: its favorite, albums, faces… follow the JPG. */
+const convertedPairs = (entry) => {
+  const jpgOf = new Map(entry.files.map((f) => [keyOf(f.from), f.to]))
+  return (entry.movedOriginals ?? []).map((m) => ({ from: m.from, to: jpgOf.get(keyOf(m.from)) })).filter((p) => p.to)
+}
+
+let organizing = false
+ipcMain.handle('organize:run', async (_e, action, skip) => {
+  if (organizing) return { done: 0, errors: ['Another change is still running.'] }
+  organizing = true
+  try {
+    return await withScansHeld(() => runOrganize(action, new Set(idList(skip))))
+  } catch (err) {
+    return { done: 0, errors: [String(err?.message ?? err)] }
+  } finally {
+    organizing = false
+    send('organize:progress', null)
+  }
+})
+
+async function runOrganize(action, skipped) {
+  const o = organizeOptions()
+  const kept = library.list.filter((it) => !skipped.has(it.id))
+  if (action === 'dates') {
+    const files = await organize.applyDateFixes(organize.findDateFixes(library.list))
+    if (files.length) {
+      history.add({ kind: 'dates', files })
+      await retime(await newTimes(files.map((f) => f.from)))
+    }
+    return { done: files.length, errors: [] }
+  }
+  if (action === 'folders') {
+    if (!o.root) return { done: 0, errors: ['Choose where the dated folders go first.'] }
+    const plan = organize.planFolders(organize.organizeSource(kept, o.root, o.roots), o.root, o.folderPattern)
+    send('organize:progress', { done: 0, total: plan.length })
+    const res = await organize.executePlan(plan, { copy: o.copy })
+    ownFiles(res.files.map((f) => f.to))
+    if (res.files.length) {
+      history.add({ kind: o.copy ? 'copied' : 'moved', destination: o.root, files: res.files.map(({ id, ...f }) => f) })
+      if (!o.copy) await relocate(res.files)
+    }
+    return { done: res.files.length, errors: res.errors }
+  }
+  if (action === 'rename') {
+    const plan = organize.planRenames(kept, o.renamePattern, o.deviceNamesOnly)
+    send('organize:progress', { done: 0, total: plan.length })
+    const res = await organize.executePlan(plan)
+    ownFiles(res.files.map((f) => f.to))
+    if (res.files.length) {
+      history.add({ kind: 'renamed', files: res.files.map(({ id, ...f }) => f) })
+      await relocate(res.files)
+    }
+    return { done: res.files.length, errors: res.errors }
+  }
+  if (action === 'convert') {
+    const res = await organize.convertHeicFiles(kept.filter(organize.isHeic), (it) => thumbs.source(it), {
+      quality: o.quality,
+      originalsDir: o.moveOriginals ? originalsDir() : null,
+      roots: o.roots,
+      onProgress: (done, total) => send('organize:progress', { done, total }),
+    })
+    ownFiles(res.files.map((f) => f.to))
+    if (res.entry) {
+      history.add(res.entry)
+      await relocate(convertedPairs(res.entry))
+    }
+    return { done: res.files.length, errors: res.errors }
+  }
+  return { done: 0, errors: ['Unknown action'] }
 }
 
 /** Turns JPEGs by quarter turns (orientation tag only). Resolves { done, errors }. */
@@ -626,6 +1016,7 @@ ipcMain.handle('folders:remove', (_e, folder) => {
   configureDupes()
   send('settings:changed', settingsPayload())
   watchFolders()
+  updateWatching()
   scan()
   return settingsPayload()
 })
@@ -652,11 +1043,54 @@ ipcMain.handle('settings:set', (_e, patch) => {
   if (typeof patch.carryDates === 'boolean') allowed.carryDates = patch.carryDates
   if (Number.isFinite(patch.blurThreshold)) allowed.blurThreshold = Math.min(80, Math.max(5, Math.round(patch.blurThreshold)))
   if (Number.isFinite(patch.largeFileMB)) allowed.largeFileMB = Math.min(500, Math.max(5, Math.round(patch.largeFileMB)))
+  if (organize.FOLDER_PATTERNS.some((p) => p.value === patch.folderPattern)) allowed.folderPattern = patch.folderPattern
+  if (organize.NAME_PATTERNS.some((p) => p.value === patch.renamePattern)) allowed.renamePattern = patch.renamePattern
+  if (typeof patch.organizeCopy === 'boolean') allowed.organizeCopy = patch.organizeCopy
+  if (typeof patch.deviceNamesOnly === 'boolean') allowed.deviceNamesOnly = patch.deviceNamesOnly
+  if (typeof patch.moveOriginals === 'boolean') allowed.moveOriginals = patch.moveOriginals
+  if (Number.isFinite(patch.jpegQuality)) allowed.jpegQuality = Math.min(100, Math.max(70, Math.round(patch.jpegQuality)))
+  if (patch.organizeRoot === null) allowed.organizeRoot = null
+  if (typeof patch.watchFolders === 'boolean') allowed.watchFolders = patch.watchFolders
+  if (typeof patch.minimizeToTray === 'boolean') allowed.minimizeToTray = patch.minimizeToTray
+  if (Array.isArray(patch.skippedFolders)) {
+    const seen = new Set()
+    allowed.skippedFolders = patch.skippedFolders.filter((p) => {
+      if (typeof p !== 'string' || !path.isAbsolute(p) || !fs.existsSync(p) || seen.has(keyOf(p))) return false
+      seen.add(keyOf(p))
+      return true
+    })
+  }
+  if (Array.isArray(patch.skippedTypes)) allowed.skippedTypes = patch.skippedTypes.filter((k) => FILE_TYPES.some((t) => t.key === k))
+  if (Number.isFinite(patch.minFileKB)) allowed.minFileKB = Math.min(500, Math.max(0, Math.round(patch.minFileKB / 10) * 10))
   store.set(allowed)
+  if ('watchFolders' in allowed) updateWatching()
+  if ('skippedFolders' in allowed || 'skippedTypes' in allowed || 'minFileKB' in allowed) scan()
   if ('dupeSensitivity' in allowed || 'findCrops' in allowed) configureDupes()
   if ('moveDestination' in allowed) scan()
   if (allowed.theme) applyTheme()
   send('settings:changed', settingsPayload())
+})
+
+ipcMain.handle('system:context-menu', async (_e, on) => {
+  try {
+    await bgx.setContextMenu(!!on)
+    contextMenuOn = await bgx.isContextMenuEnabled()
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: String(err?.message ?? err) }
+  } finally {
+    send('settings:changed', settingsPayload())
+  }
+})
+ipcMain.handle('system:startup', (_e, on) => {
+  try {
+    bgx.startWithWindows(!!on)
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: String(err?.message ?? err) }
+  } finally {
+    send('settings:changed', settingsPayload())
+  }
 })
 
 ipcMain.handle('favorites:set', (_e, ids, value) => setFavorites(ids, !!value))
@@ -682,6 +1116,7 @@ async function removeItems(ids, how, dest) {
   const removing = new Set(items.map((it) => it.id))
   const byId = new Map(library.list.map((it) => [it.id, it]))
   const dateChanges = store.get('carryDates') !== false ? await cleanup.carryDates(dupes.groupsOf([...removing]), removing, byId) : []
+  if (dateChanges.length) await retime(await newTimes(dateChanges.map((c) => c.path)))
   const destination = how === 'move' ? dest || moveDestination() : undefined
   const res = how === 'move' ? await cleanup.moveTo(items, destination) : await cleanup.recycle(items)
   let entry = null
@@ -731,18 +1166,35 @@ ipcMain.handle('history:restore', async (_e, id) => {
     const done = await edits.restoreBackups(entry.files)
     restored = done.length
     if (restored) await refreshEdited(done.map((f) => f.from))
-  } else if (entry.kind === 'moved' || entry.kind === 'renamed') {
-    restored = await cleanup.restoreMoves(entry.files)
-    await cleanup.restoreDates(entry.dateChanges)
-  } else if (entry.kind === 'dates') {
-    for (const f of entry.files) {
-      if (f.restored || !Number.isFinite(f.oldMtime)) continue
-      try {
-        await cleanup.setFileDate(f.from, f.oldMtime)
-        f.restored = true
-        restored++
-      } catch {}
-    }
+  } else if (['moved', 'renamed', 'converted', 'dates'].includes(entry.kind)) {
+    await withScansHeld(async () => {
+      if (entry.kind === 'moved' || entry.kind === 'renamed') {
+        const pending = entry.files.filter((f) => !f.restored)
+        ownFiles(pending.map((f) => f.from))
+        restored = await cleanup.restoreMoves(entry.files)
+        await relocate(pending.filter((f) => f.restored).map((f) => ({ from: f.to, to: f.from })))
+        const dated = (entry.dateChanges ?? []).filter((c) => !c.restored)
+        if (await cleanup.restoreDates(entry.dateChanges)) await retime(await newTimes(dated.filter((c) => c.restored).map((c) => c.path)))
+      } else if (entry.kind === 'converted') {
+        const pending = entry.files.filter((f) => !f.restored)
+        ownFiles((entry.movedOriginals ?? []).map((m) => m.from))
+        restored = await organize.undoConversion(entry, (p) => shell.trashItem(p))
+        const back = convertedPairs({ ...entry, files: pending.filter((f) => f.restored) })
+        await relocate(back.map((p) => ({ from: p.to, to: p.from })))
+      } else {
+        const done = []
+        for (const f of entry.files) {
+          if (f.restored || !Number.isFinite(f.oldMtime)) continue
+          try {
+            await cleanup.setFileDate(f.from, f.oldMtime)
+            f.restored = true
+            done.push(f.from)
+            restored++
+          } catch {}
+        }
+        await retime(await newTimes(done))
+      }
+    })
   }
   history.changed(entry)
   if (restored) scan()
@@ -871,21 +1323,24 @@ nativeTheme.on('updated', () => {
   if (win && !IS_MAC) win.setTitleBarOverlay(overlay())
 })
 
-app.on('second-instance', (_event, _argv, _cwd, data) => {
+app.on('second-instance', (_event, argv, cwd, data) => {
   trace(`second launch (v${data?.version}) · window ${win ? 'open' : 'none'}`)
   if (data?.version && isNewer(data.version, VERSION)) {
     // A newer Lumen was just launched: close so it can take over.
     app.quit()
     return
   }
-  // No window (e.g. still starting, or closed while background work finished): open one.
-  if (!win) {
-    if (!quitting && library) createWindow()
-    return
+  const args = bgx.parseArgs(argv, { cwd })
+  if (args.tray && !args.folder) return // started with Windows again: already running
+  // No window (e.g. still starting, or hidden in the notification area): open one.
+  showWindow()
+  if (args.folder) servicesReady.then(() => openFolder(args.folder))
+  if (args.autoscan) {
+    servicesReady.then(() => {
+      scan()
+      showDuplicates()
+    })
   }
-  if (win.isMinimized()) win.restore()
-  win.show()
-  win.focus()
 })
 
 app.whenReady().then(async () => {
@@ -897,10 +1352,21 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
   startServices()
   handleProtocol({ library, thumbs })
-  // Show the window right away; the saved library, faces, albums… load meanwhile (~0.5 s).
-  createWindow()
+  // Started with Windows to keep watching: stay in the notification area until opened.
+  const startHidden = launchArgs.tray && !launchArgs.folder && !!store.get('watchFolders')
+  // Otherwise show the window right away; the saved library, faces, albums… load meanwhile (~0.5 s).
+  if (!startHidden) createWindow()
+  bgx.isContextMenuEnabled().then(
+    (on) => {
+      contextMenuOn = on
+      if (on && app.isPackaged) bgx.refreshContextMenu().catch(() => {}) // follow an updated install
+    },
+    () => {},
+  )
   await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), history.load()])
   placesData = places.group(library.list)
+  if (launchArgs.folder) await openFolder(launchArgs.folder)
+  if (launchArgs.autoscan) showDuplicates()
   markServicesReady()
   trace(`data loaded: ${library.list.length} items`)
   thumbs.prefetch(library.list)
@@ -909,6 +1375,8 @@ app.whenReady().then(async () => {
   dupes.sync(library.list)
   watchFolders()
   scan()
+  updateWatching()
+  if (startHidden && !alerts.watching) showWindow()
 
   app.on('activate', () => {
     if (!win) createWindow()
@@ -932,6 +1400,8 @@ app.on('before-quit', () => {
   faces?.dispose()
   smart?.dispose()
   dupes?.dispose()
+  alerts?.dispose()
+  background?.dispose()
   albums?.saveNow()
   // Everything is saved. If anything still holds the app open, don't linger invisibly in the
   // background (that blocks the next launch): exit for real.

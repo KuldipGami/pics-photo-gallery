@@ -17,7 +17,9 @@ import type {
   SmartProgress,
   Theme,
   ThumbProgress,
+  WatchAlert,
 } from './types'
+import type { OrganizePlan } from './components/OrganizeView'
 
 type Unsubscribe = () => void
 
@@ -45,6 +47,8 @@ export interface LumenApi {
     dupesProgress: DuplicatesProgress
     smartProgress: SmartProgress
     history: HistoryEntry[]
+    /** Lumen was started for a folder or to review duplicates (taken once). */
+    launch: { folder?: string; duplicates?: boolean } | null
   }>
   /** Resolves to the new album's id. */
   createAlbum(name: string, ids: string[]): Promise<string>
@@ -73,6 +77,22 @@ export interface LumenApi {
   rotateLossless(ids: string[], quarterTurns: number): Promise<{ done: number; errors: string[] }>
   /** Writes the date taken into a JPEG, losslessly (undo from History). */
   setDateTaken(id: string, ms: number): Promise<{ ok?: true; error?: string }>
+  /** What Organize would change; `skip` = ids selected for removal in Clean up. */
+  organizePlan(skip: string[]): Promise<OrganizePlan>
+  /** Choose where dated folders go (saved). */
+  pickOrganizeRoot(): Promise<string | null>
+  runOrganize(action: 'dates' | 'folders' | 'rename' | 'convert', skip: string[]): Promise<{ done: number; errors: string[] }>
+  onOrganizeProgress(cb: (progress: { done: number; total: number } | null) => void): Unsubscribe
+  /** Lumen moved or renamed files: [old id, new id] pairs. */
+  onRelocated(cb: (pairs: [string, string][]) => void): Unsubscribe
+  /** Adds/removes "Scan with Lumen" in the folder right-click menu. */
+  setContextMenu(on: boolean): Promise<{ ok: boolean; error?: string }>
+  setStartWithWindows(on: boolean): Promise<{ ok: boolean; error?: string }>
+  onWatchAlert(cb: (data: { alert: WatchAlert; log: string[] }) => void): Unsubscribe
+  onWatchStatus(cb: (status: { watching: boolean; folders: string[]; text: string }) => void): Unsubscribe
+  /** Lumen was asked to open a folder (right-click menu, command line). */
+  onOpenFolder(cb: (dir: string) => void): Unsubscribe
+  onShowDuplicates(cb: () => void): Unsubscribe
   onDuplicates(cb: (data: DuplicatesData) => void): Unsubscribe
   onDuplicatesProgress(cb: (progress: DuplicatesProgress) => void): Unsubscribe
   /** Items whose content matches the text, best first, with a 0–1 match score. */
@@ -125,6 +145,18 @@ export interface LumenApi {
       carryDates: boolean
       blurThreshold: number
       largeFileMB: number
+      organizeRoot: null
+      folderPattern: string
+      organizeCopy: boolean
+      renamePattern: string
+      deviceNamesOnly: boolean
+      jpegQuality: number
+      moveOriginals: boolean
+      watchFolders: boolean
+      minimizeToTray: boolean
+      skippedFolders: string[]
+      skippedTypes: string[]
+      minFileKB: number
     }>,
   ): Promise<void>
   setFavorite(ids: string[], value: boolean): Promise<void>
