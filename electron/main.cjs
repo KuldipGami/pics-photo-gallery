@@ -11,6 +11,16 @@ const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, nativeImage, Me
 
 if (process.env.LUMEN_USER_DATA) app.setPath('userData', path.resolve(process.env.LUMEN_USER_DATA))
 
+// LUMEN_TRACE=<file>: append startup/shutdown milestones with timestamps (for diagnosing).
+const trace = process.env.LUMEN_TRACE
+  ? (msg) => {
+      try {
+        fs.appendFileSync(process.env.LUMEN_TRACE, `${new Date().toISOString().slice(11, 23)} [${process.pid}] ${msg}\n`)
+      } catch {}
+    }
+  : () => {}
+trace(`start v${app.getVersion()}`)
+
 const { Store } = require('./store.cjs')
 const { Library, idOf, keyOf } = require('./library.cjs')
 const { Thumbnails } = require('./thumbs.cjs')
@@ -86,6 +96,7 @@ async function acquireSingleInstance() {
 const singleInstance = acquireSingleInstance()
 let ownsInstance = false
 singleInstance.then((ok) => {
+  trace(ok ? 'single-instance lock acquired' : 'another copy is running: exiting')
   ownsInstance = ok
   if (!ok) app.exit(0)
 })
@@ -270,17 +281,21 @@ function createWindow() {
     },
   })
 
+  trace('window created')
   win.once('ready-to-show', () => {
+    trace('window shown')
     if (saved.maximized) win.maximize()
     win.show()
     servicesReady.then(() => thumbs.warmUp(library.list))
   })
 
   win.on('close', () => {
+    trace('window close')
     store.set({ window: { ...win.getNormalBounds(), maximized: win.isMaximized() } })
     store.saveNow()
   })
   win.on('closed', () => {
+    trace('window closed')
     win = null
     // Hidden media workers are windows too, so 'window-all-closed' wouldn't fire on its own.
     if (!IS_MAC) app.quit()
@@ -617,6 +632,7 @@ nativeTheme.on('updated', () => {
 })
 
 app.on('second-instance', (_event, _argv, _cwd, data) => {
+  trace(`second launch (v${data?.version}) · window ${win ? 'open' : 'none'}`)
   if (data?.version && isNewer(data.version, VERSION)) {
     // A newer Lumen was just launched: close so it can take over.
     app.quit()
@@ -646,6 +662,7 @@ app.whenReady().then(async () => {
   await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load()])
   placesData = places.group(library.list)
   markServicesReady()
+  trace(`data loaded: ${library.list.length} items`)
   thumbs.prefetch(library.list)
   faces.sync(library.list)
   smart.sync(library.list)
@@ -659,6 +676,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
+  trace('all windows closed')
   if (ownsInstance) store.saveNow()
   if (!IS_MAC) app.quit()
 })
@@ -668,6 +686,7 @@ let quitting = false
 app.on('before-quit', () => {
   if (!ownsInstance || quitting) return
   quitting = true
+  trace('quitting: saving and stopping background work')
   store.saveNow()
   thumbs?.dispose()
   faces?.dispose()
@@ -676,5 +695,12 @@ app.on('before-quit', () => {
   albums?.saveNow()
   // Everything is saved. If anything still holds the app open, don't linger invisibly in the
   // background (that blocks the next launch): exit for real.
-  setTimeout(() => app.exit(0), 3000).unref()
+  trace('saved')
+  setTimeout(() => {
+    trace('still running 3 s after quit: forcing exit')
+    app.exit(0)
+  }, 3000).unref()
 })
+
+app.on('will-quit', () => trace('will-quit'))
+app.on('quit', () => trace('quit'))
