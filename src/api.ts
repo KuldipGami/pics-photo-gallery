@@ -69,6 +69,10 @@ export interface LumenApi {
   openRecycleBin(): Promise<void>
   /** Save dialog; writes the HTML or the CSV depending on the chosen type. */
   saveReport(html: string, csv: string): Promise<string | null>
+  /** Turns JPEGs by clockwise quarter turns, losslessly (orientation tag only; undo from History). */
+  rotateLossless(ids: string[], quarterTurns: number): Promise<{ done: number; errors: string[] }>
+  /** Writes the date taken into a JPEG, losslessly (undo from History). */
+  setDateTaken(id: string, ms: number): Promise<{ ok?: true; error?: string }>
   onDuplicates(cb: (data: DuplicatesData) => void): Unsubscribe
   onDuplicatesProgress(cb: (progress: DuplicatesProgress) => void): Unsubscribe
   /** Items whose content matches the text, best first, with a 0–1 match score. */

@@ -3725,3 +3725,47 @@ html[data-platform='darwin'] .titlebar {
   justify-content: space-between;
   gap: 12px;
 }
+
+.clean-toolbar[hidden] {
+  display: none;
+}
+.info-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.info-edit input {
+  flex: 1;
+  min-width: 150px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  font: 13px var(--font);
+}
+.info-edit .btn {
+  height: 30px;
+}
+.info-panel .btn.ghost {
+  color: rgba(255, 255, 255, 0.85);
+}
+.info-panel .btn.ghost:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.info-error {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #ff8a8e;
+}
+.info-panel .link {
+  margin-top: 4px;
+  font-size: 12.5px;
+}
+
+.clean-pad {
+  padding: 0 28px;
+}

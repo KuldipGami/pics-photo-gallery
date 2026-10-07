@@ -42,10 +42,11 @@ import { baseName, formatBytes, formatCount, formatDuration } from '../lib/forma
 import { fold } from '../lib/search'
 import type { DupGroup, DuplicatesData, DuplicatesProgress, KeepRule, MediaItem, Settings } from '../types'
 import { CoverImage } from './CoverImage'
+import { InsightsView } from './InsightsView'
 import { EmptyState } from './Overlays'
 import { PopoverMenu } from './PopoverMenu'
 
-export type CleanupTab = 'duplicates' | 'quality' | 'screenshots' | 'large' | 'folders' | 'backup'
+export type CleanupTab = 'duplicates' | 'quality' | 'screenshots' | 'large' | 'folders' | 'backup' | 'insights'
 type Filter = 'all' | 'exact' | 'similar'
 type GroupSort = 'found' | 'space' | 'copies' | 'newest' | 'name'
 type ListSort = 'suggested' | 'largest' | 'newest' | 'oldest' | 'name' | 'folder'
@@ -254,7 +255,9 @@ export function CleanupView(props: Props) {
         ? [['Duplicate folders', formatCount(pairs.length)], ['Space in copied folders', formatBytes(pairs.reduce((s, p) => s + Math.min(p.bytesA, p.bytesB), 0))]]
         : tab === 'backup'
           ? [['Already backed up', formatCount(backupRes?.both.length ?? 0)], ['Missing from backup', formatCount(backupRes?.missing.length ?? 0)]]
-          : [['Files found', formatCount(flat?.length ?? 0)], ['Total size', formatBytes((flat ?? []).reduce((s, l) => s + l.item.size, 0))]]
+          : tab === 'insights'
+            ? [['Files scanned', formatCount(items.length)], ['Total size', formatBytes(items.reduce((s, it) => s + it.size, 0))]]
+            : [['Files found', formatCount(flat?.length ?? 0)], ['Total size', formatBytes((flat ?? []).reduce((s, l) => s + l.item.size, 0))]]
 
   const tabs: [CleanupTab, string, number | null][] = [
     ['duplicates', 'Duplicates', groups.length],
@@ -263,6 +266,7 @@ export function CleanupView(props: Props) {
     ['large', 'Large files', lists.large.length],
     ...(pairs.length ? ([['folders', 'Duplicate folders', pairs.length]] as [CleanupTab, string, number][]) : []),
     ...(roots.length >= 2 ? ([['backup', 'Backup check', null]] as [CleanupTab, string, null][]) : []),
+    ['insights', 'Insights', null],
   ]
 
   const status =
@@ -297,7 +301,21 @@ export function CleanupView(props: Props) {
   )
 
   let body: ReactNode
-  if (tab === 'duplicates') {
+  if (tab === 'insights') {
+    body = (
+      <div className="clean-pad">
+      <InsightsView
+        items={items}
+        groups={data.groups}
+        facts={facts}
+        roots={roots}
+        blurThreshold={settings.blurThreshold}
+        largeFileMB={settings.largeFileMB}
+        onReview={props.onTab}
+      />
+      </div>
+    )
+  } else if (tab === 'duplicates') {
     body = !groups.length ? (
       status || props.waiting ? (
         <EmptyState
@@ -502,7 +520,7 @@ export function CleanupView(props: Props) {
         </button>
       </div>
 
-      <div className="clean-toolbar">
+      <div className="clean-toolbar" hidden={tab === 'insights'}>
         {tab === 'duplicates' ? (
           <>
             <div className="segmented small">

@@ -1,0 +1,343 @@
+/* Insights (Clean up): headline tiles, where to free space, and charts. One hue (the accent);
+   values and labels in text colours; every colour from the theme tokens. */
+
+.insights {
+  --ins-plot-h: 200px;
+  --ins-axis-h: 25px;
+  --ins-bar: var(--accent);
+  --ins-bar-hover: color-mix(in srgb, var(--accent) 78%, var(--text));
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.ins-measure {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+/* ---------- headline tiles ---------- */
+
+.ins-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+.card.ins-tile {
+  padding: 14px 18px;
+  min-width: 0;
+}
+.ins-tile-label,
+.ins-tile-detail {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.ins-tile-value {
+  margin-top: 4px;
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ins-tile-detail {
+  margin-top: 2px;
+}
+
+/* ---------- cards ---------- */
+
+.card.ins-card {
+  padding: 18px 22px 16px;
+  min-width: 0;
+}
+.ins-card h2 {
+  margin: 0;
+}
+.ins-card .ins-caption {
+  margin: 3px 0 12px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+.ins-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ins-card-head .ins-caption {
+  margin: 0;
+  text-align: right;
+}
+.ins-empty {
+  padding: 18px 0 6px;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+/* ---------- where you can free space ---------- */
+
+.ins-space {
+  display: flex;
+  flex-direction: column;
+}
+.ins-space-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 0;
+}
+.ins-space-row + .ins-space-row {
+  border-top: 1px solid var(--border);
+}
+.ins-space-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.ins-space-text {
+  flex: 1;
+  min-width: 0;
+}
+.ins-space-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.ins-space-detail {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ins-space-size {
+  flex-shrink: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/* ---------- by year: columns on a shared baseline ---------- */
+
+.ins-years {
+  position: relative;
+}
+.ins-cols {
+  display: grid;
+  min-width: 0;
+}
+.ins-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  outline: none;
+  cursor: default;
+}
+.ins-col-plot {
+  position: relative;
+  height: var(--ins-plot-h);
+  margin: 0 1px; /* 2px surface gap between neighbours */
+  border-radius: 4px 4px 0 0;
+}
+.ins-col.hover .ins-col-plot,
+.ins-col:focus-visible .ins-col-plot {
+  background: var(--hover);
+}
+.ins-col:focus-visible .ins-col-plot {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.ins-col-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-width: 28px;
+  min-height: 2px;
+  margin: 0 auto;
+  border-radius: 4px 4px 0 0;
+  background: var(--ins-bar);
+  transition: background 0.12s, height 0.2s ease;
+}
+.ins-col.hover .ins-col-bar {
+  background: var(--ins-bar-hover);
+}
+.ins-col-peak {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.ins-col-axis {
+  height: var(--ins-axis-h);
+  border-top: 1px solid var(--border-strong);
+  display: flex;
+  justify-content: center;
+}
+.ins-col-axis span {
+  margin: 6px -24px 0;
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- horizontal bars ---------- */
+
+.ins-two {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.ins-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ins-bar-row {
+  display: grid;
+  grid-template-columns: clamp(96px, 38%, 190px) minmax(0, 1fr);
+  align-items: center;
+  height: 28px;
+  padding: 0 4px;
+  margin: 0 -4px;
+  border-radius: 6px;
+  outline: none;
+  cursor: default;
+}
+.ins-bar-row.hover,
+.ins-bar-row:focus-visible {
+  background: var(--hover);
+}
+.ins-bar-row:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.ins-bar-label {
+  padding-right: 12px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ins-bar-track {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+}
+.ins-bar {
+  flex-shrink: 0;
+  height: 16px;
+  min-width: 2px;
+  border-radius: 0 4px 4px 0;
+  background: var(--ins-bar);
+  transition: background 0.12s, width 0.2s ease;
+}
+.ins-bar-row.hover .ins-bar {
+  background: var(--ins-bar-hover);
+}
+.ins-bar-value {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/* ---------- tooltip ---------- */
+
+.ins-tip {
+  position: absolute;
+  z-index: 5;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.ins-tip.center {
+  transform: translateX(-50%);
+}
+.ins-tip.end {
+  transform: translateX(-100%);
+}
+.ins-bar-track .ins-tip {
+  bottom: calc(100% + 4px);
+}
+.ins-tip-label {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-2);
+}
+.ins-tip-value {
+  margin-top: 2px;
+  color: var(--text-2);
+}
+.ins-tip-value b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ---------- narrow ---------- */
+
+@container (max-width: 820px) {
+  .ins-two {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@container (max-width: 680px) {
+  .ins-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@container (max-width: 560px) {
+  .ins-col-axis.alt span {
+    visibility: hidden;
+  }
+}
+@container (max-width: 420px) {
+  .ins-tile-value {
+    font-size: 20px;
+  }
+  .ins-space-row {
+    flex-wrap: wrap;
+  }
+  .ins-space-text {
+    flex-basis: calc(100% - 48px);
+  }
+  .ins-space-size {
+    margin-left: 48px;
+    margin-right: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ins-col-bar,
+  .ins-bar {
+    transition: none;
+  }
+}

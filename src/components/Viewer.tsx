@@ -398,6 +398,7 @@ export function Viewer({
             onRemoveFace={onRemoveFace}
             onHighlight={setHighlight}
             onClose={() => setShowInfo(false)}
+            onToast={onToast}
           />
         )}
       </div>

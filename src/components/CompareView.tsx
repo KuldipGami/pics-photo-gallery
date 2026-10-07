@@ -284,6 +284,19 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
                       </label>
                     )}
                     <div className="spacer" />
+                    {group && turnToMatch(group, group.ids.indexOf(id), it) > 0 && (
+                      <button
+                        className="btn ghost"
+                        title="Turn this copy the same way as the best copy (lossless: only the orientation tag changes)"
+                        onClick={async () => {
+                          const turns = turnToMatch(group, group.ids.indexOf(id), it)
+                          const res = await api.rotateLossless([id], turns)
+                          onToast(res.done ? `Turned ${it.name}. Undo it from History if needed.` : `Couldn't turn ${it.name}: ${res.errors[0] ?? ''}`)
+                        }}
+                      >
+                        {['', 'Turn right', 'Turn upside down', 'Turn left'][turnToMatch(group, group.ids.indexOf(id), it)]}
+                      </button>
+                    )}
                     <button className="icon-btn" onClick={() => api.openExternal(id)} title="Open with default app">
                       <ExternalLink size={15} />
                     </button>
@@ -327,6 +340,13 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
       </div>
     </div>
   )
+}
+
+const JPEG = new Set(['jpg', 'jpeg', 'jpe', 'jfif'])
+/** Clockwise quarter turns that make a rotated JPEG copy match its group's best copy (0 = none). */
+export function turnToMatch(g: DupGroup, i: number, it: MediaItem) {
+  const info = g.info[i]
+  return it.type === 'image' && JPEG.has(it.ext) && info && info[1] === 'rotated' && typeof info[2] === 'number' ? info[2] : 0
 }
 
 /** One picture (or video) whose zoom & pan follow the shared view. */

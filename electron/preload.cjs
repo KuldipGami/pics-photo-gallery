@@ -47,6 +47,8 @@ contextBridge.exposeInMainWorld('lumen', {
   onHistory: (cb) => on('history:changed', cb),
   openRecycleBin: () => ipcRenderer.invoke('shell:recycle-bin'),
   saveReport: (html, csv) => ipcRenderer.invoke('report:save', html, csv),
+  rotateLossless: (ids, turns) => ipcRenderer.invoke('edit:rotate', ids, turns),
+  setDateTaken: (id, ms) => ipcRenderer.invoke('edit:date', id, ms),
   onDuplicates: (cb) => on('dupes:changed', cb),
   onDuplicatesProgress: (cb) => on('dupes:progress', cb),
   smartSearch: (query) => ipcRenderer.invoke('smart:search', query),

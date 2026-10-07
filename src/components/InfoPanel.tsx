@@ -1,6 +1,8 @@
-import { Aperture, Calendar, ExternalLink, FileImage, Film, Folder, MapPin, UserRoundPen, UserRoundSearch, UserX, Users, X } from 'lucide-react'
+import { Aperture, Calendar, CalendarClock, ExternalLink, FileImage, Film, Folder, MapPin, RotateCcw, RotateCw, UserRoundPen, UserRoundSearch, UserX, Users, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { baseName, formatBytes, formatDuration, formatExposure, formatLongDate, formatTime } from '../lib/format'
+import { fileNameDate } from '../lib/insights'
 import type { FaceBox, MediaItem, Place } from '../types'
 import { FaceAvatar } from './FaceAvatar'
 import { PopoverMenu } from './PopoverMenu'
@@ -27,10 +29,53 @@ interface Props {
   onRemoveFace(face: PhotoFace): void
   onHighlight(box: FaceBox | null): void
   onClose(): void
+  onToast(text: string): void
 }
 
-export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson, onAssignFace, onRemoveFace, onHighlight, onClose }: Props) {
+const JPEG = new Set(['jpg', 'jpeg', 'jpe', 'jfif'])
+const p2 = (n: number) => String(n).padStart(2, '0')
+const editText = (ms: number) => {
+  const d = new Date(ms)
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+}
+/** DupeLens' accepted date formats: yyyy-MM-dd[ HH:mm[:ss]], yyyy:MM:dd HH:mm:ss, dd-MM-yyyy[ HH:mm]. */
+function parseDate(text: string): number | null {
+  const t = text.trim()
+  let m = t.match(/^(\d{4})[-:](\d{1,2})[-:](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/)
+  let y, mo, d, h, mi, s
+  if (m) [, y, mo, d, h = '0', mi = '0', s = '0'] = m
+  else if ((m = t.match(/^(\d{1,2})-(\d{1,2})-(\d{4})(?: (\d{1,2}):(\d{2}))?$/))) [, d, mo, y, h = '0', mi = '0'] = m
+  else {
+    const any = Date.parse(t)
+    return Number.isFinite(any) ? any : null
+  }
+  const date = new Date(+y, +mo - 1, +d, +h, +mi, +(s ?? 0))
+  return date.getMonth() === +mo - 1 && date.getDate() === +d ? date.getTime() : null
+}
+
+export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson, onAssignFace, onRemoveFace, onHighlight, onClose, onToast }: Props) {
   const m = item.meta ?? {}
+  const jpeg = item.type === 'image' && JPEG.has(item.ext)
+  const [dateText, setDateText] = useState(() => editText(item.taken ?? item.date))
+  const [dateError, setDateError] = useState('')
+  useEffect(() => {
+    setDateText(editText(item.taken ?? item.date))
+    setDateError('')
+  }, [item.id, item.taken])
+  const nameDate = fileNameDate(item.name)
+  const saveDate = async () => {
+    const ms = parseDate(dateText)
+    if (ms === null) return setDateError('Use a date like 2021-06-08 13:11:51')
+    if (new Date(ms).getFullYear() < 1900 || ms > Date.now() + 86_400_000) return setDateError('That date looks wrong.')
+    setDateError('')
+    const res = await api.setDateTaken(item.id, ms)
+    if (res.error) setDateError(res.error)
+    else onToast(`Saved ${new Date(ms).toLocaleString()} inside ${item.name}. Undo it from History if needed.`)
+  }
+  const turn = async (q: number) => {
+    const res = await api.rotateLossless([item.id], q)
+    onToast(res.done ? `Turned ${item.name}. Undo it from History if needed.` : `Couldn't turn ${item.name}: ${res.errors[0] ?? ''}`)
+  }
   const camera = m.model ? (m.make && !m.model.startsWith(m.make) ? `${m.make} ${m.model}` : m.model) : m.make
   const exposure = [
     m.f && `ƒ/${+m.f.toFixed(1)}`,
@@ -145,6 +190,69 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
             >
               {m.lat.toFixed(5)}, {m.lon.toFixed(5)} <ExternalLink size={12} />
             </button>
+          </div>
+        </div>
+      )}
+
+      {item.type === 'image' && (
+        <div className="info-row">
+          <RotateCw size={18} />
+          <div>
+            <div className="info-primary">Turn</div>
+            {jpeg ? (
+              <>
+                <div className="info-edit">
+                  <button className="btn ghost" onClick={() => turn(3)}>
+                    <RotateCcw size={15} /> Turn left
+                  </button>
+                  <button className="btn ghost" onClick={() => turn(1)}>
+                    <RotateCw size={15} /> Turn right
+                  </button>
+                </div>
+                <div className="info-secondary">Lossless: only the orientation tag changes, the picture is never re-saved.</div>
+              </>
+            ) : (
+              <div className="info-secondary">Only JPEG photos can be turned without re-saving them — use Edit to save a turned copy.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {item.type === 'image' && (
+        <div className="info-row">
+          <CalendarClock size={18} />
+          <div>
+            <div className="info-primary">Change date taken</div>
+            {jpeg ? (
+              <>
+                <div className="info-edit">
+                  <input
+                    value={dateText}
+                    placeholder="yyyy-MM-dd HH:mm:ss"
+                    onChange={(e) => setDateText(e.target.value)}
+                    onKeyDown={(e) => {
+                      e.stopPropagation()
+                      if (e.key === 'Enter') saveDate()
+                    }}
+                  />
+                  <button className="btn ghost" onClick={saveDate}>
+                    Save
+                  </button>
+                </div>
+                {dateError && <div className="info-error">{dateError}</div>}
+                {nameDate && (
+                  <button
+                    className="link"
+                    onClick={() => setDateText(editText(nameDate.hasTime ? nameDate.date : nameDate.date + 12 * 3_600_000))}
+                  >
+                    Use the date in the file name
+                  </button>
+                )}
+                <div className="info-secondary">Saved inside the photo without re-saving the image, so there's no quality loss. Undo any time from History.</div>
+              </>
+            ) : (
+              <div className="info-secondary">Only JPEG photos can be changed without re-saving them.</div>
+            )}
           </div>
         </div>
       )}

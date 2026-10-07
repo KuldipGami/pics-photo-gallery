@@ -32,6 +32,8 @@ const { SmartIndex } = require('./smart.cjs')
 const { Editor } = require('./editor.cjs')
 const { History } = require('./history.cjs')
 const cleanup = require('./cleanup.cjs')
+const edits = require('./edits.cjs')
+const { isJpeg } = require('./jpeg-exif.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
 
 registerScheme()
@@ -548,6 +550,68 @@ ipcMain.handle('edit:save', async (_e, id, recipe) => {
 })
 ipcMain.handle('edit:close', () => editor.release())
 
+// ---------- lossless edits (JPEG metadata only; from DupeLens) ----------
+
+const backupsDir = () => path.join(userData, 'backups')
+
+/**
+ * A lossless edit keeps the file's date (so an old photo doesn't look new), which means the caches
+ * keyed on size + date wouldn't notice: drop this photo's preview, fingerprint, faces and search
+ * vector, and read it again.
+ */
+async function refreshEdited(paths) {
+  for (const p of paths) {
+    const it = library.items.get(keyOf(p))
+    if (!it) continue
+    for (const kind of ['thumb', 'preview']) {
+      const name = thumbs.name(it, kind)
+      thumbs.cached.delete(name)
+      await fs.promises.rm(path.join(thumbs.dir, name), { force: true }).catch(() => {})
+    }
+    dupes.records.delete(it.id)
+    smart.vectors.delete(it.id)
+    faces.removeItems([it.id])
+    library.items.delete(keyOf(p)) // re-read on the next scan
+  }
+  scan()
+}
+
+/** Turns JPEGs by quarter turns (orientation tag only). Resolves { done, errors }. */
+ipcMain.handle('edit:rotate', async (_e, ids, turns) => {
+  const items = itemsFor(idList(ids)).filter((it) => isJpeg(it.ext))
+  const q = Math.round(Number(turns)) || 0
+  const files = []
+  const errors = []
+  for (const it of items) {
+    const res = await edits.rotate(it, q, backupsDir())
+    if (res.error) errors.push(`${it.name}: ${res.error}`)
+    else files.push(res.file)
+  }
+  if (files.length) {
+    const how = ((q % 4) + 4) % 4 === 1 ? '90° right' : ((q % 4) + 4) % 4 === 3 ? '90° left' : '180°'
+    history.add({
+      kind: 'edited',
+      note: files.length === 1 ? `Turned ${path.basename(files[0].from)} ${how}` : `Turned ${files.length} photos ${how}`,
+      files,
+    })
+    await refreshEdited(files.map((f) => f.from))
+  }
+  return { done: files.length, errors }
+})
+
+/** Writes the date taken into a JPEG (EXIF, lossless) and sets its file date to match. */
+ipcMain.handle('edit:date', async (_e, id, ms) => {
+  const [it] = itemsFor(id)
+  if (!it || !isJpeg(it.ext)) return { error: 'Only JPEG photos can be changed without re-saving them.' }
+  const date = Number(ms)
+  if (!Number.isFinite(date) || new Date(date).getFullYear() < 1900 || date > Date.now() + 86_400_000) return { error: 'That date looks wrong.' }
+  const res = await edits.setDateTaken(it, date, backupsDir())
+  if (res.error) return { error: res.error }
+  history.add({ kind: 'edited', note: `Date taken of ${it.name} set to ${new Date(date).toLocaleString()}`, files: [res.file] })
+  await refreshEdited([it.path])
+  return { ok: true }
+})
+
 // ---------- duplicates & search ----------
 
 ipcMain.handle('dupes:dismiss', (_e, ids) => dupes.dismiss(idList(ids)))
@@ -655,12 +719,19 @@ ipcMain.handle('cleanup:pick-folder', async (_e, title) => {
 // ---------- history ----------
 
 ipcMain.handle('history:list', () => history.list())
-ipcMain.handle('history:clear', () => history.clear())
+ipcMain.handle('history:clear', async () => {
+  await edits.deleteBackups(history.list(), backupsDir()).catch(() => {})
+  return history.clear()
+})
 ipcMain.handle('history:restore', async (_e, id) => {
   const entry = typeof id === 'string' ? history.get(id) : null
   if (!entry) return { restored: 0 }
   let restored = 0
-  if (entry.kind === 'moved' || entry.kind === 'renamed') {
+  if (entry.kind === 'edited') {
+    const done = await edits.restoreBackups(entry.files)
+    restored = done.length
+    if (restored) await refreshEdited(done.map((f) => f.from))
+  } else if (entry.kind === 'moved' || entry.kind === 'renamed') {
     restored = await cleanup.restoreMoves(entry.files)
     await cleanup.restoreDates(entry.dateChanges)
   } else if (entry.kind === 'dates') {
