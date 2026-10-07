@@ -1,0 +1,55 @@
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
+
+const on = (channel, cb) => {
+  const handler = (_event, payload) => cb(payload)
+  ipcRenderer.on(channel, handler)
+  return () => ipcRenderer.removeListener(channel, handler)
+}
+
+contextBridge.exposeInMainWorld('lumen', {
+  env: {
+    platform: process.platform,
+    mica: process.argv.includes('--lumen-mica=1'),
+  },
+  getState: () => ipcRenderer.invoke('app:state'),
+  getGpu: () => ipcRenderer.invoke('app:gpu'),
+  relaunch: () => ipcRenderer.invoke('app:relaunch'),
+  renamePerson: (id, name) => ipcRenderer.invoke('people:rename', id, name),
+  hidePerson: (id, hidden) => ipcRenderer.invoke('people:hide', id, hidden),
+  mergePeople: (fromIds, intoId) => ipcRenderer.invoke('people:merge', fromIds, intoId),
+  rejectFromPerson: (id, itemIds) => ipcRenderer.invoke('people:reject', id, itemIds),
+  resetPeople: () => ipcRenderer.invoke('people:reset'),
+  assignFaces: (faceIds, target) => ipcRenderer.invoke('people:assign', faceIds, target),
+  rejectFaces: (faceIds) => ipcRenderer.invoke('people:reject-faces', faceIds),
+  setPersonCover: (id, faceId) => ipcRenderer.invoke('people:cover', id, faceId),
+  removePerson: (id) => ipcRenderer.invoke('people:remove', id),
+  markNotSame: (a, b) => ipcRenderer.invoke('people:not-same', a, b),
+  hidePeople: (ids, hidden) => ipcRenderer.invoke('people:hide-many', ids, hidden),
+  personMatches: (id) => ipcRenderer.invoke('people:matches', id),
+  peopleSuggestions: () => ipcRenderer.invoke('people:suggestions'),
+  onPeople: (cb) => on('people:changed', cb),
+  onPeopleProgress: (cb) => on('people:progress', cb),
+  rescan: () => ipcRenderer.invoke('library:rescan'),
+  addFolders: (paths) => ipcRenderer.invoke('folders:add', paths),
+  removeFolder: (folder) => ipcRenderer.invoke('folders:remove', folder),
+  revealFolder: (dir) => ipcRenderer.invoke('folders:reveal', dir),
+  setSettings: (patch) => ipcRenderer.invoke('settings:set', patch),
+  setFavorite: (ids, value) => ipcRenderer.invoke('favorites:set', ids, value),
+  trash: (ids) => ipcRenderer.invoke('items:trash', ids),
+  reveal: (id) => ipcRenderer.invoke('items:reveal', id),
+  openExternal: (id) => ipcRenderer.invoke('items:open', id),
+  copy: (id, kind) => ipcRenderer.invoke('items:copy', id, kind),
+  showContextMenu: (id, ids) => ipcRenderer.invoke('items:menu', id, ids),
+  startDrag: (ids) => ipcRenderer.send('items:drag', ids),
+  reportDuration: (id, seconds) => ipcRenderer.invoke('items:duration', id, seconds),
+  cacheInfo: () => ipcRenderer.invoke('cache:info'),
+  clearCache: () => ipcRenderer.invoke('cache:clear'),
+  openUrl: (url) => ipcRenderer.invoke('shell:url', url),
+  pathForFile: (file) => webUtils.getPathForFile(file),
+  setViewerMode: (open) => ipcRenderer.invoke('window:viewer', open),
+  onLibrary: (cb) => on('library:changed', cb),
+  onStatus: (cb) => on('scan:status', cb),
+  onThumbProgress: (cb) => on('thumbs:progress', cb),
+  onSettings: (cb) => on('settings:changed', cb),
+  onMenuAction: (cb) => on('menu:action', cb),
+})

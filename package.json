@@ -1,0 +1,75 @@
+{
+  "name": "lumen",
+  "productName": "Lumen",
+  "version": "1.5.0",
+  "description": "A modern photo & video gallery for your desktop",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "typecheck": "tsc --noEmit",
+    "icon": "electron scripts/make-icon.cjs",
+    "models": "node scripts/get-models.mjs",
+    "dist": "vite build && electron-builder --win"
+  },
+  "build": {
+    "appId": "app.lumen.gallery",
+    "productName": "Lumen",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**",
+      "dist/**",
+      "resources/**",
+      "package.json",
+      "!node_modules/onnxruntime-node/bin/napi-v*/{linux,darwin}/**",
+      "!node_modules/onnxruntime-node/bin/napi-v*/win32/arm64/**"
+    ],
+    "asarUnpack": [
+      "node_modules/sharp/**",
+      "node_modules/@img/**",
+      "node_modules/onnxruntime-node/**"
+    ],
+    "extraResources": [
+      {
+        "from": "models",
+        "to": "models",
+        "filter": [
+          "*.onnx"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "resources/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  },
+  "dependencies": {
+    "exifr": "^7.1.3",
+    "onnxruntime-node": "^1.30.0",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "lucide-react": "^1.52.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2"
+  }
+}
