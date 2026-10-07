@@ -1,32 +1,37 @@
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
+const os = require('node:os')
+const path = require('node:path')
 const crypto = require('node:crypto')
 const { EventEmitter } = require('node:events')
+const { Worker } = require('node:worker_threads')
 const sharp = require('sharp')
 const exifr = require('exifr')
+const sig = require('./signature.cjs')
 
+// Duplicate detection, ported from DupeLens:
+//  - exact copies: same size + same content hash
+//  - look-alikes: perceptual fingerprints (signature.cjs) within the match threshold, in any of 8
+//    orientations or as a centre crop; all matching pairs are joined (union-find), so a group can
+//    hold photos less alike than the threshold — those are flagged "check before removing".
+// Fingerprints, sharpness and brightness come from the cached preview; everything is cached in
+// duplicates.json so after the first pass only new or changed files are read.
+
+const VERSION = 2
 const FULL_HASH_MAX = 32 * 1024 * 1024 // smaller files are hashed whole; bigger ones (videos) sampled
 const SAMPLE = 64 * 1024
 const SAMPLES = 32
-const NEAR_BITS = 10 // of 128: looks the same (resized / re-saved / burst shot)
-const MIN_DETAIL = 6 // greyscale std-dev: flat images (black frames, plain sky) don't compare
-const AR_TOLERANCE = 0.04
 const CONCURRENCY = 4
-const VERSION = 1
+const WORKER_SRC = fs.readFileSync(path.join(__dirname, 'dupes-pairs.cjs'), 'utf8')
+const THREADS = Math.max(2, Math.min(8, (os.availableParallelism?.() ?? os.cpus().length) - 2))
 
-const COPY_NAME = /\(\d+\)|[-_ ]copy\b|\bcopy of\b|kopie|\bcopy\d*\b/i
-const COPY_DIR = /whatsapp|download|backup|\btemp\b|\bcopy\b|\bsent\b|telegram|received|cache/i
+const COPY_NAME = /(-WA\d+|\bcopy\b|\(\d+\)|^Screenshot|WhatsApp)/i
 
-/**
- * Bytes identical? Same size and the same content hash: whole-file SHA-1 for photos; for big files
- * the size plus head, tail and 32 evenly spaced 64 KB samples (two different videos never match on
- * all of those).
- */
+/** Same size and content hash: whole-file SHA-1 for photos; size + head, tail and 32 samples for big files. */
 async function contentHash(file, size) {
   const h = crypto.createHash('sha1')
   h.update(String(size))
   if (size <= FULL_HASH_MAX) {
-    // streamed in 1 MB chunks, so hashing never blocks the main process for long
     for await (const chunk of fs.createReadStream(file, { highWaterMark: 1024 * 1024 })) h.update(chunk)
   } else {
     const fh = await fsp.open(file, 'r')
@@ -48,47 +53,44 @@ async function contentHash(file, size) {
   return h.digest('base64').slice(0, 24)
 }
 
-/**
- * 128-bit difference hash of a thumbnail (horizontal + vertical gradients on a 9×9 greyscale),
- * plus aspect ratio and how much detail there is.
- */
-async function visualHash(thumb) {
-  const meta = await sharp(thumb).metadata()
-  const { data } = await sharp(thumb).greyscale().resize(9, 9, { fit: 'fill', kernel: 'cubic' }).raw().toBuffer({ resolveWithObject: true })
-  const words = new Uint32Array(4)
-  let bit = 0
-  const set = (on) => {
-    if (on) words[bit >> 5] |= 1 << (bit & 31)
-    bit++
+/** Fingerprint + sharpness + brightness from a preview (already upright). */
+async function visual(thumb) {
+  const { data, info } = await sharp(thumb, { failOn: 'none' })
+    .resize(sig.ANALYSIS_SIZE, sig.ANALYSIS_SIZE, { fit: 'inside', withoutEnlargement: true })
+    .flatten({ background: '#ffffff' })
+    .greyscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true })
+  const gray = info.channels === 1 ? data : extractChannel(data, info.channels)
+  let tiny = null
+  if (info.width < sig.GRID || info.height < sig.GRID) {
+    const t = await sharp(thumb, { failOn: 'none' }).resize(sig.GRID, sig.GRID, { fit: 'fill' }).flatten({ background: '#ffffff' }).greyscale().raw().toBuffer({ resolveWithObject: true })
+    tiny = t.info.channels === 1 ? t.data : extractChannel(t.data, t.info.channels)
   }
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) set(data[y * 9 + x] < data[y * 9 + x + 1])
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) set(data[y * 9 + x] < data[(y + 1) * 9 + x])
-  let mean = 0
-  for (const v of data) mean += v
-  mean /= data.length
-  let variance = 0
-  for (const v of data) variance += (v - mean) ** 2
-  return {
-    p: Array.from(words),
-    a: +(meta.width / meta.height).toFixed(4),
-    v: +Math.sqrt(variance / data.length).toFixed(1),
-  }
+  return { ...sig.analyze(gray, info.width, info.height, tiny), aspect: info.width / info.height }
 }
 
-const popcount = (n) => {
-  n -= (n >>> 1) & 0x55555555
-  n = (n & 0x33333333) + ((n >>> 2) & 0x33333333)
-  return (((n + (n >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24
+const extractChannel = (data, channels) => {
+  const out = new Uint8Array(data.length / channels)
+  for (let i = 0; i < out.length; i++) out[i] = data[i * channels]
+  return out
 }
 
 async function dimensions(item) {
   if (item.type !== 'image') return null
   try {
     const m = await sharp(item.path, { failOn: 'none' }).metadata()
-    if (m.width && m.height) return (m.orientation ?? 1) >= 5 ? [m.height, m.width] : [m.width, m.height]
+    if (m.width && m.height) return [m.width, m.height]
   } catch {}
   try {
-    const d = await exifr.parse(item.path, { tiff: true, exif: true, gps: false, xmp: false, icc: false, iptc: false })
+    if (item.ext === 'bmp') {
+      const fh = await fsp.open(item.path, 'r')
+      const b = Buffer.alloc(26)
+      await fh.read(b, 0, 26, 0)
+      await fh.close()
+      return [b.readInt32LE(18), Math.abs(b.readInt32LE(22))]
+    }
+    const d = await exifr.parse(item.path, { tiff: true, exif: true, gps: false, xmp: false, icc: false, iptc: false, ifd1: false })
     const w = d?.ExifImageWidth ?? d?.ImageWidth
     const h = d?.ExifImageHeight ?? d?.ImageHeight
     if (w && h) return [w, h]
@@ -105,21 +107,56 @@ async function pool(list, limit, fn) {
   )
 }
 
-/**
- * Finds exact copies (identical bytes) and look-alikes (the same picture resized, re-saved, edited
- * or shot in a burst) across the library. Hashes are cached in duplicates.json, so after the
- * first pass only new or changed files are read.
- */
+/** All pairs of fingerprints within `maxDist`, on several worker threads. */
+function findPairs(words, crops, n, maxDist, findCrops) {
+  if (n < 2) return Promise.resolve([])
+  const threads = Math.min(THREADS, Math.max(1, Math.floor(n / 200)))
+  return Promise.all(
+    Array.from(
+      { length: threads },
+      (_, start) =>
+        new Promise((resolve) => {
+          const worker = new Worker(WORKER_SRC, { eval: true })
+          worker.once('message', (pairs) => {
+            resolve(pairs)
+            worker.terminate()
+          })
+          worker.once('error', () => resolve(new Int32Array(0)))
+          worker.postMessage({ words, crops, n, maxDist, findCrops, start, step: threads })
+        }),
+    ),
+  )
+}
+
+class UnionFind {
+  constructor(n) {
+    this.parent = Int32Array.from({ length: n }, (_, i) => i)
+  }
+  find(i) {
+    while (this.parent[i] !== i) {
+      this.parent[i] = this.parent[this.parent[i]]
+      i = this.parent[i]
+    }
+    return i
+  }
+  union(a, b) {
+    const ra = this.find(a)
+    const rb = this.find(b)
+    if (ra !== rb) this.parent[Math.max(ra, rb)] = Math.min(ra, rb)
+  }
+}
+
 class Duplicates extends EventEmitter {
   constructor(file, { canRun, thumb }) {
     super()
     this.file = file
     this.canRun = canRun
     this.thumb = thumb // item -> Promise<Buffer | null> (cached thumbnail)
-    this.records = new Map() // id -> { m, z, x?, p?, a?, v?, d?: [w, h] }
+    this.records = new Map() // id -> { m, z, x?, s?, c, lo, sh, br, a, d? }
     this.dismissed = new Set()
     this.items = []
-    this.result = { exact: [], similar: [] }
+    this.settings = { sensitivity: 90, findCrops: true, folders: [] }
+    this.result = { groups: [] }
     this.progress = { running: false, phase: 'idle', done: 0, total: 0 }
     this.running = false
     this.again = false
@@ -129,9 +166,9 @@ class Duplicates extends EventEmitter {
   async load() {
     try {
       const data = JSON.parse(await fsp.readFile(this.file, 'utf8'))
+      this.dismissed = new Set(data.dismissed ?? [])
       if (data.version !== VERSION) return
       for (const [id, r] of Object.entries(data.items)) this.records.set(id, r)
-      this.dismissed = new Set(data.dismissed ?? [])
     } catch {}
   }
 
@@ -165,6 +202,15 @@ class Duplicates extends EventEmitter {
     } catch {}
   }
 
+  /** Match threshold (80–99 %), crop matching and the library folder order (for keep priority). */
+  configure(settings) {
+    const next = { ...this.settings, ...settings }
+    next.sensitivity = Math.round(Math.min(99, Math.max(80, Number(next.sensitivity) || 90)))
+    const changed = JSON.stringify(next) !== JSON.stringify(this.settings)
+    this.settings = next
+    if (changed && this.items.length && !this.running) this.regroup().catch((err) => console.error('[duplicates] regroup failed', err))
+  }
+
   /** Called whenever the library changes; the scan itself waits until previews are done. */
   sync(items) {
     this.items = items
@@ -190,20 +236,20 @@ class Duplicates extends EventEmitter {
     }, 300)
   }
 
+  rec(it) {
+    let r = this.records.get(it.id)
+    if (!r) this.records.set(it.id, (r = { m: it.mtime, z: it.size }))
+    return r
+  }
+
   async run() {
     this.running = true
     try {
       const items = this.items
-      // forget removed / changed files
       const live = new Map(items.map((it) => [it.id, it]))
       for (const [id, r] of this.records) {
         const it = live.get(id)
         if (!it || it.mtime !== r.m || it.size !== r.z) this.records.delete(id)
-      }
-      const rec = (it) => {
-        let r = this.records.get(it.id)
-        if (!r) this.records.set(it.id, (r = { m: it.mtime, z: it.size }))
-        return r
       }
 
       // 1. exact copies: only files sharing a size can be identical
@@ -215,38 +261,45 @@ class Duplicates extends EventEmitter {
         list.push(it)
       }
       const toHash = []
-      for (const list of bySize.values()) if (list.length > 1) for (const it of list) if (!rec(it).x) toHash.push(it)
+      for (const list of bySize.values()) if (list.length > 1) for (const it of list) if (!this.rec(it).x) toHash.push(it)
       let done = 0
       this.setProgress('hashing', 0, toHash.length)
       await pool(toHash, 2, async (it) => {
+        if (this.disposed) return
         try {
-          rec(it).x = await contentHash(it.path, it.size)
+          this.rec(it).x = await contentHash(it.path, it.size)
         } catch {}
         this.setProgress('hashing', ++done, toHash.length)
         this.saveSoon()
       })
 
-      // 2. look-alikes: a visual fingerprint of every preview
-      const toLook = items.filter((it) => rec(it).p === undefined)
+      // 2. fingerprint, sharpness and brightness of every preview
+      const toLook = items.filter((it) => this.rec(it).s === undefined)
       done = 0
       this.setProgress('comparing', 0, toLook.length)
       await pool(toLook, CONCURRENCY, async (it) => {
+        if (this.disposed) return
+        const r = this.rec(it)
         try {
           const thumb = await this.thumb(it)
-          Object.assign(rec(it), thumb ? await visualHash(thumb) : { p: null })
+          if (!thumb) r.s = null
+          else {
+            const v = await visual(thumb)
+            Object.assign(r, { s: sig.toBase64(v.words), c: v.crops ? 1 : 0, lo: v.lowDetail ? 1 : 0, a: +v.aspect.toFixed(4) })
+            if (it.type === 'image') Object.assign(r, { sh: v.sharpness, br: v.brightness })
+          }
         } catch {
-          rec(it).p = null // no preview: nothing to compare (until the file changes)
+          r.s = null // no preview: nothing to compare (until the file changes)
         }
         this.setProgress('comparing', ++done, toLook.length)
         this.saveSoon()
       })
 
-      this.result = await this.group(items)
+      await this.regroup()
       this.saveSoon(2000)
     } finally {
       this.running = false
       this.setProgress('idle', 0, 0)
-      this.emit('changed')
       if (this.again) {
         this.again = false
         this.pump()
@@ -254,140 +307,182 @@ class Duplicates extends EventEmitter {
     }
   }
 
-  async group(items) {
-    const byId = new Map(items.map((it) => [it.id, it]))
+  /** Re-forms the groups from cached facts (also after changing the match threshold). */
+  async regroup() {
+    const items = this.items
+    const maxDist = sig.maxDistanceFor(this.settings.sensitivity / 100)
+    const index = new Map(items.map((it, i) => [it.id, i]))
+    const uf = new UnionFind(items.length)
 
-    // exact: same size + same content hash
+    // exact copies
     const byHash = new Map()
-    for (const it of items) {
+    items.forEach((it, i) => {
       const x = this.records.get(it.id)?.x
-      if (!x) continue
+      if (!x) return
       const key = `${it.size}:${x}`
-      let list = byHash.get(key)
-      if (!list) byHash.set(key, (list = []))
-      list.push(it)
-    }
-    const exactSets = [...byHash.values()].filter((l) => l.length > 1)
-    const copyOf = new Map() // id -> exact set index
-    exactSets.forEach((set, i) => set.forEach((it) => copyOf.set(it.id, i)))
+      if (byHash.has(key)) uf.union(byHash.get(key), i)
+      else byHash.set(key, i)
+    })
 
-    // look-alikes: candidate pairs share at least one of 16 hash bytes (pigeonhole: ≤ 10 differing
-    // bits leave ≥ 6 bytes untouched), then the full 128-bit distance decides.
-    const hashed = items.filter((it) => {
+    // look-alike photos (not blank ones: those would match everything)
+    const words = new Map()
+    const photos = []
+    for (const it of items) {
       const r = this.records.get(it.id)
-      return r?.p && r.v >= MIN_DETAIL
-    })
-    // flat typed arrays: the pair loop below runs millions of times on a big library
-    const n = hashed.length
-    const P = new Uint32Array(n * 4)
-    const AR = new Float64Array(n)
-    const VIDEO = new Uint8Array(n)
-    const DUR = new Float64Array(n)
-    const buckets = Array.from({ length: 16 * 256 }, () => [])
-    hashed.forEach((it, i) => {
-      const r = this.records.get(it.id)
-      P.set(r.p, i * 4)
-      AR[i] = r.a
-      VIDEO[i] = it.type === 'video' ? 1 : 0
-      DUR[i] = it.duration || 0
-      for (let b = 0; b < 16; b++) buckets[(b << 8) | ((r.p[b >> 2] >>> ((b & 3) * 8)) & 0xff)].push(i)
-    })
-    const near = new Map() // idx -> Set(idx)
-    const link = (i, j) => {
-      if (!near.has(i)) near.set(i, new Set())
-      near.get(i).add(j)
+      if (!r?.s || r.lo) continue
+      words.set(it.id, sig.fromBase64(r.s))
+      if (it.type === 'image') photos.push(it)
     }
-    // A pair sharing several bytes is checked once per shared byte: cheaper than remembering pairs.
-    for (const list of buckets) {
-      if (list.length < 2 || list.length > 400) continue // a huge bucket is a low-detail pattern, not a match
-      for (let a = 0; a < list.length; a++) {
-        const i = list[a]
-        const pi = i * 4
-        for (let b = a + 1; b < list.length; b++) {
-          const j = list[b]
-          if (VIDEO[i] !== VIDEO[j]) continue
-          if (Math.abs(AR[i] - AR[j]) > AR_TOLERANCE * Math.max(AR[i], AR[j])) continue
-          const pj = j * 4
-          const bits =
-            popcount(P[pi] ^ P[pj]) + popcount(P[pi + 1] ^ P[pj + 1]) + popcount(P[pi + 2] ^ P[pj + 2]) + popcount(P[pi + 3] ^ P[pj + 3])
-          if (bits > NEAR_BITS) continue
-          if (VIDEO[i] && DUR[i] && DUR[j] && Math.abs(DUR[i] - DUR[j]) > 1.5) continue
-          link(i, j)
-          link(j, i)
-        }
+    const flat = new Uint32Array(photos.length * sig.WORDS)
+    const crops = new Uint8Array(photos.length)
+    photos.forEach((it, i) => {
+      flat.set(words.get(it.id), i * sig.WORDS)
+      crops[i] = this.records.get(it.id).c ? 1 : 0
+    })
+    for (const part of await findPairs(flat, crops, photos.length, maxDist, this.settings.findCrops)) {
+      for (let k = 0; k < part.length; k += 2) uf.union(index.get(photos[part[k]].id), index.get(photos[part[k + 1]].id))
+    }
+
+    // look-alike videos (for now from their preview frame; same length within 1.5 s or 3 %)
+    const videos = items.filter((it) => it.type === 'video' && words.has(it.id))
+    for (let i = 0; i < videos.length; i++) {
+      const a = videos[i]
+      for (let j = i + 1; j < videos.length; j++) {
+        const b = videos[j]
+        if (a.duration && b.duration && Math.abs(a.duration - b.duration) > Math.max(1.5, 0.03 * Math.max(a.duration, b.duration))) continue
+        const wa = words.get(a.id)
+        const wb = words.get(b.id)
+        const d = sig.popcount(wa[0] ^ wb[0]) + sig.popcount(wa[1] ^ wb[1]) + sig.popcount(wa[16] ^ wb[16]) + sig.popcount(wa[17] ^ wb[17])
+        if (d <= maxDist) uf.union(index.get(a.id), index.get(b.id))
       }
     }
-    // Leader clustering (no chaining): each group is a photo plus everything that looks like it.
-    const order = [...near.keys()].sort((x, y) => hashed[x].date - hashed[y].date)
-    const taken = new Set()
-    const similarSets = []
-    for (const lead of order) {
-      if (taken.has(lead)) continue
-      const members = [lead, ...[...near.get(lead)].filter((j) => !taken.has(j))]
-      if (members.length < 2) continue
-      const set = members.map((j) => hashed[j])
-      // all one exact-copy set: already listed under exact copies
-      const sets = new Set(set.map((it) => copyOf.get(it.id) ?? `u${it.id}`))
-      if (sets.size < 2) continue
-      members.forEach((j) => taken.add(j))
-      similarSets.push(set)
-    }
 
-    // dimensions (to keep the sharpest look-alike)
-    const needDims = similarSets.flat().filter((it) => it.type === 'image' && !this.records.get(it.id)?.d)
+    // groups
+    const sets = new Map()
+    items.forEach((it, i) => {
+      const root = uf.find(i)
+      let list = sets.get(root)
+      if (!list) sets.set(root, (list = []))
+      list.push(it)
+    })
+    const raw = [...sets.values()]
+      .filter((list) => list.length > 1)
+      .map((list) => list.sort((a, b) => a.path.toLowerCase().localeCompare(b.path.toLowerCase())))
+
+    // sizes of grouped photos (for "best quality")
+    const needDims = raw.flat().filter((it) => it.type === 'image' && this.records.get(it.id) && this.records.get(it.id).d === undefined)
     await pool(needDims, CONCURRENCY, async (it) => {
-      const d = await dimensions(it)
       const r = this.records.get(it.id)
-      if (r) r.d = d ?? [0, 0]
+      if (r) r.d = (await dimensions(it)) ?? null
     })
 
-    const signature = (set) => set.map((it) => it.id).sort().join(',')
-    const copyPenalty = (it) => (COPY_NAME.test(it.name) ? 2 : 0) + (COPY_DIR.test(it.dir) ? 1 : 0)
-    const pixels = (it) => {
-      const d = this.records.get(it.id)?.d
-      return d ? d[0] * d[1] : 0
-    }
-    const keepExact = (set) =>
-      [...set].sort((a, b) => copyPenalty(a) - copyPenalty(b) || a.added - b.added || a.path.length - b.path.length)[0]
-    const keepSimilar = (set) =>
-      [...set].sort(
-        (a, b) => pixels(b) - pixels(a) || b.size - a.size || copyPenalty(a) - copyPenalty(b) || a.date - b.date,
-      )[0]
+    const groups = raw
+      .map((list) => this.describe(list, words))
+      .filter((g) => !this.dismissed.has(g.ids.slice().sort().join(',')))
+      .sort((a, b) => Number(b.exact) - Number(a.exact) || a.first.localeCompare(b.first))
+    groups.forEach((g, i) => {
+      g.n = i + 1
+      delete g.first
+    })
+    this.result = { groups }
+    this.emit('changed')
+  }
 
-    const dims = {}
-    for (const it of similarSets.flat()) {
-      const d = this.records.get(it.id)?.d
-      if (d && d[0]) dims[it.id] = d
+  folderPriority(it) {
+    const p = it.path.toLowerCase()
+    const i = this.settings.folders.findIndex((f) => p.startsWith(f.toLowerCase().replace(/[\\/]+$/, '') + path.sep))
+    return i < 0 ? this.settings.folders.length : i
+  }
+
+  /** One group: kind, best copy, how every file relates to it, and the keep order for each rule. */
+  describe(list, words) {
+    const recs = list.map((it) => this.records.get(it.id) ?? {})
+    const pixels = (i) => (recs[i].d ? recs[i].d[0] * recs[i].d[1] : 0)
+    const sharp = (i) => (Number.isFinite(recs[i].sh) ? recs[i].sh : -1)
+    const maxSharp = Math.max(0, ...list.map((_, i) => sharp(i)))
+    const step = (i) => (maxSharp > 0 && sharp(i) > 0 ? Math.round((sharp(i) / maxSharp) * 5) : 0)
+    const copy = (i) => (COPY_NAME.test(path.basename(list[i].name, path.extname(list[i].name))) ? 1 : 0)
+    const prio = list.map((it) => this.folderPriority(it))
+    const w = (i) => words.get(list[i].id)
+    // a cropped version never wins over the full photo it was cut from
+    const isCrop = list.map((_, i) =>
+      w(i) ? list.some((_, j) => j !== i && w(j) && recs[j].c && sig.isCropOf(w(i), w(j), true)) : false,
+    )
+    const tail = (a, b) =>
+      copy(a) - copy(b) ||
+      prio[a] - prio[b] ||
+      list[a].date - list[b].date ||
+      list[a].name.length - list[b].name.length ||
+      list[a].path.toLowerCase().localeCompare(list[b].path.toLowerCase())
+    const order = (cmp, crops) =>
+      list
+        .map((_, i) => i)
+        .sort((a, b) => (crops ? Number(isCrop[a]) - Number(isCrop[b]) : 0) || cmp(a, b) || tail(a, b))
+    const orders = [
+      order((a, b) => pixels(b) - pixels(a) || step(b) - step(a) || copy(a) - copy(b) || list[b].size - list[a].size, true),
+      order((a, b) => sharp(b) - sharp(a) || pixels(b) - pixels(a), true),
+      order((a, b) => list[b].size - list[a].size || pixels(b) - pixels(a), false),
+      order((a, b) => list[a].date - list[b].date || pixels(b) - pixels(a), false),
+      order((a, b) => list[b].date - list[a].date || pixels(b) - pixels(a), false),
+    ]
+    const ref = orders[0][0]
+    const exact = recs.every((r) => r.x && r.x === recs[0].x)
+    let min = 1
+    const info = list.map((it, i) => {
+      if (i === ref) return ['best']
+      if (recs[i].x && recs[i].x === recs[ref].x) return ['identical']
+      if (w(i) && w(ref)) {
+        const c = sig.compare(w(ref), !!recs[ref].c, w(i), !!recs[i].c)
+        const s = 1 - c.distance / sig.BITS
+        min = Math.min(min, s)
+        return [+s.toFixed(3), c.kind, c.kind === 'rotated' ? c.rotation : 0]
+      }
+      return ['']
+    })
+    // "Sharpest": only between shots of the same resolution (bursts, re-takes)
+    const ranked = list.map((_, i) => i).filter((i) => sharp(i) > 0).sort((a, b) => sharp(b) - sharp(a))
+    const clear =
+      !exact &&
+      ranked.length >= 2 &&
+      sharp(ranked[0]) > sharp(ranked[1]) * 1.15 &&
+      ranked.every((i) => Math.abs(pixels(i) - pixels(ranked[0])) <= pixels(ranked[0]) * 0.1)
+    return {
+      ids: list.map((it) => it.id),
+      exact,
+      video: list.every((it) => it.type === 'video'),
+      ref,
+      min: +min.toFixed(3),
+      info,
+      orders,
+      sharpest: clear ? ranked[0] : -1,
+      first: list[0].path.toLowerCase(),
     }
-    const exact = exactSets
-      .filter((set) => !this.dismissed.has(signature(set)))
-      .map((set) => ({ ids: set.map((it) => it.id), keep: keepExact(set).id, size: set[0].size }))
-      .sort((a, b) => b.size * (b.ids.length - 1) - a.size * (a.ids.length - 1))
-    const similar = similarSets
-      .filter((set) => !this.dismissed.has(signature(set)))
-      .map((set) => ({ ids: set.map((it) => it.id), keep: keepSimilar(set).id }))
-      .sort((a, b) => byId.get(b.ids[0]).date - byId.get(a.ids[0]).date)
-    return { exact, similar, dims }
   }
 
   /** "These aren't duplicates": hide this group (it comes back if its members change). */
   dismiss(ids) {
-    this.dismissed.add([...ids].sort().join(','))
-    const drop = (list) => list.filter((g) => g.ids.slice().sort().join(',') !== [...ids].sort().join(','))
-    this.result = { ...this.result, exact: drop(this.result.exact), similar: drop(this.result.similar) }
+    const key = [...ids].sort().join(',')
+    this.dismissed.add(key)
+    this.result = { groups: this.result.groups.filter((g) => g.ids.slice().sort().join(',') !== key) }
     this.saveSoon(1000)
     this.emit('changed')
   }
 
+  /** The current groups, plus quality facts of every analysed item: id → [sharpness, brightness, blank, w, h]. */
   snapshot() {
-    const { exact, similar, dims = {} } = this.result
-    let exactFiles = 0
-    let exactBytes = 0
-    for (const g of exact) {
-      exactFiles += g.ids.length - 1
-      exactBytes += g.size * (g.ids.length - 1)
+    const facts = {}
+    for (const it of this.items) {
+      const r = this.records.get(it.id)
+      if (!r || r.s === undefined) continue
+      facts[it.id] = [r.sh ?? -1, r.br ?? -1, r.lo ? 1 : 0, r.d?.[0] ?? 0, r.d?.[1] ?? 0]
     }
-    return { exact, similar, dims, exactFiles, exactBytes, similarGroups: similar.length }
+    return { groups: this.result.groups, facts, sensitivity: this.settings.sensitivity, findCrops: this.settings.findCrops }
+  }
+
+  /** Group members, for carrying dates over to kept copies. */
+  groupsOf(ids) {
+    const want = new Set(ids)
+    return this.result.groups.filter((g) => g.ids.some((id) => want.has(id)))
   }
 
   progressInfo() {

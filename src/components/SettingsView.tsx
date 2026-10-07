@@ -11,6 +11,7 @@ import {
   RotateCcw,
   ScanFace,
   ScanSearch,
+  ShieldCheck,
   Sparkles,
   Sun,
   X,
@@ -262,6 +263,133 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
             </div>
           </div>
           {smartProgress.error && <p className="hint">Smart search couldn't start: {smartProgress.error}</p>}
+        </section>
+
+        <section className="card">
+          <h2>Clean up</h2>
+          <div className="setting-row">
+            <div>
+              <div>Match threshold · {settings.dupeSensitivity}%</div>
+              <div className="setting-hint">
+                {settings.dupeSensitivity >= 95
+                  ? 'Strict: only near-identical copies'
+                  : settings.dupeSensitivity >= 89
+                    ? 'Balanced: recommended'
+                    : settings.dupeSensitivity >= 85
+                      ? 'Loose: may include burst shots'
+                      : 'Very loose: review matches carefully'}
+              </div>
+            </div>
+            <div className="range-with-ends">
+              <span>More matches</span>
+              <input
+                type="range"
+                min={80}
+                max={99}
+                value={settings.dupeSensitivity}
+                onChange={(e) => api.setSettings({ dupeSensitivity: Number(e.target.value) })}
+              />
+              <span>Stricter</span>
+            </div>
+          </div>
+          <div className="setting-row">
+            <div>
+              <div>Match cropped copies</div>
+              <div className="setting-hint">Also finds copies with the edges cut off. Rotated and mirrored copies are always found.</div>
+            </div>
+            <button
+              role="switch"
+              aria-checked={settings.findCrops}
+              className={`switch${settings.findCrops ? ' on' : ''}`}
+              onClick={() => api.setSettings({ findCrops: !settings.findCrops })}
+            >
+              <span />
+            </button>
+          </div>
+          <div className="setting-row">
+            <div>
+              <div>Blur sensitivity · {settings.blurThreshold}</div>
+              <div className="setting-hint">
+                {settings.blurThreshold <= 15 ? 'Only very blurry photos' : settings.blurThreshold <= 40 ? 'Balanced' : 'Also flags soft or out-of-focus photos'}
+              </div>
+            </div>
+            <input type="range" min={5} max={80} value={settings.blurThreshold} onChange={(e) => api.setSettings({ blurThreshold: Number(e.target.value) })} />
+          </div>
+          <div className="setting-row">
+            <div>
+              <div>Large files · over {settings.largeFileMB} MB</div>
+              <div className="setting-hint">Shown under Clean up → Large files.</div>
+            </div>
+            <input type="range" min={5} max={500} step={5} value={settings.largeFileMB} onChange={(e) => api.setSettings({ largeFileMB: Number(e.target.value) })} />
+          </div>
+          <div className="setting-row">
+            <div>
+              <div>Move duplicates to</div>
+              <div className="setting-hint folder-row-path">{settings.moveDestination ?? `${settings.defaultMoveDestination} (default)`}</div>
+            </div>
+            <div className="card-actions">
+              {settings.moveDestination && (
+                <button className="btn ghost" onClick={() => api.setSettings({ moveDestination: null })}>
+                  Reset
+                </button>
+              )}
+              <button className="btn ghost" onClick={() => api.pickDestination()}>
+                Change…
+              </button>
+            </div>
+          </div>
+          <div className="setting-row">
+            <div>
+              <div>Keep the original date on kept copies</div>
+              <div className="setting-hint">
+                If you keep a copy that lost its date (like a WhatsApp copy) and remove the original, the kept file gets the original's date.
+              </div>
+            </div>
+            <button
+              role="switch"
+              aria-checked={settings.carryDates}
+              className={`switch${settings.carryDates ? ' on' : ''}`}
+              onClick={() => api.setSettings({ carryDates: !settings.carryDates })}
+            >
+              <span />
+            </button>
+          </div>
+          <div className="setting-row column">
+            <div className="setting-row-head">
+              <div>
+                <div>Always keep (protected folders)</div>
+                <div className="setting-hint">Files in these folders (e.g. your camera originals) are never selected for removal.</div>
+              </div>
+              <button
+                className="btn ghost"
+                onClick={async () => {
+                  const picked = await api.pickFolders('Protect a folder')
+                  if (picked.length) api.setSettings({ protectedFolders: [...new Set([...settings.protectedFolders, ...picked])] })
+                }}
+              >
+                <ShieldCheck size={15} /> Protect a folder…
+              </button>
+            </div>
+            {settings.protectedFolders.length > 0 && (
+              <div className="folder-list">
+                {settings.protectedFolders.map((f) => (
+                  <div key={f} className="folder-row">
+                    <ShieldCheck size={18} />
+                    <div className="folder-row-text">
+                      <div className="folder-row-path">{f}</div>
+                    </div>
+                    <button
+                      className="icon-btn"
+                      title="Stop protecting this folder"
+                      onClick={() => api.setSettings({ protectedFolders: settings.protectedFolders.filter((x) => x !== f) })}
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </section>
 
         <section className="card">

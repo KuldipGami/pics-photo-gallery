@@ -29,7 +29,9 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api } from './api'
 import { AlbumNameDialog, AlbumPicker, AlbumsView, AlbumTitle } from './components/AlbumsView'
-import { DuplicatesView } from './components/DuplicatesView'
+import { CleanupView, type CleanupTab } from './components/CleanupView'
+import { CompareView, type CompareSource } from './components/CompareView'
+import { HistoryView, historyTitle } from './components/HistoryView'
 import { MemoriesView, MemoryStrip } from './components/MemoriesView'
 import { FoldersView, type FolderInfo } from './components/FoldersView'
 import { FaceAvatar } from './components/FaceAvatar'
@@ -47,7 +49,8 @@ import { Sidebar } from './components/Sidebar'
 import { TitleBar } from './components/TitleBar'
 import { Viewer } from './components/Viewer'
 import { useEvent, useLibrary, useSmartSearch, useToasts } from './hooks'
-import { baseName, formatCount, formatRange, summarize } from './lib/format'
+import { baseName, formatBytes, formatCount, formatRange, summarize } from './lib/format'
+import { buildReports, groupKey, isUnder, largeList, lowQualityList, ruleMarks, screenshotList, type Facts } from './lib/cleanup'
 import { pairLivePhotos } from './lib/live'
 import { findTrips, formatTripDates, onThisDay } from './lib/memories'
 import { fold, MONTH_WORDS, searchTokens, tokenMask, TYPE_WORDS } from './lib/search'
@@ -78,7 +81,8 @@ const TITLES: Record<View['kind'], string> = {
   place: '',
   albums: 'Albums',
   album: '',
-  duplicates: 'Duplicates',
+  cleanup: 'Clean up',
+  history: 'History',
   memories: 'Memories',
   trip: '',
   settings: 'Settings',
@@ -99,6 +103,7 @@ export default function App() {
     dupes,
     dupesProgress,
     smartProgress,
+    history,
   } = useLibrary()
   const [view, setView] = useState<View>({ kind: 'photos' })
   const [query, setQuery] = useState('')
@@ -125,7 +130,16 @@ export default function App() {
   const [albumPicker, setAlbumPicker] = useState<string[] | null>(null)
   const [newAlbum, setNewAlbum] = useState(false)
   const [placeCountry, setPlaceCountry] = useState<string | null>(null)
-  const { toasts, push: toast } = useToasts()
+  const { toasts, push: toast, dismiss: dismissToast } = useToasts()
+  // ---------- clean up (DupeLens) ----------
+  const [cleanupTab, setCleanupTab] = useState<CleanupTab>('duplicates')
+  /** Files selected for removal (shared by every Clean up list and the compare view). */
+  const [marks, setMarks] = useState<Set<string>>(() => new Set())
+  /** Groups already given the keep rule once (later changes are the user's). */
+  const ruled = useRef(new Set<string>())
+  const [compare, setCompare] = useState<CompareSource | null>(null)
+  /** Moves made in this session, newest last (Ctrl+Z undoes them). */
+  const [sessionMoves, setSessionMoves] = useState<string[]>([])
   const searchRef = useRef<HTMLInputElement>(null)
   const selectAnchor = useRef<number | null>(null)
   const internalDrag = useRef(false)
@@ -410,15 +424,158 @@ export default function App() {
     const q = fold(query.trim())
     return q ? albums.filter((a) => fold(a.name).includes(q)) : albums
   }, [albums, query])
-  // Reclaimable space shown next to "Duplicates" (exact copies only: nothing is lost by removing them).
+  // Reclaimable space shown next to "Clean up": extra exact copies (nothing is lost by removing them).
   const duplicateBytes = useMemo(() => {
     let bytes = 0
-    for (const g of dupes.exact) {
-      const live = g.ids.filter((id) => byId.has(id))
-      if (live.length > 1) bytes += (g.size ?? 0) * (live.length - 1)
+    for (const g of dupes.groups) {
+      if (!g.exact) continue
+      g.ids.forEach((id, i) => {
+        if (i !== g.ref) bytes += byId.get(id)?.size ?? 0
+      })
     }
     return bytes
-  }, [dupes.exact, byId])
+  }, [dupes.groups, byId])
+
+  // ---------- clean up: protection, keep rule, actions ----------
+  const protectedFolders = settings?.protectedFolders ?? []
+  const isProtected = useMemo(() => {
+    const cache = new Map<string, boolean>()
+    return (id: string) => {
+      let v = cache.get(id)
+      if (v === undefined) {
+        const it = byId.get(id)
+        cache.set(id, (v = !!it && protectedFolders.some((f) => isUnder(it.path, f))))
+      }
+      return v
+    }
+  }, [byId, protectedFolders])
+  const keepRule = settings?.keepRule ?? 'best'
+  // New groups get the keep rule once (like DupeLens after a scan); later the user's choices stand.
+  useEffect(() => {
+    if (!settings || !dupes.groups.length) return
+    const fresh = dupes.groups.filter((g) => !ruled.current.has(groupKey(g)))
+    if (!fresh.length) return
+    for (const g of fresh) ruled.current.add(groupKey(g))
+    setMarks((prev) => {
+      const next = new Set(prev)
+      for (const g of fresh) for (const id of ruleMarks(g, keepRule, isProtected)) next.add(id)
+      return next
+    })
+  }, [dupes.groups, settings?.keepRule])
+  // protected files are never selected
+  useEffect(() => {
+    setMarks((prev) => {
+      const drop = [...prev].filter(isProtected)
+      if (!drop.length) return prev
+      const next = new Set(prev)
+      for (const id of drop) next.delete(id)
+      return next
+    })
+  }, [isProtected])
+
+  const removeLabel = (ids: string[]) => {
+    const bytes = ids.reduce((s, id) => s + (byId.get(id)?.size ?? 0), 0)
+    return { n: ids.length, bytes }
+  }
+  /** Groups where the selection would leave no copy at all. */
+  const allCopiesWarning = (ids: string[]) => {
+    const sel = new Set(ids)
+    const n = dupes.groups.filter((g) => g.ids.filter((id) => byId.has(id)).every((id) => sel.has(id))).length
+    return n ? `In ${formatCount(n)} group${n === 1 ? '' : 's'} every copy is selected, so no copy of those photos will remain.` : undefined
+  }
+  const afterRemove = (ids: string[], res: { removed: number; failed: number; errors?: string[] }) => {
+    setMarks((prev) => {
+      const next = new Set(prev)
+      for (const id of ids) next.delete(id)
+      return next
+    })
+    setSelection((prev) => {
+      const next = new Set(prev)
+      for (const id of ids) next.delete(id)
+      return next
+    })
+    if (res.failed) toast(`Removed ${formatCount(res.removed)}, but ${formatCount(res.failed)} failed: ${res.errors?.[0] ?? ''}`, { error: true })
+  }
+  const moveToFolder = (ids: string[]) => {
+    if (!ids.length || !settings) return
+    const { n, bytes } = removeLabel(ids)
+    const dest = settings.moveDestination ?? settings.defaultMoveDestination
+    setConfirm({
+      title: `Move ${formatCount(n)} file${n === 1 ? '' : 's'}?`,
+      message: `${formatBytes(bytes)} will be moved out of your photo folders into the folder below (it isn't shown in Lumen). You can undo this afterwards, even after closing Lumen.`,
+      confirmLabel: 'Move files',
+      warning: allCopiesWarning(ids),
+      extra: (
+        <div className="confirm-dest">
+          <FolderOpen size={16} />
+          <span title={dest}>{dest}</span>
+          <button className="link" onClick={() => api.pickDestination()}>
+            Change…
+          </button>
+        </div>
+      ),
+      onConfirm: async () => {
+        const res = await api.moveItems(ids)
+        afterRemove(ids, res)
+        if (res.entryId) setSessionMoves((m) => [...m, res.entryId!])
+        if (res.removed)
+          toast(`Moved ${formatCount(res.removed)} file${res.removed === 1 ? '' : 's'} to “${baseName(res.destination ?? dest)}”`, {
+            action: { label: 'Undo', run: () => undoMove(res.entryId!) },
+          })
+      },
+    })
+  }
+  const recycle = (ids: string[]) => {
+    if (!ids.length) return
+    const { n, bytes } = removeLabel(ids)
+    setConfirm({
+      title: `Move ${formatCount(n)} file${n === 1 ? '' : 's'} to the ${BIN}?`,
+      message: `This frees ${formatBytes(bytes)}. You can restore them from the ${BIN} if you need them back.`,
+      confirmLabel: `Move to ${BIN}`,
+      danger: true,
+      warning: allCopiesWarning(ids),
+      onConfirm: async () => {
+        const res = await api.trash(ids)
+        afterRemove(ids, res)
+        if (res.removed) toast(`Moved ${formatCount(res.removed)} file${res.removed === 1 ? '' : 's'} to the ${BIN}`)
+      },
+    })
+  }
+  const undoMove = async (entryId?: string) => {
+    const id = entryId ?? sessionMoves[sessionMoves.length - 1]
+    if (!id) return
+    setSessionMoves((m) => m.filter((x) => x !== id))
+    const res = await api.restoreHistory(id)
+    toast(
+      res.restored
+        ? `Restored ${formatCount(res.restored)} file${res.restored === 1 ? '' : 's'} to ${res.restored === res.total ? 'their original folders' : 'where they were'}`
+        : 'Nothing could be restored: the files were moved or renamed since, or their original spot is taken.',
+      { error: !res.restored },
+    )
+  }
+  const protectFolder = (dir: string) => {
+    if (!settings || settings.protectedFolders.some((f) => isUnder(dir, f))) return toast('This folder is already protected')
+    api.setSettings({ protectedFolders: [...settings.protectedFolders, dir] })
+    toast(`Files in “${baseName(dir)}” will always be kept`)
+  }
+  const exportReport = async () => {
+    const facts = dupes.facts as Facts
+    const { html, csv } = buildReports({
+      summary: `${formatCount(shownItems.length)} files`,
+      groups: dupes.groups,
+      byId,
+      facts,
+      marks,
+      isProtected,
+      lists: [
+        ['Blurry & dark', lowQualityList(shownItems, facts, settings?.blurThreshold ?? 30)],
+        ['Screenshots', screenshotList(shownItems)],
+        ['Large files', largeList(shownItems, (settings?.largeFileMB ?? 10) * 1024 * 1024)],
+      ],
+    })
+    const file = await api.saveReport(html, csv)
+    if (file) toast(`Report saved as “${baseName(file)}”`, { action: { label: 'Show', run: () => api.revealFolder(file.replace(/[\\/][^\\/]+$/, '')) } })
+  }
 
   const viewerItems = useMemo(
     () => (viewer ? viewer.ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it) : []),
@@ -482,7 +639,7 @@ export default function App() {
     setView(next)
     setFocus(null) // "scroll back to the photo you were viewing" is for the page you were on
 
-    if (['settings', 'folders', 'people', 'person', 'places', 'albums', 'duplicates', 'memories'].includes(next.kind)) setTypeFilter('all')
+    if (['settings', 'folders', 'people', 'person', 'places', 'albums', 'cleanup', 'history', 'memories'].includes(next.kind)) setTypeFilter('all')
   }
 
   // ---------- albums ----------
@@ -750,13 +907,28 @@ export default function App() {
 
   // ---------- keyboard ----------
   const onKey = useEvent((e: KeyboardEvent) => {
-    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum) return
+    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum || compare) return
     const key = e.key.toLowerCase()
     const typing = !!(e.target as HTMLElement)?.closest?.('input, textarea')
     if ((e.ctrlKey || e.metaKey) && key === 'f') {
       e.preventDefault()
       searchRef.current?.focus()
       searchRef.current?.select()
+      return
+    }
+    if ((e.ctrlKey || e.metaKey) && key === 'z' && sessionMoves.length && !typing) {
+      e.preventDefault()
+      undoMove()
+      return
+    }
+    if ((e.ctrlKey || e.metaKey) && key === 'r' && view.kind === 'cleanup') {
+      e.preventDefault()
+      document.querySelector<HTMLButtonElement>('.clean-actions button[title^="Review"]')?.click()
+      return
+    }
+    if ((e.ctrlKey || e.metaKey) && key === 'h') {
+      e.preventDefault()
+      navigate({ kind: 'history' })
       return
     }
     if (e.key === 'F5') {
@@ -830,8 +1002,10 @@ export default function App() {
       : 'From photo locations, worked out on this computer'
   } else if (view.kind === 'albums') {
     subtitle = `${formatCount(albums.length)} album${albums.length === 1 ? '' : 's'}`
-  } else if (view.kind === 'duplicates') {
-    subtitle = 'Exact copies and look-alikes in your library'
+  } else if (view.kind === 'cleanup') {
+    subtitle = 'Duplicates, blurry photos, screenshots and large files · nothing is removed without your confirmation'
+  } else if (view.kind === 'history') {
+    subtitle = 'Every change Lumen has made to your files'
   } else if (view.kind === 'memories') {
     subtitle = trips.length ? `${formatCount(trips.length)} trip${trips.length === 1 ? '' : 's'} · worked out from where and when your photos were taken` : 'Trips and photos from this day in earlier years'
   } else if (view.kind === 'folders') {
@@ -1303,19 +1477,59 @@ export default function App() {
         }}
       />
     )
-  } else if (view.kind === 'duplicates') {
+  } else if (view.kind === 'cleanup') {
     body = (
-      <DuplicatesView
+      <CleanupView
+        tab={cleanupTab}
+        onTab={setCleanupTab}
         data={dupes}
         progress={dupesProgress}
-        byId={byId}
         waiting={thumbProgress.pending > 0 || status.scanning}
-        onDelete={(ids, label) => requestDelete(ids, label)}
+        items={shownItems}
+        byId={byId}
+        marks={marks}
+        setMarks={setMarks}
+        settings={settings}
+        isProtected={isProtected}
+        query={query}
+        canUndo={sessionMoves.length > 0}
+        onCompare={(groups, index, focusId) => setCompare({ mode: 'groups', groups, index, focus: focusId })}
+        onPreview={(list, index) => setCompare({ mode: 'items', items: list, index })}
+        onMove={moveToFolder}
+        onRecycle={recycle}
+        onUndo={() => undoMove()}
+        onProtectFolder={protectFolder}
+        onExport={exportReport}
+        onToast={toast}
         onDismiss={(ids) => {
           api.dismissDuplicates(ids)
           toast("Got it — they won't be suggested again")
         }}
-        onOpen={(ids, index) => setViewer({ ids, index })}
+      />
+    )
+  } else if (view.kind === 'history') {
+    body = (
+      <HistoryView
+        entries={history}
+        onRestore={async (e) => {
+          const res = await api.restoreHistory(e.id)
+          setSessionMoves((m) => m.filter((x) => x !== e.id))
+          toast(
+            res.restored
+              ? `Put back ${formatCount(res.restored)} file${res.restored === 1 ? '' : 's'} (${historyTitle(e).toLowerCase()})`
+              : 'Nothing could be restored: the files were moved or renamed since, or their original spot is taken.',
+            { error: !res.restored },
+          )
+        }}
+        onClear={() =>
+          setConfirm({
+            title: 'Clear history?',
+            message: 'This only forgets the list. No files are touched, but moved files can no longer be put back from here.',
+            confirmLabel: 'Clear history',
+            danger: true,
+            onConfirm: () => api.clearHistory(),
+          })
+        }
       />
     )
   } else if (currentAlbum && !currentAlbum.items.some((id) => byId.has(id)) && !query) {
@@ -1396,7 +1610,7 @@ export default function App() {
         query={query}
         onQuery={(q) => {
           setQuery(q)
-          if (view.kind === 'settings' || view.kind === 'duplicates') setView({ kind: 'photos' })
+          if (view.kind === 'settings' || view.kind === 'history') setView({ kind: 'photos' })
         }}
         placeholder={
           view.kind === 'folders'
@@ -1407,6 +1621,8 @@ export default function App() {
                 ? 'Search places'
                 : view.kind === 'albums'
                   ? 'Search albums'
+                  : view.kind === 'cleanup'
+                    ? 'Search by name, folder, camera or year'
                   : smartOn
                     ? 'Search people, places, dates — or what’s in the photo'
                     : 'Search by name, person, place, folder, month, year…'
@@ -1558,7 +1774,21 @@ export default function App() {
       )}
       {confirm && <ConfirmDialog options={confirm} onClose={() => setConfirm(null)} />}
       {dragOver && <DropOverlay />}
-      <Toasts toasts={toasts} />
+      {compare && settings && (
+        <CompareView
+          source={compare}
+          byId={byId}
+          facts={dupes.facts as Facts}
+          marks={marks}
+          keepRule={keepRule}
+          isProtected={isProtected}
+          setMarks={setMarks}
+          onClose={() => setCompare(null)}
+          onFullScreen={(ids, index) => setViewer({ ids, index })}
+          onToast={toast}
+        />
+      )}
+      <Toasts toasts={toasts} onDismiss={dismissToast} />
     </div>
   )
 }

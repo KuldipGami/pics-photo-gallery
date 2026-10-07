@@ -23,7 +23,7 @@ A modern photo & video gallery for your desktop. Built with Electron, React and 
 - **Edit photos** — rotate, flip, straighten, crop (free or fixed proportions, dragged on the photo), auto-enhance, light, contrast, colour and warmth, with a live preview rendered by the same code that saves. Edits are always **saved as a new copy** next to the original (capture date, camera and place kept); HEIC/RAW are decoded at full size by Windows.
 - **Videos** — hover a video (or Live Photo) to play a silent preview; long videos remember where you stopped; **Live Photos** (an iPhone still + its short clip) show as one photo with a LIVE button.
 - **Albums** — your own collections. Add items from the selection bar, the right-click menu or the viewer, or drag them onto an album in the sidebar. You can rename an album, change its cover or remove items; deleting an album never deletes files.
-- **Duplicates** — **exact copies** (identical bytes; extra copies can be removed in one click) and **look-alikes** (the same picture resized, re-saved by a messenger, edited or shot in a burst). The original or sharpest copy is suggested, you can keep a different one, and "Not duplicates" hides a group for good. Removed files go to the Recycle Bin.
+- **Clean up** (from DupeLens) — finds **exact copies** and **look-alikes** with DupeLens' fingerprint (72×72 grid, 128-bit difference hash in all 8 rotations/mirrorings + 4 centre crops; match threshold 80–99 %), so resized, re-saved, edited, rotated, mirrored and cropped copies are grouped, and loose groups are flagged “check before removing”. Keep rules (highest quality, sharpest, largest, oldest, newest) pre-select the copies to remove; protected folders are always kept; the Select menu adds all WhatsApp copies, lower-resolution copies or everything in a folder (never every copy of a group). **Compare** shows every copy side by side with synced zoom & pan or a swipe view, with keyboard review (1–9, K keep only, D remove, A auto, S swipe, Space next). Also **Blurry & dark**, **Screenshots**, **Large files**, **Duplicate folders** (≥ 90 % overlap) and **Backup check**, an HTML/CSV report, **Move to folder** (default “Duplicates”, not shown in Lumen) or **Recycle Bin**, kept copies can take the original's date, and **History** with undo (Ctrl+Z) — moved files can be put back any time.
 - **Library tools** — Favorites, Recently added, Folders, search (name, person, place, folder, month, year, camera, content), multi-select (Ctrl/Shift-click), move to Recycle Bin, copy image, drag files out to other apps, right-click menu.
 - **Windows 11 look** — Mica window material, light/dark/system theme, accent colors.
 - **Uses the discrete GPU** (e.g. NVIDIA RTX) on dual-graphics laptops — see *Settings → Performance*, which also shows the GPU in use.
@@ -67,6 +67,8 @@ The installer is written to `release/`.
 | F / I | Favorite / details panel |
 | E | Edit photo (Ctrl S save copy, Ctrl Z reset, Esc close) |
 | L | Play a Live Photo |
+| Ctrl Z / Ctrl H | Undo the last move / History |
+| Ctrl R | Review duplicates one by one (in Clean up) |
 | + − 0 | Zoom in / out / fit |
 
 ## Project layout
@@ -87,8 +89,11 @@ electron/          main process (CommonJS, no build step)
   smart.cjs        smart search: SigLIP embedding per item (smart.bin), text queries, ranking
   smart-engine.cjs SigLIP engine process (image + text encoders, SentencePiece tokenizer, DirectML)
   places.cjs       offline reverse geocoding (GeoNames), photos grouped by town
-  duplicates.cjs   exact copies (content hash) and look-alikes (128-bit visual hash), cached
+  duplicates.cjs   exact copies + look-alikes grouped (union-find), keep orders per rule, cached
   albums.cjs       albums (albums.json)
+  signature.cjs    DupeLens perceptual fingerprint (8 orientations + crops), sharpness, video frame alignment
+  dupes-pairs.cjs  all-pairs look-alike search (worker threads)
+  cleanup.cjs      move / Recycle Bin / carry dates / restore; history.cjs keeps history.json
   editor.cjs       photo edits (rotate, straighten, crop, light & colour) saved as copies
   protocol.cjs     gallery:// protocol (files, thumbnails, range requests for video)
   preload.cjs      safe bridge exposed to the UI as window.lumen

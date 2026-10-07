@@ -38,7 +38,14 @@ async function pool(list, limit, fn) {
   await Promise.all(workers)
 }
 
-async function walk(dir, out, onFound) {
+/** Lower-cased folder paths whose contents are left out (e.g. where removed duplicates go). */
+const isExcluded = (full, exclude) => {
+  if (!exclude?.length) return false
+  const p = full.toLowerCase()
+  return exclude.some((x) => p === x || p.startsWith(x + path.sep))
+}
+
+async function walk(dir, out, onFound, exclude) {
   let entries
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true })
@@ -50,7 +57,7 @@ async function walk(dir, out, onFound) {
     if (name.startsWith('.') || SKIP_DIRS.has(name.toLowerCase())) continue
     const full = path.join(dir, name)
     if (entry.isDirectory()) {
-      await walk(full, out, onFound)
+      if (!isExcluded(full, exclude)) await walk(full, out, onFound, exclude)
     } else if (entry.isFile() && isMedia(name)) {
       out.set(keyOf(full), full)
       onFound()
@@ -182,18 +189,20 @@ async function buildItem(file, st) {
     mtime,
     added: birth,
     date: Math.min(mtime, birth),
+    /** Capture date from the file itself (EXIF / video metadata), or null: not just a file date. */
+    taken: null,
   }
   if (type === 'image' && EXIF_EXT.has(ext)) {
     const exif = await readExif(file)
     if (exif) {
-      if (validDate(exif.date)) item.date = exif.date
+      if (validDate(exif.date)) item.date = item.taken = exif.date
       if (exif.meta) item.meta = exif.meta
     }
   } else if (type === 'video' && MP4_EXT.has(ext)) {
     const mp4 = await readMp4(file)
     if (mp4) {
       if (mp4.duration) item.duration = mp4.duration
-      if (mp4.created) item.date = mp4.created
+      if (mp4.created) item.date = item.taken = mp4.created
       if (mp4.gps) item.meta = { lat: mp4.gps.lat, lon: mp4.gps.lon }
     }
   }
@@ -273,7 +282,9 @@ class Library extends EventEmitter {
     this.save()
   }
 
-  async scan(folders) {
+  /** @param {string[]} exclude folders to leave out */
+  async scan(folders, exclude = this.exclude) {
+    this.exclude = (exclude ?? []).map((x) => x.toLowerCase().replace(/[\\/]+$/, ''))
     if (this.scanning) {
       this.rescanQueued = true
       return
@@ -293,10 +304,15 @@ class Library extends EventEmitter {
     try {
       const files = new Map()
       for (const root of folders) {
-        await walk(root, files, () => {
-          this.found++
-          emitStatus(false)
-        })
+        await walk(
+          root,
+          files,
+          () => {
+            this.found++
+            emitStatus(false)
+          },
+          this.exclude,
+        )
       }
       emitStatus(true)
 
@@ -314,7 +330,8 @@ class Library extends EventEmitter {
           return
         }
         const prev = this.items.get(key)
-        if (prev && prev.size === st.size && prev.mtime === Math.round(st.mtimeMs)) {
+        // (items cached by Lumen < 1.8 lack `taken`: read their metadata again once)
+        if (prev && prev.size === st.size && prev.mtime === Math.round(st.mtimeMs) && prev.taken !== undefined) {
           next.set(key, prev)
           return
         }
@@ -345,7 +362,7 @@ class Library extends EventEmitter {
       emitStatus(true)
       if (this.rescanQueued) {
         this.rescanQueued = false
-        this.scan(folders)
+        this.scan(folders, this.exclude)
       } else {
         this.emit('scanned')
       }

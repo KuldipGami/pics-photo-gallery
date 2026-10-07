@@ -26,6 +26,8 @@ export interface MediaItem {
   added: number
   /** Best guess at capture time: EXIF / MP4 metadata, else file time (ms). */
   date: number
+  /** Capture date from the file itself (EXIF / video metadata), else null. */
+  taken?: number | null
   duration?: number
   meta?: MediaMeta
 }
@@ -41,6 +43,19 @@ export interface Settings {
   highPerformanceGpu: boolean
   faceRecognition: boolean
   smartSearch: boolean
+  /** Clean up: match threshold 80–99 %. */
+  dupeSensitivity: number
+  findCrops: boolean
+  keepRule: KeepRule
+  /** Files in these folders are never selected for removal. */
+  protectedFolders: string[]
+  /** Where moved duplicates go (null = the default). */
+  moveDestination: string | null
+  defaultMoveDestination: string
+  /** Give kept copies the original's date before removing duplicates. */
+  carryDates: boolean
+  blurThreshold: number
+  largeFileMB: number
 }
 
 export interface Album {
@@ -75,22 +90,51 @@ export interface PlacesData {
   byItem: Record<string, string>
 }
 
-export interface DuplicateGroup {
+export type KeepRule = 'best' | 'sharpest' | 'largest' | 'oldest' | 'newest'
+
+/** How a file relates to its group's best copy: ['best'], ['identical'], [''] or [similarity, kind, quarter turns]. */
+export type MatchInfo = ['best'] | ['identical'] | [''] | [number, 'same' | 'rotated' | 'mirrored' | 'cropped', number]
+
+export interface DupGroup {
+  /** Group number (exact groups first, then by path). */
+  n: number
   ids: string[]
-  /** Suggested item to keep. */
-  keep: string
-  /** Bytes per copy (exact copies only). */
-  size?: number
+  exact: boolean
+  video: boolean
+  /** Index of the best copy (highest quality, ignoring protection). */
+  ref: number
+  /** Lowest similarity to the best copy (0–1). */
+  min: number
+  info: MatchInfo[]
+  /** Keep order (indexes) for each rule: best, sharpest, largest, oldest, newest. */
+  orders: number[][]
+  /** Index of the clearly sharpest shot of a burst, or -1. */
+  sharpest: number
 }
 
 export interface DuplicatesData {
-  exact: DuplicateGroup[]
-  similar: DuplicateGroup[]
-  /** Pixel size of look-alike photos: id → [width, height]. */
-  dims: Record<string, [number, number]>
-  exactFiles: number
-  exactBytes: number
-  similarGroups: number
+  groups: DupGroup[]
+  /** id → [sharpness, brightness, blank (0/1), width, height] for every analysed item. */
+  facts: Record<string, [number, number, number, number, number]>
+  sensitivity: number
+  findCrops: boolean
+}
+
+export interface HistoryFile {
+  from: string
+  to?: string
+  size?: number
+  restored?: boolean
+}
+
+export interface HistoryEntry {
+  id: string
+  time: number
+  kind: 'moved' | 'recycled' | 'copied' | 'renamed' | 'dates' | 'edited' | 'converted'
+  destination?: string
+  note?: string
+  files: HistoryFile[]
+  dateChanges?: { path: string; oldMtime: number; restored?: boolean }[]
 }
 
 export interface DuplicatesProgress {
@@ -241,7 +285,8 @@ export type View =
   | { kind: 'album'; id: string }
   | { kind: 'memories' }
   | { kind: 'trip'; id: string }
-  | { kind: 'duplicates' }
+  | { kind: 'cleanup' }
+  | { kind: 'history' }
   | { kind: 'settings' }
 
 export type TypeFilter = 'all' | 'image' | 'video'

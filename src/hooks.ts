@@ -4,6 +4,7 @@ import type {
   Album,
   DuplicatesData,
   DuplicatesProgress,
+  HistoryEntry,
   MediaItem,
   PeopleData,
   PeopleProgress,
@@ -29,7 +30,7 @@ export function useElementSize(ref: RefObject<HTMLElement | null>) {
 }
 
 const EMPTY_PEOPLE: PeopleData = { enabled: true, people: [], byItem: {}, analysed: 0, faces: 0 }
-const EMPTY_DUPES: DuplicatesData = { exact: [], similar: [], dims: {}, exactFiles: 0, exactBytes: 0, similarGroups: 0 }
+const EMPTY_DUPES: DuplicatesData = { groups: [], facts: {}, sensitivity: 90, findCrops: true }
 
 /** Live view of the main-process library, settings, scan status, people, albums, places… */
 export function useLibrary() {
@@ -43,6 +44,7 @@ export function useLibrary() {
   const [albums, setAlbums] = useState<Album[]>([])
   const [places, setPlaces] = useState<PlacesData>({ places: [], byItem: {} })
   const [dupes, setDupes] = useState<DuplicatesData>(EMPTY_DUPES)
+  const [history, setHistory] = useState<HistoryEntry[]>([])
   const [dupesProgress, setDupesProgress] = useState<DuplicatesProgress>({ running: false, phase: 'idle', done: 0, total: 0 })
   const [smartProgress, setSmartProgress] = useState<SmartProgress>({
     done: 0,
@@ -67,6 +69,7 @@ export function useLibrary() {
       api.onDuplicates(setDupes),
       api.onDuplicatesProgress(setDupesProgress),
       api.onSmartProgress(setSmartProgress),
+      api.onHistory(setHistory),
     ]
     api.getState().then((s) => {
       setItems(s.items)
@@ -80,6 +83,7 @@ export function useLibrary() {
       setDupes(s.dupes)
       setDupesProgress(s.dupesProgress)
       setSmartProgress(s.smartProgress)
+      setHistory(s.history)
     })
     return () => offs.forEach((off) => off())
   }, [])
@@ -98,6 +102,7 @@ export function useLibrary() {
     dupes,
     dupesProgress,
     smartProgress,
+    history,
   }
 }
 
@@ -137,12 +142,21 @@ export function useEvent<A extends unknown[], R>(fn: (...args: A) => R) {
   return useCallback((...args: A) => ref.current(...args), [])
 }
 
+export interface Toast {
+  id: number
+  text: string
+  /** A button in the toast, e.g. Undo or Open folder. */
+  action?: { label: string; run(): void }
+  error?: boolean
+}
+
 export function useToasts() {
-  const [toasts, setToasts] = useState<{ id: number; text: string }[]>([])
-  const push = useCallback((text: string) => {
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const push = useCallback((text: string, opts: { action?: Toast['action']; error?: boolean } = {}) => {
     const id = Date.now() + Math.random()
-    setToasts((t) => [...t.slice(-2), { id, text }])
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200)
+    setToasts((t) => [...t.slice(-2), { id, text, ...opts }])
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), opts.action || opts.error ? 10_000 : 3200)
   }, [])
-  return { toasts, push }
+  const dismiss = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), [])
+  return { toasts, push, dismiss }
 }

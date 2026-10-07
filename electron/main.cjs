@@ -30,6 +30,8 @@ const { Duplicates } = require('./duplicates.cjs')
 const { Places } = require('./places.cjs')
 const { SmartIndex } = require('./smart.cjs')
 const { Editor } = require('./editor.cjs')
+const { History } = require('./history.cjs')
+const cleanup = require('./cleanup.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
 
 registerScheme()
@@ -119,6 +121,15 @@ const store = new Store(path.join(userData, 'settings.json'), {
   highPerformanceGpu: true,
   faceRecognition: true,
   smartSearch: true,
+  // Clean up (from DupeLens)
+  dupeSensitivity: 90,
+  findCrops: true,
+  keepRule: 'best',
+  protectedFolders: [],
+  moveDestination: null,
+  carryDates: true,
+  blurThreshold: 30,
+  largeFileMB: 10,
   window: { width: 1360, height: 860 },
 })
 
@@ -147,6 +158,8 @@ let smart
 let placesData = { places: [], byItem: {} }
 /** @type {Editor} */
 let editor
+/** @type {History} */
+let history
 
 const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, 'models') : path.join(__dirname, '..', 'models')
 
@@ -172,6 +185,9 @@ function startServices() {
   })
   smart.enabled = store.get('smartSearch') !== false
   dupes = new Duplicates(path.join(userData, 'duplicates.json'), { canRun: idle, thumb: (item) => thumbs.ensure(item) })
+  configureDupes()
+  history = new History(path.join(userData, 'history.json'))
+  history.on('changed', () => send('history:changed', history.list()))
   albums = new Albums(path.join(userData, 'albums.json'))
   places = new Places(path.join(MODELS_DIR, 'places.json.gz'))
   editor = new Editor({ thumbs })
@@ -230,6 +246,15 @@ const settingsPayload = () => ({
   highPerformanceGpu: store.get('highPerformanceGpu') !== false,
   faceRecognition: store.get('faceRecognition') !== false,
   smartSearch: store.get('smartSearch') !== false,
+  dupeSensitivity: store.get('dupeSensitivity'),
+  findCrops: store.get('findCrops') !== false,
+  keepRule: store.get('keepRule'),
+  protectedFolders: store.get('protectedFolders'),
+  moveDestination: store.get('moveDestination'),
+  defaultMoveDestination: defaultMoveDestination(),
+  carryDates: store.get('carryDates') !== false,
+  blurThreshold: store.get('blurThreshold'),
+  largeFileMB: store.get('largeFileMB'),
 })
 
 let viewerOpen = false
@@ -250,8 +275,29 @@ function applyTheme() {
   if (win && !IS_MAC) win.setTitleBarOverlay(overlay())
 }
 
+/** Where 'Move to folder' puts removed duplicates: <first library folder>\Duplicates unless chosen. */
+function defaultMoveDestination() {
+  const first = store.get('folders')[0]
+  return first ? path.join(first, 'Duplicates') : path.join(app.getPath('pictures'), 'Duplicates')
+}
+const moveDestination = () => store.get('moveDestination') || defaultMoveDestination()
+
+/** Folders never scanned: removed duplicates, HEIC originals kept aside after converting. */
+function excludedFolders() {
+  const first = store.get('folders')[0]
+  return [moveDestination(), ...(first ? [path.join(first, 'HEIC originals')] : [])]
+}
+
+function configureDupes() {
+  dupes.configure({
+    sensitivity: store.get('dupeSensitivity'),
+    findCrops: store.get('findCrops') !== false,
+    folders: store.get('folders'),
+  })
+}
+
 function scan() {
-  library.scan(store.get('folders'))
+  library.scan(store.get('folders'), excludedFolders())
 }
 
 function watchFolders() {
@@ -360,6 +406,7 @@ async function addFolders(paths) {
     known.add(keyOf(p))
   }
   store.set({ folders })
+  configureDupes()
   send('settings:changed', settingsPayload())
   watchFolders()
   scan()
@@ -384,6 +431,7 @@ const appState = () => ({
   albums: albums.snapshot(),
   places: placesData,
   dupes: dupes.snapshot(),
+  history: history.list(),
   dupesProgress: dupes.progressInfo(),
   smartProgress: smart.progressInfo(),
   version: app.getVersion(),
@@ -511,6 +559,7 @@ ipcMain.handle('folders:add', (_e, paths) => addFolders(paths))
 
 ipcMain.handle('folders:remove', (_e, folder) => {
   store.set({ folders: store.get('folders').filter((f) => keyOf(f) !== keyOf(folder)) })
+  configureDupes()
   send('settings:changed', settingsPayload())
   watchFolders()
   scan()
@@ -531,33 +580,124 @@ ipcMain.handle('settings:set', (_e, patch) => {
     allowed.smartSearch = patch.smartSearch
     smart.setEnabled(patch.smartSearch)
   }
+  if (Number.isFinite(patch.dupeSensitivity)) allowed.dupeSensitivity = Math.round(Math.min(99, Math.max(80, patch.dupeSensitivity)))
+  if (typeof patch.findCrops === 'boolean') allowed.findCrops = patch.findCrops
+  if (['best', 'sharpest', 'largest', 'oldest', 'newest'].includes(patch.keepRule)) allowed.keepRule = patch.keepRule
+  if (Array.isArray(patch.protectedFolders)) allowed.protectedFolders = patch.protectedFolders.filter((p) => typeof p === 'string' && fs.existsSync(p))
+  if (patch.moveDestination === null || (typeof patch.moveDestination === 'string' && path.isAbsolute(patch.moveDestination))) allowed.moveDestination = patch.moveDestination
+  if (typeof patch.carryDates === 'boolean') allowed.carryDates = patch.carryDates
+  if (Number.isFinite(patch.blurThreshold)) allowed.blurThreshold = Math.min(80, Math.max(5, Math.round(patch.blurThreshold)))
+  if (Number.isFinite(patch.largeFileMB)) allowed.largeFileMB = Math.min(500, Math.max(5, Math.round(patch.largeFileMB)))
   store.set(allowed)
+  if ('dupeSensitivity' in allowed || 'findCrops' in allowed) configureDupes()
+  if ('moveDestination' in allowed) scan()
   if (allowed.theme) applyTheme()
   send('settings:changed', settingsPayload())
 })
 
 ipcMain.handle('favorites:set', (_e, ids, value) => setFavorites(ids, !!value))
 
-ipcMain.handle('items:trash', async (_e, ids) => {
-  const removed = []
-  let failed = 0
-  for (const item of itemsFor(ids)) {
-    try {
-      await shell.trashItem(item.path)
-      removed.push(item.id)
-    } catch {
-      failed++
+/** Files that left the library (moved away or recycled): drop them everywhere. */
+function forgetItems(ids) {
+  if (!ids.length) return
+  setFavorites(ids, false)
+  library.remove(ids)
+  faces.removeItems(ids)
+  albums.forget(ids)
+  smart.sync(library.list)
+  dupes.sync(library.list)
+}
+
+/**
+ * Recycle Bin or move to a folder. Before removing, kept copies in the same duplicate groups can
+ * get the original's date (carry dates). Every action is recorded in History.
+ */
+async function removeItems(ids, how, dest) {
+  const items = itemsFor(idList(ids))
+  if (!items.length) return { removed: 0, failed: 0, errors: [] }
+  const removing = new Set(items.map((it) => it.id))
+  const byId = new Map(library.list.map((it) => [it.id, it]))
+  const dateChanges = store.get('carryDates') !== false ? await cleanup.carryDates(dupes.groupsOf([...removing]), removing, byId) : []
+  const destination = how === 'move' ? dest || moveDestination() : undefined
+  const res = how === 'move' ? await cleanup.moveTo(items, destination) : await cleanup.recycle(items)
+  let entry = null
+  if (res.files.length || dateChanges.length) {
+    entry = history.add({
+      kind: how === 'move' ? 'moved' : 'recycled',
+      destination,
+      files: res.files.map(({ id, ...f }) => f),
+      dateChanges,
+    })
+  }
+  forgetItems(res.files.map((f) => f.id))
+  return { removed: res.files.length, failed: res.errors.length, errors: res.errors, entryId: entry?.id ?? null, destination }
+}
+
+ipcMain.handle('items:trash', (_e, ids) => removeItems(ids, 'recycle'))
+ipcMain.handle('cleanup:move', (_e, ids, dest) => removeItems(ids, 'move', typeof dest === 'string' && path.isAbsolute(dest) ? dest : undefined))
+ipcMain.handle('cleanup:pick-destination', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Where should removed duplicates go?',
+    defaultPath: moveDestination(),
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  if (res.canceled || !res.filePaths[0]) return null
+  store.set({ moveDestination: res.filePaths[0] })
+  send('settings:changed', settingsPayload())
+  scan()
+  return res.filePaths[0]
+})
+ipcMain.handle('cleanup:pick-folder', async (_e, title) => {
+  const res = await dialog.showOpenDialog(win, { title: typeof title === 'string' ? title : 'Choose a folder', properties: ['openDirectory', 'multiSelections'] })
+  return res.canceled ? [] : res.filePaths
+})
+
+// ---------- history ----------
+
+ipcMain.handle('history:list', () => history.list())
+ipcMain.handle('history:clear', () => history.clear())
+ipcMain.handle('history:restore', async (_e, id) => {
+  const entry = typeof id === 'string' ? history.get(id) : null
+  if (!entry) return { restored: 0 }
+  let restored = 0
+  if (entry.kind === 'moved' || entry.kind === 'renamed') {
+    restored = await cleanup.restoreMoves(entry.files)
+    await cleanup.restoreDates(entry.dateChanges)
+  } else if (entry.kind === 'dates') {
+    for (const f of entry.files) {
+      if (f.restored || !Number.isFinite(f.oldMtime)) continue
+      try {
+        await cleanup.setFileDate(f.from, f.oldMtime)
+        f.restored = true
+        restored++
+      } catch {}
     }
   }
-  if (removed.length) {
-    setFavorites(removed, false)
-    library.remove(removed)
-    faces.removeItems(removed)
-    albums.forget(removed)
-    smart.sync(library.list)
-    dupes.sync(library.list)
-  }
-  return { removed: removed.length, failed }
+  history.changed(entry)
+  if (restored) scan()
+  return { restored, total: entry.files.length }
+})
+ipcMain.handle('shell:recycle-bin', () => {
+  if (process.platform === 'win32') require('node:child_process').spawn('explorer.exe', ['shell:RecycleBinFolder'], { detached: true, stdio: 'ignore' }).unref()
+})
+
+// ---------- reports ----------
+
+ipcMain.handle('report:save', async (_e, html, csv) => {
+  if (typeof html !== 'string' || typeof csv !== 'string') return null
+  const stamp = new Date().toISOString().slice(0, 10)
+  const res = await dialog.showSaveDialog(win, {
+    title: 'Export a report',
+    defaultPath: path.join(app.getPath('documents'), `Lumen report ${stamp}.html`),
+    filters: [
+      { name: 'Web page report', extensions: ['html'] },
+      { name: 'Spreadsheet', extensions: ['csv'] },
+    ],
+  })
+  if (res.canceled || !res.filePath) return null
+  const asCsv = res.filePath.toLowerCase().endsWith('.csv')
+  await fs.promises.writeFile(res.filePath, asCsv ? '﻿' + csv : html, 'utf8')
+  return res.filePath
 })
 
 ipcMain.handle('items:reveal', (_e, id) => {
@@ -688,7 +828,7 @@ app.whenReady().then(async () => {
   handleProtocol({ library, thumbs })
   // Show the window right away; the saved library, faces, albums… load meanwhile (~0.5 s).
   createWindow()
-  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load()])
+  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), history.load()])
   placesData = places.group(library.list)
   markServicesReady()
   trace(`data loaded: ${library.list.length} items`)

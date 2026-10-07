@@ -1,11 +1,16 @@
 import { FolderPlus } from 'lucide-react'
 import { useEffect, useRef, type ReactNode } from 'react'
+import type { Toast } from '../hooks'
 
 export interface ConfirmOptions {
   title: string
   message: string
   confirmLabel: string
   danger?: boolean
+  /** Shown in an amber box. */
+  warning?: string
+  /** Extra content between the message and the buttons (e.g. a destination folder). */
+  extra?: ReactNode
   onConfirm(): void
 }
 
@@ -33,6 +38,8 @@ export function ConfirmDialog({ options, onClose }: { options: ConfirmOptions; o
       <div className="modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
         <h3>{options.title}</h3>
         <p>{options.message}</p>
+        {options.extra}
+        {options.warning && <div className="modal-warning">{options.warning}</div>}
         <div className="modal-actions">
           <button className="btn ghost" onClick={onClose}>
             Cancel
@@ -53,12 +60,23 @@ export function ConfirmDialog({ options, onClose }: { options: ConfirmOptions; o
   )
 }
 
-export function Toasts({ toasts }: { toasts: { id: number; text: string }[] }) {
+export function Toasts({ toasts, onDismiss }: { toasts: Toast[]; onDismiss?(id: number): void }) {
   return (
     <div className="toasts" aria-live="polite">
       {toasts.map((t) => (
-        <div key={t.id} className="toast">
-          {t.text}
+        <div key={t.id} className={`toast${t.error ? ' error' : ''}${t.action ? ' has-action' : ''}`}>
+          <span>{t.text}</span>
+          {t.action && (
+            <button
+              className="toast-action"
+              onClick={() => {
+                t.action!.run()
+                onDismiss?.(t.id)
+              }}
+            >
+              {t.action.label}
+            </button>
+          )}
         </div>
       ))}
     </div>

@@ -4,6 +4,8 @@ import type {
   DuplicatesProgress,
   EditRecipe,
   GpuInfo,
+  HistoryEntry,
+  KeepRule,
   MediaItem,
   PairSuggestion,
   PeopleData,
@@ -19,6 +21,15 @@ import type {
 
 type Unsubscribe = () => void
 
+export interface RemoveResult {
+  removed: number
+  failed: number
+  errors?: string[]
+  /** History entry (for undo). */
+  entryId?: string | null
+  destination?: string
+}
+
 export interface LumenApi {
   env: { platform: string; mica: boolean }
   getState(): Promise<{
@@ -33,6 +44,7 @@ export interface LumenApi {
     dupes: DuplicatesData
     dupesProgress: DuplicatesProgress
     smartProgress: SmartProgress
+    history: HistoryEntry[]
   }>
   /** Resolves to the new album's id. */
   createAlbum(name: string, ids: string[]): Promise<string>
@@ -45,6 +57,18 @@ export interface LumenApi {
   onAlbums(cb: (albums: Album[]) => void): Unsubscribe
   onPlaces(cb: (places: PlacesData) => void): Unsubscribe
   dismissDuplicates(ids: string[]): Promise<void>
+  /** Moves files into one folder (default: the Clean up destination). */
+  moveItems(ids: string[], dest?: string): Promise<RemoveResult>
+  /** Choose where moved duplicates go (saved as the default). */
+  pickDestination(): Promise<string | null>
+  pickFolders(title: string): Promise<string[]>
+  historyList(): Promise<HistoryEntry[]>
+  restoreHistory(id: string): Promise<{ restored: number; total?: number }>
+  clearHistory(): Promise<void>
+  onHistory(cb: (entries: HistoryEntry[]) => void): Unsubscribe
+  openRecycleBin(): Promise<void>
+  /** Save dialog; writes the HTML or the CSV depending on the chosen type. */
+  saveReport(html: string, csv: string): Promise<string | null>
   onDuplicates(cb: (data: DuplicatesData) => void): Unsubscribe
   onDuplicatesProgress(cb: (progress: DuplicatesProgress) => void): Unsubscribe
   /** Items whose content matches the text, best first, with a 0–1 match score. */
@@ -89,10 +113,18 @@ export interface LumenApi {
       highPerformanceGpu: boolean
       faceRecognition: boolean
       smartSearch: boolean
+      dupeSensitivity: number
+      findCrops: boolean
+      keepRule: KeepRule
+      protectedFolders: string[]
+      moveDestination: string | null
+      carryDates: boolean
+      blurThreshold: number
+      largeFileMB: number
     }>,
   ): Promise<void>
   setFavorite(ids: string[], value: boolean): Promise<void>
-  trash(ids: string[]): Promise<{ removed: number; failed: number }>
+  trash(ids: string[]): Promise<RemoveResult>
   reveal(id: string): Promise<void>
   openExternal(id: string): Promise<string>
   copy(id: string, kind: 'image' | 'path'): Promise<boolean>
