@@ -35,23 +35,52 @@ const isNewer = (a, b) => {
   return false
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Is `pid` a running copy of this app (same executable name)? Guards against reused PIDs. */
+function isOurProcess(pid) {
+  if (process.platform !== 'win32' || !Number.isInteger(pid) || pid === process.pid) return false
+  try {
+    const out = require('node:child_process').execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 3000,
+    })
+    return out.toLowerCase().startsWith(`"${path.basename(process.execPath).toLowerCase()}"`)
+  } catch {
+    return false
+  }
+}
+
 /**
  * Only one Lumen runs at a time. Launching a *newer* version while an older one (1.2+) is open
- * makes the old one quit and hand over, so the newest build is always the one you see.
+ * makes the old one quit and hand over, so the newest build is always the one you see. An old
+ * copy that can't quit (1.6.0 could get stuck in the background after its window closed) is
+ * ended after 5 seconds.
  */
 async function acquireSingleInstance() {
   const data = { version: VERSION }
   if (app.requestSingleInstanceLock(data)) return true
   let running = null
   try {
-    running = JSON.parse(fs.readFileSync(INSTANCE_FILE, 'utf8')).version
+    running = JSON.parse(fs.readFileSync(INSTANCE_FILE, 'utf8'))
   } catch {}
-  if (!running || !isNewer(VERSION, running)) return false // the open window was focused instead
-  for (let i = 0; i < 25; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    if (app.requestSingleInstanceLock(data)) return true
+  if (!running?.version || !isNewer(VERSION, running.version)) return false // the open window was focused instead
+  const waitForLock = async () => {
+    for (let i = 0; i < 25; i++) {
+      await sleep(200)
+      if (app.requestSingleInstanceLock(data)) return true
+    }
+    return false
   }
-  return false
+  if (await waitForLock()) return true
+  if (!isOurProcess(running.pid)) return false
+  try {
+    process.kill(running.pid)
+  } catch {
+    return false
+  }
+  return waitForLock()
 }
 
 const singleInstance = acquireSingleInstance()
@@ -244,7 +273,7 @@ function createWindow() {
   win.once('ready-to-show', () => {
     if (saved.maximized) win.maximize()
     win.show()
-    thumbs.warmUp(library.list)
+    servicesReady.then(() => thumbs.warmUp(library.list))
   })
 
   win.on('close', () => {
@@ -318,7 +347,16 @@ async function addFolders(paths) {
   return settingsPayload()
 }
 
-ipcMain.handle('app:state', () => ({
+// The window opens while saved data is still loading; the UI's first request waits for it.
+let markServicesReady
+const servicesReady = new Promise((resolve) => (markServicesReady = resolve))
+
+ipcMain.handle('app:state', async () => {
+  await servicesReady
+  return appState()
+})
+
+const appState = () => ({
   items: library.list,
   status: library.status(),
   settings: settingsPayload(),
@@ -330,7 +368,7 @@ ipcMain.handle('app:state', () => ({
   dupesProgress: dupes.progressInfo(),
   smartProgress: smart.progressInfo(),
   version: app.getVersion(),
-}))
+})
 
 let gpuInfo = null
 ipcMain.handle('app:gpu', async () => {
@@ -584,8 +622,13 @@ app.on('second-instance', (_event, _argv, _cwd, data) => {
     app.quit()
     return
   }
-  if (!win) return
+  // No window (e.g. still starting, or closed while background work finished): open one.
+  if (!win) {
+    if (!quitting && library) createWindow()
+    return
+  }
   if (win.isMinimized()) win.restore()
+  win.show()
   win.focus()
 })
 
@@ -598,9 +641,11 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
   startServices()
   handleProtocol({ library, thumbs })
+  // Show the window right away; the saved library, faces, albums… load meanwhile (~0.5 s).
+  createWindow()
   await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load()])
   placesData = places.group(library.list)
-  createWindow()
+  markServicesReady()
   thumbs.prefetch(library.list)
   faces.sync(library.list)
   smart.sync(library.list)
@@ -618,12 +663,18 @@ app.on('window-all-closed', () => {
   if (!IS_MAC) app.quit()
 })
 
+let quitting = false
+
 app.on('before-quit', () => {
-  if (!ownsInstance) return
+  if (!ownsInstance || quitting) return
+  quitting = true
   store.saveNow()
   thumbs?.dispose()
   faces?.dispose()
   smart?.dispose()
   dupes?.dispose()
   albums?.saveNow()
+  // Everything is saved. If anything still holds the app open, don't linger invisibly in the
+  // background (that blocks the next launch): exit for real.
+  setTimeout(() => app.exit(0), 3000).unref()
 })

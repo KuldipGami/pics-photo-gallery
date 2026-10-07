@@ -189,6 +189,7 @@ class Thumbnails extends EventEmitter {
   }
 
   schedule(item, kind, priority) {
+    if (this.disposed) return Promise.resolve(null)
     const name = this.name(item, kind)
     const existing = this.jobs.get(name)
     if (existing) {
@@ -222,6 +223,7 @@ class Thumbnails extends EventEmitter {
   }
 
   async generate({ item, kind, name }) {
+    if (this.disposed) return null
     const size = SIZES[kind]
     let data = null
     if (item.type === 'video') {
@@ -318,7 +320,14 @@ class Thumbnails extends EventEmitter {
     this.failed.clear()
   }
 
+  /** The app is quitting: drop queued work and close the worker windows for good. */
   dispose() {
+    this.disposed = true
+    for (const lane of [this.cpu, this.gpu, this.shell]) {
+      lane.high = []
+      lane.low = []
+      lane.lowIndex = 0
+    }
     this.videoWorkers.destroy()
     this.shellWorkers.destroy()
   }

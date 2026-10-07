@@ -173,7 +173,7 @@ class Duplicates extends EventEmitter {
   }
 
   pump() {
-    if (!this.items.length || !this.canRun()) return
+    if (this.disposed || !this.items.length || !this.canRun()) return
     if (this.running) {
       this.again = true
       return
@@ -395,6 +395,8 @@ class Duplicates extends EventEmitter {
   }
 
   dispose() {
+    this.disposed = true
+    clearTimeout(this.timers.sync)
     this.saveNow()
   }
 }

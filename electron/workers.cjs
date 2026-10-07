@@ -20,9 +20,13 @@ class MediaWorker {
     this.win = null
     this.ready = null
     this.inflight = 0
+    this.closed = false
   }
 
   start() {
+    // After destroy() (the app is quitting) never open a window again: a new window would keep
+    // the app alive with nothing on screen.
+    if (this.closed) return Promise.reject(new Error('worker closed'))
     if (this.win && !this.win.isDestroyed()) return this.ready
     this.win = new BrowserWindow({
       show: false,
@@ -84,7 +88,8 @@ class MediaWorker {
   }
 
   destroy() {
-    if (this.win && !this.win.isDestroyed()) this.win.destroy()
+    this.closed = true
+    if (this.win) this.reset(this.win)
     this.win = null
   }
 }

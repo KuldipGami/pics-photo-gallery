@@ -96,6 +96,7 @@ class FaceEngine {
   }
 
   start() {
+    if (this.closed) return Promise.reject(new Error('The app is closing'))
     if (this.child) return this.ready
     const child = utilityProcess.fork(path.join(__dirname, 'face-engine.cjs'), [], {
       serviceName: 'Lumen face recognition',
@@ -150,6 +151,7 @@ class FaceEngine {
   }
 
   dispose() {
+    this.closed = true
     this.child?.kill()
     this.child = null
   }
@@ -331,7 +333,7 @@ class FaceIndex extends EventEmitter {
   }
 
   pump() {
-    if (!this.enabled || this.halted || !this.canRun()) return
+    if (!this.enabled || this.halted || this.disposed || !this.canRun()) return
     while (this.active < CONCURRENCY && this.queue.length) {
       const item = this.photos.get(this.queue.shift())
       if (!item || this.items.has(item.id) || this.inflight.has(item.id)) continue
@@ -845,6 +847,8 @@ class FaceIndex extends EventEmitter {
   }
 
   dispose() {
+    this.disposed = true
+    this.queue = []
     this.saveNow()
     this.engine.dispose()
   }

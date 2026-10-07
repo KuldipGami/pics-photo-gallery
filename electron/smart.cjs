@@ -32,6 +32,7 @@ class SmartEngine {
   }
 
   start() {
+    if (this.closed) return Promise.reject(new Error('The app is closing'))
     if (this.child) return this.ready
     const child = utilityProcess.fork(path.join(__dirname, 'smart-engine.cjs'), [], {
       serviceName: 'Lumen smart search',
@@ -86,6 +87,7 @@ class SmartEngine {
   }
 
   dispose() {
+    this.closed = true
     this.child?.kill()
     this.child = null
   }
@@ -226,7 +228,7 @@ class SmartIndex extends EventEmitter {
   }
 
   pump() {
-    if (!this.enabled || this.halted || !this.available || !this.canRun()) return
+    if (!this.enabled || this.halted || this.disposed || !this.available || !this.canRun()) return
     while (this.active < CONCURRENCY && this.queue.length) {
       const item = this.media.get(this.queue.shift())
       if (!item || this.vectors.has(item.id) || this.inflight.has(item.id)) continue
@@ -349,6 +351,8 @@ class SmartIndex extends EventEmitter {
   }
 
   dispose() {
+    this.disposed = true
+    this.queue = []
     this.saveNow()
     this.engine.dispose()
   }
