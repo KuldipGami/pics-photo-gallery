@@ -19,6 +19,9 @@ A modern photo & video gallery for your desktop. Built with Electron, React and 
   - In the viewer's details panel every face gets a chip (unrecognised ones say "Who's this?"); hover it to outline the face in the photo. Faces are found and recognised on the GPU with **InsightFace** (SCRFD-10G detector + ArcFace ResNet-50, "buffalo_l") on ONNX Runtime / DirectML; nothing is uploaded, and *Settings → People* shows where the model runs and can turn it off or delete all face data. The InsightFace pretrained models are licensed for **non-commercial use only**.
 - **Search by what's in the photo** — type “beach”, “dog”, “birthday cake” or “receipt” and Lumen finds matching photos and videos, with no tags needed. Words that name a person, place or date filter strictly, so “goa beach 2023” means beach photos taken in Goa in 2023. It uses Google's **SigLIP** model (Apache 2.0) on the GPU through ONNX Runtime / DirectML (about 8 ms per photo on an RTX 4070); nothing is uploaded.
 - **Places** — photos and videos with a GPS position, grouped by town and filterable by country, plus the place name in the details panel. Place names come from a bundled copy of **GeoNames** (161k towns, CC BY 4.0) and are looked up offline. Phone videos' locations are read too.
+- **Memories** — **trips** found automatically from where and when photos were taken (home bases are the places you keep returning to; photos without a location taken during a trip, in the same folders, are included), and **On this day**: photos from today's date in earlier years, as a strip above Photos and on the Memories page.
+- **Edit photos** — rotate, flip, straighten, crop (free or fixed proportions, dragged on the photo), auto-enhance, light, contrast, colour and warmth, with a live preview rendered by the same code that saves. Edits are always **saved as a new copy** next to the original (capture date, camera and place kept); HEIC/RAW are decoded at full size by Windows.
+- **Videos** — hover a video (or Live Photo) to play a silent preview; long videos remember where you stopped; **Live Photos** (an iPhone still + its short clip) show as one photo with a LIVE button.
 - **Albums** — your own collections. Add items from the selection bar, the right-click menu or the viewer, or drag them onto an album in the sidebar. You can rename an album, change its cover or remove items; deleting an album never deletes files.
 - **Duplicates** — **exact copies** (identical bytes; extra copies can be removed in one click) and **look-alikes** (the same picture resized, re-saved by a messenger, edited or shot in a burst). The original or sharpest copy is suggested, you can keep a different one, and "Not duplicates" hides a group for good. Removed files go to the Recycle Bin.
 - **Library tools** — Favorites, Recently added, Folders, search (name, person, place, folder, month, year, camera, content), multi-select (Ctrl/Shift-click), move to Recycle Bin, copy image, drag files out to other apps, right-click menu.
@@ -62,6 +65,8 @@ The installer is written to `release/`.
 | ← → Home End | Navigate in the viewer |
 | Space | Slideshow · play/pause video |
 | F / I | Favorite / details panel |
+| E | Edit photo (Ctrl S save copy, Ctrl Z reset, Esc close) |
+| L | Play a Live Photo |
 | + − 0 | Zoom in / out / fit |
 
 ## Project layout
@@ -84,6 +89,7 @@ electron/          main process (CommonJS, no build step)
   places.cjs       offline reverse geocoding (GeoNames), photos grouped by town
   duplicates.cjs   exact copies (content hash) and look-alikes (128-bit visual hash), cached
   albums.cjs       albums (albums.json)
+  editor.cjs       photo edits (rotate, straighten, crop, light & colour) saved as copies
   protocol.cjs     gallery:// protocol (files, thumbnails, range requests for video)
   preload.cjs      safe bridge exposed to the UI as window.lumen
 src/               React UI (Vite)

@@ -2513,3 +2513,413 @@ html[data-platform='darwin'] .titlebar {
 .link:hover {
   text-decoration: underline;
 }
+
+/* ==========================================================================
+   Memories & trips
+   ========================================================================== */
+
+.memories-section h2 {
+  margin: 4px 28px 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.memories-section + .memories-section {
+  margin-top: 8px;
+}
+.memory-row {
+  display: flex;
+  gap: 12px;
+  padding: 0 28px 18px;
+  overflow-x: auto;
+}
+.memory-card {
+  position: relative;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 168px;
+  height: 224px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 14px;
+  background: var(--surface-3);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.memory-card img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.memory-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow);
+}
+.memory-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.65), transparent 55%);
+}
+.memory-text {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 11px;
+  display: flex;
+  flex-direction: column;
+  color: #fff;
+  text-align: left;
+  font-size: 12px;
+}
+.memory-text b {
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.memory-text span {
+  opacity: 0.85;
+}
+.memory-strip {
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+.memory-strip-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 28px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.memory-strip-head svg {
+  color: var(--accent);
+}
+.memory-strip .memory-card {
+  width: 128px;
+  height: 150px;
+}
+.memory-strip .memory-row {
+  padding-bottom: 12px;
+}
+.trip-where {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ==========================================================================
+   Video previews, Live Photos, resume
+   ========================================================================== */
+
+.thumb-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  animation: fade-in 0.2s ease-out;
+}
+.thumb-live {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+}
+.live-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  margin-right: 6px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.live-btn:hover,
+.live-btn.on {
+  background: rgba(255, 255, 255, 0.2);
+}
+.live-dot {
+  width: 9px;
+  height: 9px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+.live-btn.on .live-dot {
+  background: currentColor;
+}
+.live-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  animation: fade-in 0.15s ease-out;
+}
+.resume-chip {
+  position: absolute;
+  left: 50%;
+  bottom: 70px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px 7px 14px;
+  border-radius: 18px;
+  background: rgba(20, 20, 24, 0.85);
+  color: #fff;
+  font-size: 13px;
+  transform: translateX(-50%);
+  backdrop-filter: blur(10px);
+  animation: fade-in 0.2s ease-out;
+}
+.resume-chip button {
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.resume-chip button:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+/* ==========================================================================
+   Photo editor
+   ========================================================================== */
+
+.editor {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  background: #060607;
+  color: #f3f3f5;
+  animation: fade-in 0.15s ease-out;
+}
+.editor-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  margin-top: 44px;
+  display: grid;
+  place-items: center;
+  touch-action: none;
+}
+.editor-canvas {
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+}
+.editor-canvas img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  user-select: none;
+}
+.crop-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  cursor: move;
+}
+.crop-grid {
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.35) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.35) 1px, transparent 1px);
+  background-size: 33.333% 33.333%;
+  background-position: -1px -1px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+.crop-box:hover .crop-grid,
+.crop-box:active .crop-grid {
+  opacity: 1;
+}
+.crop-handle {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+}
+.crop-handle::after {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+.crop-handle.nw { left: 0; top: 0; cursor: nwse-resize; }
+.crop-handle.n { left: 50%; top: 0; cursor: ns-resize; }
+.crop-handle.ne { left: 100%; top: 0; cursor: nesw-resize; }
+.crop-handle.e { left: 100%; top: 50%; cursor: ew-resize; }
+.crop-handle.se { left: 100%; top: 100%; cursor: nwse-resize; }
+.crop-handle.s { left: 50%; top: 100%; cursor: ns-resize; }
+.crop-handle.sw { left: 0; top: 100%; cursor: nesw-resize; }
+.crop-handle.w { left: 0; top: 50%; cursor: ew-resize; }
+.editor-busy {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+}
+.editor-panel {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 300px;
+  padding-top: 44px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  background: #111214;
+}
+.editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px 6px 20px;
+}
+.editor-head h3 {
+  margin: 0;
+  font: 600 17px var(--font-display);
+}
+.editor .icon-btn {
+  color: rgba(255, 255, 255, 0.85);
+}
+.editor .icon-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.editor-tools {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 20px 12px;
+}
+.edit-section {
+  padding: 12px 0 16px;
+}
+.edit-section + .edit-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.edit-section h4 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+}
+.edit-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.editor .btn.ghost {
+  color: rgba(255, 255, 255, 0.82);
+}
+.editor .btn.ghost:hover,
+.editor .btn.ghost.on {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.edit-slider {
+  display: block;
+  margin: 10px 0 4px;
+}
+.edit-slider span {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.edit-slider b {
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+.edit-slider input {
+  width: 100%;
+  margin: 6px 0 0;
+  accent-color: var(--accent);
+}
+.edit-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.editor .chip {
+  height: 28px;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12.5px;
+}
+.editor .chip:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: #fff;
+}
+.editor .chip.active {
+  border-color: transparent;
+  background: var(--accent);
+  color: #fff;
+}
+.edit-hint,
+.edit-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+}
+.edit-note {
+  margin: 0;
+  padding: 0 20px 16px;
+}
+.btn.enhance {
+  width: 100%;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: transparent;
+  color: #fff;
+}
+.btn.enhance.on {
+  border-color: transparent;
+  background: var(--accent);
+}
+.editor-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.editor .btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

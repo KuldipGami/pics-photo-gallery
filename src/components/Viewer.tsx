@@ -10,6 +10,7 @@ import {
   Info,
   Pause,
   Play,
+  SlidersHorizontal,
   Trash,
   VideoOff,
   ZoomIn,
@@ -18,9 +19,10 @@ import {
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { api, mediaUrl, thumbUrl } from '../api'
 import { useElementSize } from '../hooks'
-import { formatLongDate, formatTime } from '../lib/format'
+import { formatDuration, formatLongDate, formatTime } from '../lib/format'
 import type { FaceBox, MediaItem, Place } from '../types'
 import { InfoPanel, type PhotoFace } from './InfoPanel'
+import { PhotoEditor } from './PhotoEditor'
 import { ZoomableImage, type ZoomControls } from './ZoomableImage'
 
 interface Props {
@@ -39,6 +41,10 @@ interface Props {
   onAddToAlbum(item: MediaItem): void
   placeOf(itemId: string): Place | undefined
   onOpenPlace(id: string): void
+  /** The motion clip of a Live Photo. */
+  liveOf(itemId: string): MediaItem | undefined
+  /** An edited copy was saved (it appears in the library a moment later). */
+  onEdited(original: MediaItem, id: string, name: string): void
 }
 
 const SLIDE_MS = 4000
@@ -73,8 +79,14 @@ export function Viewer({
   onAddToAlbum,
   placeOf,
   onOpenPlace,
+  liveOf,
+  onEdited,
 }: Props) {
   const item = items[index]
+  const [editing, setEditing] = useState(false)
+  const [livePlaying, setLivePlaying] = useState(false)
+  const live = item?.type === 'image' ? liveOf(item.id) : undefined
+  useEffect(() => setLivePlaying(false), [item?.id])
   const [showInfo, setShowInfo] = useState(() => readPref('lumen.info') === '1')
   const [idle, setIdle] = useState(false)
   const [slideshow, setSlideshow] = useState(false)
@@ -197,11 +209,20 @@ export function Viewer({
         case 'c':
           if (e.ctrlKey) copyImage()
           break
+        case 'e':
+        case 'E':
+          if (item.type === 'image' && !mod) setEditing(true)
+          break
+        case 'l':
+        case 'L':
+          if (live && !mod) setLivePlaying(true)
+          break
         default:
           return
       }
       poke()
     }
+    if (editing) return
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   })
@@ -235,14 +256,29 @@ export function Viewer({
         <div className="viewer-main">
           <div className="viewer-stage">
             {item.type === 'image' ? (
-              <ZoomableImage
-                key={item.id}
-                item={item}
-                controls={zoomControls}
-                onDims={onDims}
-                onZoom={onZoom}
-                highlight={highlight}
-              />
+              <>
+                <ZoomableImage
+                  key={item.id}
+                  item={item}
+                  controls={zoomControls}
+                  onDims={onDims}
+                  onZoom={onZoom}
+                  highlight={highlight}
+                />
+                {live && livePlaying && (
+                  <video
+                    key={live.id}
+                    className="live-video"
+                    src={mediaUrl(live)}
+                    autoPlay
+                    playsInline
+                    muted={readPref('lumen.muted') === '1'}
+                    onEnded={() => setLivePlaying(false)}
+                    onError={() => setLivePlaying(false)}
+                    onClick={() => setLivePlaying(false)}
+                  />
+                )}
+              </>
             ) : (
               <VideoPlayer
                 key={item.id}
@@ -279,6 +315,15 @@ export function Viewer({
               </div>
             </div>
             <div className="viewer-actions">
+              {live && (
+                <button
+                  className={`live-btn${livePlaying ? ' on' : ''}`}
+                  onClick={() => setLivePlaying((p) => !p)}
+                  title="Play the Live Photo (L)"
+                >
+                  <span className="live-dot" /> LIVE
+                </button>
+              )}
               {item.type === 'image' && (
                 <div className="zoom-group">
                   <button className="icon-btn" onClick={() => zoomControls.current?.zoom(0.8)} title="Zoom out (−)">
@@ -309,6 +354,11 @@ export function Viewer({
               <button className="icon-btn" onClick={() => onAddToAlbum(item)} title="Add to album">
                 <ImagePlus size={18} />
               </button>
+              {item.type === 'image' && (
+                <button className="icon-btn" onClick={() => setEditing(true)} title="Edit (E)">
+                  <SlidersHorizontal size={18} />
+                </button>
+              )}
               {item.type === 'image' && (
                 <button className="icon-btn" onClick={copyImage} title="Copy image (Ctrl+C)">
                   <Copy size={18} />
@@ -351,6 +401,18 @@ export function Viewer({
           />
         )}
       </div>
+      {editing && item.type === 'image' && (
+        <PhotoEditor
+          key={item.id}
+          item={item}
+          onClose={() => setEditing(false)}
+          onToast={onToast}
+          onSaved={(id, name) => {
+            setEditing(false)
+            onEdited(item, id, name)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -367,6 +429,13 @@ function VideoPlayer({
   onEnded(): void
 }) {
   const [error, setError] = useState(false)
+  const [resumed, setResumed] = useState<number | null>(null)
+  const lastSave = useRef(0)
+  useEffect(() => {
+    if (resumed === null) return
+    const t = setTimeout(() => setResumed(null), 6000)
+    return () => clearTimeout(t)
+  }, [resumed])
 
   if (error) {
     return (
@@ -381,34 +450,83 @@ function VideoPlayer({
   }
 
   return (
-    <video
-      ref={(el) => {
-        videoRef.current = el
-        if (el && !el.dataset.init) {
-          el.dataset.init = '1'
-          el.volume = Number(readPref('lumen.volume') ?? 1)
-          el.muted = readPref('lumen.muted') === '1'
-        }
-      }}
-      className="viewer-video"
-      src={mediaUrl(item)}
-      poster={thumbUrl(item)}
-      controls
-      autoPlay
-      playsInline
-      onLoadedMetadata={(e) => {
-        const v = e.currentTarget
-        onDims(v.videoWidth, v.videoHeight)
-        if (!item.duration && Number.isFinite(v.duration)) api.reportDuration(item.id, v.duration)
-      }}
-      onVolumeChange={(e) => {
-        writePref('lumen.volume', String(e.currentTarget.volume))
-        writePref('lumen.muted', e.currentTarget.muted ? '1' : '0')
-      }}
-      onEnded={onEnded}
-      onError={() => setError(true)}
-    />
+    <>
+      <video
+        ref={(el) => {
+          videoRef.current = el
+          if (el && !el.dataset.init) {
+            el.dataset.init = '1'
+            el.volume = Number(readPref('lumen.volume') ?? 1)
+            el.muted = readPref('lumen.muted') === '1'
+          }
+        }}
+        className="viewer-video"
+        src={mediaUrl(item)}
+        poster={thumbUrl(item)}
+        controls
+        autoPlay
+        playsInline
+        onLoadedMetadata={(e) => {
+          const v = e.currentTarget
+          onDims(v.videoWidth, v.videoHeight)
+          if (!item.duration && Number.isFinite(v.duration)) api.reportDuration(item.id, v.duration)
+          const at = resumePositions()[item.id]
+          if (at && Number.isFinite(v.duration) && v.duration >= RESUME_MIN && at > 5 && at < v.duration - 5) {
+            v.currentTime = at
+            setResumed(at)
+          }
+        }}
+        onTimeUpdate={(e) => {
+          const v = e.currentTarget
+          if (!(v.duration >= RESUME_MIN) || Date.now() - lastSave.current < 2000) return
+          lastSave.current = Date.now()
+          saveResume(item.id, v.currentTime > 5 && v.currentTime < v.duration - 5 ? v.currentTime : null)
+        }}
+        onVolumeChange={(e) => {
+          writePref('lumen.volume', String(e.currentTarget.volume))
+          writePref('lumen.muted', e.currentTarget.muted ? '1' : '0')
+        }}
+        onEnded={() => {
+          saveResume(item.id, null)
+          onEnded()
+        }}
+        onError={() => setError(true)}
+      />
+      {resumed !== null && (
+        <div className="resume-chip">
+          Resumed at {formatDuration(resumed)}
+          <button
+            onClick={() => {
+              if (videoRef.current) videoRef.current.currentTime = 0
+              saveResume(item.id, null)
+              setResumed(null)
+            }}
+          >
+            Start over
+          </button>
+        </div>
+      )}
+    </>
   )
+}
+
+/** Videos this long or longer remember where you stopped watching. */
+const RESUME_MIN = 30
+const RESUME_KEY = 'lumen.resume'
+const resumePositions = (): Record<string, number> => {
+  try {
+    return JSON.parse(readPref(RESUME_KEY) ?? '{}')
+  } catch {
+    return {}
+  }
+}
+function saveResume(id: string, seconds: number | null) {
+  const all = resumePositions()
+  delete all[id]
+  if (seconds !== null) all[id] = Math.round(seconds)
+  const ids = Object.keys(all)
+  for (const old of ids.slice(0, Math.max(0, ids.length - 300))) delete all[old] // keep the latest 300
+  writePref(RESUME_KEY, JSON.stringify(all))
 }
 
 const FILM_SIZE = 52

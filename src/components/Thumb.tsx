@@ -1,6 +1,6 @@
 import { Check, Heart, ImageOff, Play } from 'lucide-react'
-import { memo, useState, type MouseEvent } from 'react'
-import { thumbUrl } from '../api'
+import { memo, useEffect, useRef, useState, type MouseEvent } from 'react'
+import { mediaUrl, thumbUrl } from '../api'
 import { formatDuration } from '../lib/format'
 import type { MediaItem } from '../types'
 
@@ -17,6 +17,8 @@ interface Props {
   favorite: boolean
   /** True while the grid is being flung / scrubbed: don't start new loads yet. */
   deferLoad: boolean
+  /** The motion clip of a Live Photo. */
+  live?: MediaItem
   onClick(e: MouseEvent, item: MediaItem, index: number): void
   onCheck(e: MouseEvent, item: MediaItem, index: number): void
   onContextMenu(e: MouseEvent, item: MediaItem): void
@@ -33,6 +35,15 @@ export const Thumb = memo(function Thumb(props: Props) {
   const [started, setStarted] = useState(seen)
   if (!started && !props.deferLoad) setStarted(true)
 
+  // Hover a video (or Live Photo) for a moment to play a silent preview in place.
+  const clip = item.type === 'video' ? item : props.live
+  const [previewing, setPreviewing] = useState(false)
+  const hoverTimer = useRef(0)
+  useEffect(() => () => clearTimeout(hoverTimer.current), [])
+  useEffect(() => {
+    if (props.deferLoad || selecting) setPreviewing(false)
+  }, [props.deferLoad, selecting])
+
   const cls = ['thumb', loaded && 'loaded', seen && 'instant', selected && 'selected', selecting && 'selecting']
     .filter(Boolean)
     .join(' ')
@@ -41,6 +52,14 @@ export const Thumb = memo(function Thumb(props: Props) {
     <div
       className={cls}
       style={{ left: x, width: size, height: size }}
+      onMouseEnter={() => {
+        if (!clip || selecting || props.deferLoad) return
+        hoverTimer.current = window.setTimeout(() => setPreviewing(true), item.type === 'video' ? 450 : 250)
+      }}
+      onMouseLeave={() => {
+        clearTimeout(hoverTimer.current)
+        setPreviewing(false)
+      }}
       onClick={(e) => props.onClick(e, item, index)}
       onContextMenu={(e) => props.onContextMenu(e, item)}
       draggable
@@ -72,6 +91,23 @@ export const Thumb = memo(function Thumb(props: Props) {
             />
           )
         )}
+        {previewing && clip && (
+          <video
+            className="thumb-preview"
+            src={mediaUrl(clip)}
+            muted
+            autoPlay
+            loop
+            playsInline
+            disablePictureInPicture
+            onLoadedMetadata={(e) => {
+              // long videos: skip the intro
+              const v = e.currentTarget
+              if (v.duration > 30) v.currentTime = v.duration * 0.1
+            }}
+            onError={() => setPreviewing(false)}
+          />
+        )}
         <div className="thumb-shade" />
         {item.type === 'video' && (
           <span className="thumb-video">
@@ -79,6 +115,7 @@ export const Thumb = memo(function Thumb(props: Props) {
             {formatDuration(item.duration)}
           </span>
         )}
+        {props.live && <span className="thumb-live">LIVE</span>}
         {favorite && <Heart className="thumb-fav" size={15} fill="currentColor" />}
       </div>
       <button

@@ -30,6 +30,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api } from './api'
 import { AlbumNameDialog, AlbumPicker, AlbumsView, AlbumTitle } from './components/AlbumsView'
 import { DuplicatesView } from './components/DuplicatesView'
+import { MemoriesView, MemoryStrip } from './components/MemoriesView'
 import { FoldersView, type FolderInfo } from './components/FoldersView'
 import { FaceAvatar } from './components/FaceAvatar'
 import { Gallery } from './components/Gallery'
@@ -47,8 +48,10 @@ import { TitleBar } from './components/TitleBar'
 import { Viewer } from './components/Viewer'
 import { useEvent, useLibrary, useSmartSearch, useToasts } from './hooks'
 import { baseName, formatCount, formatRange, summarize } from './lib/format'
+import { pairLivePhotos } from './lib/live'
+import { findTrips, formatTripDates, onThisDay } from './lib/memories'
 import { fold, MONTH_WORDS, searchTokens, tokenMask, TYPE_WORDS } from './lib/search'
-import type { FaceBox, FaceRef, MediaItem, PairSuggestion, Person, PersonMatch, TypeFilter, View } from './types'
+import type { FaceBox, FaceRef, MediaItem, Memory, PairSuggestion, Person, PersonMatch, TypeFilter, View } from './types'
 
 interface PickerOptions {
   title: string
@@ -60,7 +63,7 @@ interface PickerOptions {
 
 const ZOOM_STEPS = [80, 100, 124, 150, 180, 220, 270, 330]
 const BIN = api.env.platform === 'win32' ? 'Recycle Bin' : 'Trash'
-const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'favorites', 'recent', 'folder', 'person', 'place', 'album']
+const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip']
 
 const TITLES: Record<View['kind'], string> = {
   photos: 'Photos',
@@ -76,6 +79,8 @@ const TITLES: Record<View['kind'], string> = {
   albums: 'Albums',
   album: '',
   duplicates: 'Duplicates',
+  memories: 'Memories',
+  trip: '',
   settings: 'Settings',
 }
 
@@ -156,6 +161,24 @@ export default function App() {
   const dateField = view.kind === 'recent' ? 'added' : 'date'
   const isGrid = GRID_VIEWS.includes(view.kind)
   const favDep = view.kind === 'favorites' ? favorites : null
+
+  // ---------- live photos, trips & memories ----------
+  const { live, hidden: liveClips } = useMemo(() => pairLivePhotos(items), [items])
+  /** Everything shown in grids: Live Photo clips appear as part of their photo instead. */
+  const shownItems = useMemo(() => (liveClips.size ? items.filter((it) => !liveClips.has(it.id)) : items), [items, liveClips])
+  const trips = useMemo(() => findTrips(shownItems, places), [shownItems, places])
+  const tripById = useMemo(() => new Map(trips.map((t) => [t.id, t])), [trips])
+  const currentTrip = view.kind === 'trip' ? tripById.get(view.id) : undefined
+  const today = new Date().toDateString()
+  const memories = useMemo(() => onThisDay(shownItems), [shownItems, today])
+  const [hiddenMemoriesDay, setHiddenMemoriesDay] = useState(() => {
+    try {
+      return localStorage.getItem('lumen.memories.hidden') ?? ''
+    } catch {
+      return ''
+    }
+  })
+  const openMemory = (m: Memory) => setViewer({ ids: m.items, index: 0 })
 
   // ---------- albums & places ----------
   const albumById = useMemo(() => new Map(albums.map((a) => [a.id, a])), [albums])
@@ -250,7 +273,7 @@ export default function App() {
 
   /** The current view's items before searching. */
   const baseList = useMemo(() => {
-    let list = items
+    let list = shownItems
     if (view.kind === 'videos') list = list.filter((it) => it.type === 'video')
     else if (view.kind === 'favorites') list = list.filter((it) => favorites.has(it.id))
     else if (view.kind === 'folder') list = list.filter((it) => it.dir === view.dir)
@@ -260,12 +283,15 @@ export default function App() {
     else if (view.kind === 'album') {
       const members = new Set(currentAlbum?.items ?? [])
       list = list.filter((it) => members.has(it.id))
+    } else if (view.kind === 'trip') {
+      const members = new Set(currentTrip?.items ?? [])
+      list = list.filter((it) => members.has(it.id))
     }
     if (typeFilter !== 'all' && view.kind !== 'videos') list = list.filter((it) => it.type === typeFilter)
     return list
     // `favDep`/`personDep`/`placeDep` instead of the full objects: toggling a heart or renaming
     // someone shouldn't refilter views that don't depend on them.
-  }, [items, view, typeFilter, favDep, personDep, placeDep, currentAlbum])
+  }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip])
 
   // ---------- search ----------
   // Every word is matched against what Lumen knows about an item (name, folder, date, camera,
@@ -360,20 +386,21 @@ export default function App() {
   const counts = useMemo(() => {
     let videos = 0
     let favs = 0
-    for (const it of items) {
+    for (const it of shownItems) {
       if (it.type === 'video') videos++
       if (favorites.has(it.id)) favs++
     }
     const visiblePeople = people.people.filter((p) => !p.hidden).length
     return {
-      all: items.length,
+      all: shownItems.length,
       videos,
       favorites: favs,
       folders: folders.length,
       people: visiblePeople,
       places: places.places.length,
+      trips: trips.length,
     }
-  }, [items, favorites, folders, people.people, places.places])
+  }, [shownItems, favorites, folders, people.people, places.places, trips])
 
   const shownPlaces = useMemo(() => {
     const q = fold(query.trim())
@@ -412,7 +439,22 @@ export default function App() {
     if (view.kind === 'person' && !peopleById.has(view.id)) setView({ kind: 'people' })
     if (view.kind === 'album' && !albumById.has(view.id)) setView({ kind: 'albums' })
     if (view.kind === 'place' && places.places.length && !placeById.has(view.id)) setView({ kind: 'places' })
-  }, [view, peopleById, albumById, placeById, places.places.length])
+    if (view.kind === 'trip' && items.length && !tripById.has(view.id)) setView({ kind: 'memories' })
+  }, [view, peopleById, albumById, placeById, places.places.length, tripById, items.length])
+
+  // An edited copy was saved: once the library has picked it up, show it next to its original.
+  const [pendingEdit, setPendingEdit] = useState<{ from: string; id: string } | null>(null)
+  useEffect(() => {
+    if (!pendingEdit || !byId.has(pendingEdit.id)) return
+    setPendingEdit(null)
+    setViewer((v) => {
+      if (!v) return v
+      const ids = v.ids.filter((id) => id !== pendingEdit.id)
+      const at = ids.indexOf(pendingEdit.from)
+      ids.splice(at + 1, 0, pendingEdit.id)
+      return { ids, index: at + 1 }
+    })
+  }, [pendingEdit, byId])
   useEffect(() => {
     setSelection(new Set())
     selectAnchor.current = null
@@ -438,7 +480,9 @@ export default function App() {
   // ---------- actions ----------
   const navigate = (next: View) => {
     setView(next)
-    if (['settings', 'folders', 'people', 'person', 'places', 'albums', 'duplicates'].includes(next.kind)) setTypeFilter('all')
+    setFocus(null) // "scroll back to the photo you were viewing" is for the page you were on
+
+    if (['settings', 'folders', 'people', 'person', 'places', 'albums', 'duplicates', 'memories'].includes(next.kind)) setTypeFilter('all')
   }
 
   // ---------- albums ----------
@@ -769,13 +813,15 @@ export default function App() {
 
   // ---------- header ----------
   const allSelectedFav = selection.size > 0 && [...selection].every((id) => favorites.has(id))
-  const title = view.kind === 'folder' ? baseName(view.dir) : currentPlace ? currentPlace.name : TITLES[view.kind]
+  const title =
+    view.kind === 'folder' ? baseName(view.dir) : currentPlace ? currentPlace.name : currentTrip ? currentTrip.title : TITLES[view.kind]
   let subtitle = ''
   if (isGrid) {
     subtitle = summarize(visible)
     const range = formatRange(visible, dateField)
     if (range) subtitle += ` · ${range}`
     if (currentPlace) subtitle = `${[currentPlace.admin, currentPlace.country].filter(Boolean).join(', ')} · ${subtitle}`
+    if (currentTrip) subtitle = `${formatTripDates(currentTrip.start, currentTrip.end)} · ${currentTrip.where ? currentTrip.where + ' · ' : ''}${summarize(visible)}`
     if (search && smart.pending) subtitle += ' · Looking inside photos…'
     else if (smartHits) subtitle += ` · ${formatCount(smartHits)} found by what's in them`
   } else if (view.kind === 'places') {
@@ -786,6 +832,8 @@ export default function App() {
     subtitle = `${formatCount(albums.length)} album${albums.length === 1 ? '' : 's'}`
   } else if (view.kind === 'duplicates') {
     subtitle = 'Exact copies and look-alikes in your library'
+  } else if (view.kind === 'memories') {
+    subtitle = trips.length ? `${formatCount(trips.length)} trip${trips.length === 1 ? '' : 's'} · worked out from where and when your photos were taken` : 'Trips and photos from this day in earlier years'
   } else if (view.kind === 'folders') {
     subtitle = `${formatCount(visibleFolders.length)} folder${visibleFolders.length === 1 ? '' : 's'}`
   } else if (view.kind === 'settings') {
@@ -979,6 +1027,11 @@ export default function App() {
         )}
         {view.kind === 'place' && (
           <button className="icon-btn back" onClick={() => setView({ kind: 'places' })} title="Back to places">
+            <ArrowLeft size={20} />
+          </button>
+        )}
+        {view.kind === 'trip' && (
+          <button className="icon-btn back" onClick={() => setView({ kind: 'memories' })} title="Back to memories">
             <ArrowLeft size={20} />
           </button>
         )}
@@ -1236,6 +1289,20 @@ export default function App() {
           }}
         />
       )
+  } else if (view.kind === 'memories') {
+    body = (
+      <MemoriesView
+        memories={memories}
+        trips={trips}
+        byId={byId}
+        hasPlaces={places.places.length > 0}
+        onOpenMemory={openMemory}
+        onOpenTrip={(id) => {
+          setQuery('')
+          navigate({ kind: 'trip', id })
+        }}
+      />
+    )
   } else if (view.kind === 'duplicates') {
     body = (
       <DuplicatesView
@@ -1301,6 +1368,7 @@ export default function App() {
         onSelectRange={selectRange}
         onZoom={zoomGrid}
         onDragItems={(ids) => (draggingIds.current = ids)}
+        live={live}
       />
     )
   }
@@ -1385,6 +1453,19 @@ export default function App() {
             }}
           />
         )}
+        {view.kind === 'photos' && !query && selection.size === 0 && memories.length > 0 && hiddenMemoriesDay !== today && items.length > 0 && (
+          <MemoryStrip
+            memories={memories}
+            byId={byId}
+            onOpen={openMemory}
+            onDismiss={() => {
+              setHiddenMemoriesDay(today)
+              try {
+                localStorage.setItem('lumen.memories.hidden', today)
+              } catch {}
+            }}
+          />
+        )}
         <div className="content-body">{body}</div>
       </main>
 
@@ -1409,6 +1490,11 @@ export default function App() {
           onRemoveFace={(face) => rejectFaces([face.faceId], face.personId ? peopleById.get(face.personId) : undefined)}
           onAddToAlbum={(item) => setAlbumPicker([item.id])}
           placeOf={(itemId) => placeById.get(places.byItem[itemId])}
+          liveOf={(itemId) => live.get(itemId)}
+          onEdited={(original, id, name) => {
+            toast(`Saved as “${name}” next to the original`)
+            setPendingEdit({ from: original.id, id })
+          }}
           onOpenPlace={(id) => {
             setViewer(null)
             setQuery('')

@@ -1,4 +1,4 @@
-import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, Images, LoaderCircle, MapPin, Plus, RefreshCw, Settings, Film, Users } from 'lucide-react'
+import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, Images, LoaderCircle, MapPin, Plus, RefreshCw, Settings, Film, Sparkles, Users } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
@@ -9,7 +9,7 @@ import { CoverImage } from './CoverImage'
 interface Props {
   view: View
   onNavigate(view: View): void
-  counts: { all: number; videos: number; favorites: number; folders: number; people: number; places: number }
+  counts: { all: number; videos: number; favorites: number; folders: number; people: number; places: number; trips: number }
   albums: Album[]
   byId: Map<string, MediaItem>
   duplicateBytes: number
@@ -35,7 +35,8 @@ export function Sidebar(props: Props) {
     view.kind === kind ||
     (kind === 'folders' && view.kind === 'folder') ||
     (kind === 'people' && view.kind === 'person') ||
-    (kind === 'places' && view.kind === 'place')
+    (kind === 'places' && view.kind === 'place') ||
+    (kind === 'memories' && view.kind === 'trip')
 
   const item = (kind: View['kind'], label: string, icon: ReactNode, count?: number | string) => (
     <button
@@ -56,6 +57,7 @@ export function Sidebar(props: Props) {
           {item('photos', 'Photos', <Images size={18} />, counts.all)}
           {item('videos', 'Videos', <Film size={18} />, counts.videos)}
           {item('favorites', 'Favorites', <Heart size={18} />, counts.favorites)}
+          {item('memories', 'Memories', <Sparkles size={18} />, counts.trips)}
           {item('people', 'People', <Users size={18} />, counts.people)}
           {item('places', 'Places', <MapPin size={18} />, counts.places)}
           {item('recent', 'Recently added', <Clock size={18} />)}

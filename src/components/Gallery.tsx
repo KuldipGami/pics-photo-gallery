@@ -24,6 +24,8 @@ interface Props {
   onZoom(direction: 1 | -1): void
   /** Items about to be dragged (out to other apps, or onto an album in the sidebar). */
   onDragItems?(ids: string[]): void
+  /** Live Photos: photo id → its motion clip. */
+  live?: Map<string, MediaItem>
 }
 
 const OVERSCAN = 800
@@ -211,6 +213,7 @@ export function Gallery(props: Props) {
                     selecting={selecting}
                     favorite={favorites.has(item.id)}
                     deferLoad={flinging}
+                    live={props.live?.get(item.id)}
                     onClick={onThumbClick}
                     onCheck={onThumbCheck}
                     onContextMenu={onThumbContext}

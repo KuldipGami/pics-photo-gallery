@@ -29,6 +29,7 @@ const { Albums } = require('./albums.cjs')
 const { Duplicates } = require('./duplicates.cjs')
 const { Places } = require('./places.cjs')
 const { SmartIndex } = require('./smart.cjs')
+const { Editor } = require('./editor.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
 
 registerScheme()
@@ -144,6 +145,8 @@ let places
 /** @type {SmartIndex} */
 let smart
 let placesData = { places: [], byItem: {} }
+/** @type {Editor} */
+let editor
 
 const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, 'models') : path.join(__dirname, '..', 'models')
 
@@ -171,6 +174,7 @@ function startServices() {
   dupes = new Duplicates(path.join(userData, 'duplicates.json'), { canRun: idle, thumb: (item) => thumbs.ensure(item) })
   albums = new Albums(path.join(userData, 'albums.json'))
   places = new Places(path.join(MODELS_DIR, 'places.json.gz'))
+  editor = new Editor({ thumbs })
 
   let placesTimer = null
   const updatePlaces = () => {
@@ -470,6 +474,31 @@ ipcMain.handle('albums:cover', (_e, id, itemId) => {
   const [item] = itemsFor(itemId)
   if (isAlbumId(id) && item) albums.setCover(id, item)
 })
+
+// ---------- editing ----------
+
+ipcMain.handle('edit:preview', async (_e, id, recipe, size) => {
+  const [item] = itemsFor(id)
+  if (!item || item.type !== 'image') return { error: 'Only photos can be edited' }
+  try {
+    const res = await editor.preview(item, recipe, Math.max(400, Math.min(2400, Number(size) || 1600)))
+    return { data: new Uint8Array(res.data), width: res.width, height: res.height }
+  } catch (err) {
+    return { error: String(err?.message || err) }
+  }
+})
+ipcMain.handle('edit:save', async (_e, id, recipe) => {
+  const [item] = itemsFor(id)
+  if (!item || item.type !== 'image') return { error: 'Only photos can be edited' }
+  try {
+    const file = await editor.save(item, recipe)
+    scan() // pick the new copy up right away (the folder watcher would too, a moment later)
+    return { id: idOf(file), name: path.basename(file) }
+  } catch (err) {
+    return { error: String(err?.message || err) }
+  }
+})
+ipcMain.handle('edit:close', () => editor.release())
 
 // ---------- duplicates & search ----------
 

@@ -190,6 +190,42 @@ export interface ThumbProgress {
   total: number
 }
 
+/** A photo edit (see electron/editor.cjs). Sliders are −1…1. */
+export interface EditRecipe {
+  /** Clockwise quarter turns. */
+  quarter: number
+  flip: boolean
+  /** Degrees, −45…45. */
+  straighten: number
+  /** Fractions of the straightened picture. */
+  crop: { x: number; y: number; w: number; h: number } | null
+  enhance: boolean
+  light: number
+  contrast: number
+  color: number
+  warmth: number
+}
+
+export interface Trip {
+  id: string
+  title: string
+  /** Where (state / country), for the card's second line. */
+  where: string
+  start: number
+  end: number
+  items: string[]
+  cover: string
+}
+
+export interface Memory {
+  /** e.g. "3 years ago" */
+  label: string
+  year: number
+  date: number
+  items: string[]
+  cover: string
+}
+
 export type View =
   | { kind: 'photos' }
   | { kind: 'videos' }
@@ -203,6 +239,8 @@ export type View =
   | { kind: 'place'; id: string }
   | { kind: 'albums' }
   | { kind: 'album'; id: string }
+  | { kind: 'memories' }
+  | { kind: 'trip'; id: string }
   | { kind: 'duplicates' }
   | { kind: 'settings' }
 

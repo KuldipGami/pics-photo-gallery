@@ -19,10 +19,10 @@ function isBlank(img) {
   return Math.sqrt(Math.max(0, sumSq / n - mean * mean)) < 3
 }
 
-async function shellThumb({ path, size, video }) {
+async function shellThumb({ path, size, video, quality = 85 }) {
   const img = await nativeImage.createThumbnailFromPath(path, { width: size, height: size })
   if (img.isEmpty() || (video && isBlank(img))) return null
-  return img.toJPEG(85)
+  return img.toJPEG(quality)
 }
 
 /** Dark or flat frames (fade-ins, black leaders) make poor thumbnails. */

@@ -2,6 +2,7 @@ import type {
   Album,
   DuplicatesData,
   DuplicatesProgress,
+  EditRecipe,
   GpuInfo,
   MediaItem,
   PairSuggestion,
@@ -48,6 +49,15 @@ export interface LumenApi {
   onDuplicatesProgress(cb: (progress: DuplicatesProgress) => void): Unsubscribe
   /** Items whose content matches the text, best first, with a 0–1 match score. */
   smartSearch(query: string): Promise<{ ids: string[]; scores: number[] }>
+  /** Renders the edit recipe on a smaller copy (JPEG bytes). */
+  editPreview(
+    id: string,
+    recipe: EditRecipe,
+    size?: number,
+  ): Promise<{ data: Uint8Array; width: number; height: number } | { error: string }>
+  /** Saves an edited copy next to the original. */
+  editSave(id: string, recipe: EditRecipe): Promise<{ id: string; name: string } | { error: string }>
+  editClose(): Promise<void>
   onSmartProgress(cb: (progress: SmartProgress) => void): Unsubscribe
   renamePerson(id: string, name: string): Promise<void>
   hidePerson(id: string, hidden: boolean): Promise<void>

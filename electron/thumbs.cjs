@@ -5,6 +5,7 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { EventEmitter } = require('node:events')
 const sharp = require('sharp')
+const exifr = require('exifr')
 const { WorkerPool } = require('./workers.cjs')
 
 // One libvips thread per image and many images in parallel scales far better for
@@ -37,6 +38,25 @@ function migrateLegacyCache(dir) {
       return name
     }
   })
+}
+
+/** The long side in pixels of a photo libvips can't open (HEIC, RAW, BMP…), from its header. */
+async function longSide(item) {
+  try {
+    if (item.ext === 'bmp') {
+      const fh = await fsp.open(item.path, 'r')
+      const b = Buffer.alloc(26)
+      await fh.read(b, 0, 26, 0)
+      await fh.close()
+      return Math.max(b.readInt32LE(18), Math.abs(b.readInt32LE(22)))
+    }
+    const d = await exifr.parse(item.path, { tiff: true, exif: true, gps: false, xmp: false, icc: false, iptc: false, ifd1: false })
+    const w = d?.ExifImageWidth ?? d?.ImageWidth
+    const h = d?.ExifImageHeight ?? d?.ImageHeight
+    return w && h ? Math.max(w, h) : 0
+  } catch {
+    return 0
+  }
 }
 
 /**
@@ -176,6 +196,18 @@ class Thumbnails extends EventEmitter {
     }
     if (this.isFailed(name)) return null
     return this.schedule(item, 'thumb', 'low')
+  }
+
+  /**
+   * The full-size picture for editing: the file itself when libvips can read it, else a full-size
+   * render from Windows' own decoder (HEIC, RAW…). Resolves to a path or a JPEG buffer.
+   */
+  async source(item) {
+    if (SHARP_EXT.has(item.ext)) return item.path
+    // Windows enlarges to whatever size is asked for, so ask for the picture's own size.
+    const size = Math.min(8192, (await longSide(item)) || 4096)
+    const res = await this.shellWorkers.run({ type: 'shell', path: item.path, size, quality: 95 }, 60_000)
+    return res?.data ? Buffer.from(res.data) : null
   }
 
   /** A 1024px JPEG for face analysis: background priority, not cached. */
