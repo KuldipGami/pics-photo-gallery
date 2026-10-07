@@ -13,6 +13,7 @@ import type {
   Settings,
   SmartProgress,
   ThumbProgress,
+  VideosProgress,
 } from './types'
 
 export function useElementSize(ref: RefObject<HTMLElement | null>) {
@@ -47,6 +48,7 @@ export function useLibrary() {
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [launch, setLaunch] = useState<{ folder?: string; duplicates?: boolean } | null>(null)
   const [dupesProgress, setDupesProgress] = useState<DuplicatesProgress>({ running: false, phase: 'idle', done: 0, total: 0 })
+  const [videosProgress, setVideosProgress] = useState<VideosProgress>({ running: false, done: 0, total: 0, current: null })
   const [smartProgress, setSmartProgress] = useState<SmartProgress>({
     done: 0,
     total: 0,
@@ -69,6 +71,7 @@ export function useLibrary() {
       api.onPlaces(setPlaces),
       api.onDuplicates(setDupes),
       api.onDuplicatesProgress(setDupesProgress),
+      api.onVideosProgress(setVideosProgress),
       api.onSmartProgress(setSmartProgress),
       api.onHistory(setHistory),
     ]
@@ -83,6 +86,7 @@ export function useLibrary() {
       setPlaces(s.places)
       setDupes(s.dupes)
       setDupesProgress(s.dupesProgress)
+      setVideosProgress(s.videosProgress)
       setSmartProgress(s.smartProgress)
       setHistory(s.history)
       setLaunch(s.launch ?? null)
@@ -103,6 +107,7 @@ export function useLibrary() {
     places,
     dupes,
     dupesProgress,
+    videosProgress,
     smartProgress,
     history,
     launch,

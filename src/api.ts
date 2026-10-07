@@ -17,6 +17,7 @@ import type {
   SmartProgress,
   Theme,
   ThumbProgress,
+  VideosProgress,
   WatchAlert,
 } from './types'
 import type { OrganizePlan } from './components/OrganizeView'
@@ -45,6 +46,7 @@ export interface LumenApi {
     places: PlacesData
     dupes: DuplicatesData
     dupesProgress: DuplicatesProgress
+    videosProgress: VideosProgress
     smartProgress: SmartProgress
     history: HistoryEntry[]
     /** Lumen was started for a folder or to review duplicates (taken once). */
@@ -95,6 +97,7 @@ export interface LumenApi {
   onShowDuplicates(cb: () => void): Unsubscribe
   onDuplicates(cb: (data: DuplicatesData) => void): Unsubscribe
   onDuplicatesProgress(cb: (progress: DuplicatesProgress) => void): Unsubscribe
+  onVideosProgress(cb: (progress: VideosProgress) => void): Unsubscribe
   /** Items whose content matches the text, best first, with a 0–1 match score. */
   smartSearch(query: string): Promise<{ ids: string[]; scores: number[] }>
   /** Renders the edit recipe on a smaller copy (JPEG bytes). */

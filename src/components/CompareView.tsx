@@ -4,6 +4,7 @@ import { api, fullImageUrl, mediaUrl, thumbUrl } from '../api'
 import { kindText, matchText, needsReview, ruleMarks, type Facts } from '../lib/cleanup'
 import { formatBytes, formatCount, formatDuration } from '../lib/format'
 import type { DupGroup, KeepRule, MediaItem } from '../types'
+import { SyncedVideos, type SyncedVideosHandle } from './SyncedVideos'
 
 // Compare & review (ported from DupeLens): every copy side by side with zoom and pan shared by all
 // of them, or two copies in a swipe view; keyboard-driven review of one group after another.
@@ -92,6 +93,7 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
   const next = () => (index < count - 1 ? go(1) : onToast(source.mode === 'groups' ? 'That was the last group' : 'That was the last file'))
 
   // ---------- keyboard (DupeLens' review keys) ----------
+  const videoRef = useRef<SyncedVideosHandle>(null)
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {})
   keyRef.current = (e: KeyboardEvent) => {
     if (e.ctrlKey || e.altKey || e.metaKey || (e.target as HTMLElement)?.closest?.('input, select, textarea')) return
@@ -100,6 +102,7 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
     let handled = true
     if (k === 'Escape') onClose()
     else if (k === 'ArrowLeft') go(-1)
+    else if ((k === ' ' || k === 'p' || k === 'P') && videoRef.current) videoRef.current.toggle()
     else if (k === 'ArrowRight' || k === ' ' || k === 'Enter') next()
     else if (k === 'ArrowUp') setFocus((f) => Math.max(0, f - 1))
     else if (k === 'ArrowDown' || k === 'Tab') setFocus((f) => (f + 1) % Math.max(1, ids.length))
@@ -146,6 +149,121 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
     return <Pane key={it.id + (extra?.clip !== undefined ? ':s' : '')} item={it} view={view} onView={setView} clip={extra?.clip} />
   }
 
+  // Video groups play side by side on one clock (zoom doesn't apply there).
+  const syncedVideos = !!group?.video && !swipe && items.length >= 2
+
+  /** Number and KEEP / REMOVE badge, over a picture or a playing video. */
+  const badges = (i: number) => {
+    const id = items[i].id
+    const prot = isProtected(id)
+    const marked = marks.has(id)
+    return (
+      <>
+        {!single && <span className={`compare-num${i === focus ? ' on' : ''}`}>{i + 1}</span>}
+        {prot ? (
+          <span className="ctile-badge protected">
+            <ShieldCheck size={12} /> PROTECTED
+          </span>
+        ) : (
+          <span className={`ctile-badge ${marked ? 'remove' : 'keep'}`}>{marked ? 'REMOVE' : 'KEEP'}</span>
+        )}
+      </>
+    )
+  }
+
+  /** Name, match, facts and actions under each copy. */
+  const info = (i: number) => {
+    const it = items[i]
+    const id = it.id
+    const prot = isProtected(id)
+    const marked = marks.has(id)
+    const f = facts[id]
+    return (
+      <div className="compare-info" onClick={() => setFocus(i)}>
+        <div className="compare-name" title={it.path}>
+          {it.name}
+        </div>
+        {group && <div className={`compare-match${i === refIdx ? ' ref' : ''}`}>{matchText(group, group.ids.indexOf(id))}{group.sharpest === group.ids.indexOf(id) ? ' · Sharpest' : ''}</div>}
+        <table>
+          <tbody>
+            <tr>
+              <th>Resolution</th>
+              <td>{f && f[3] ? `${f[3]} × ${f[4]}` : '—'}</td>
+            </tr>
+            <tr>
+              <th>File size</th>
+              <td>{formatBytes(it.size)}</td>
+            </tr>
+            {it.type === 'video' ? (
+              <tr>
+                <th>Duration</th>
+                <td>{formatDuration(it.duration) || '—'}</td>
+              </tr>
+            ) : (
+              <tr>
+                <th>Sharpness</th>
+                <td>{f && f[0] > 0 && maxSharp > 0 ? `${Math.round((f[0] / maxSharp) * 100)}%` : '—'}</td>
+              </tr>
+            )}
+            <tr>
+              <th>Date taken</th>
+              <td>{it.taken ? dateTimeFmt.format(it.taken) : '—'}</td>
+            </tr>
+            <tr>
+              <th>Modified</th>
+              <td>{dateTimeFmt.format(it.mtime)}</td>
+            </tr>
+            <tr>
+              <th>Folder</th>
+              <td className="compare-dir" title={it.dir}>
+                {it.dir}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div className="compare-actions">
+          {prot ? (
+            <span className="compare-prot">
+              <ShieldCheck size={14} /> Protected folder: always kept
+            </span>
+          ) : (
+            <label className="compare-switch" onClick={(e) => e.stopPropagation()}>
+              <button role="switch" aria-checked={marked} className={`switch danger${marked ? ' on' : ''}`} onClick={() => setMark(id, !marked)}>
+                <span />
+              </button>
+              Remove this file
+            </label>
+          )}
+          <div className="spacer" />
+          {group && turnToMatch(group, group.ids.indexOf(id), it) > 0 && (
+            <button
+              className="btn ghost"
+              title="Turn this copy the same way as the best copy (lossless: only the orientation tag changes)"
+              onClick={async () => {
+                const turns = turnToMatch(group, group.ids.indexOf(id), it)
+                const res = await api.rotateLossless([id], turns)
+                onToast(res.done ? `Turned ${it.name}. Undo it from History if needed.` : `Couldn't turn ${it.name}: ${res.errors[0] ?? ''}`)
+              }}
+            >
+              {['', 'Turn right', 'Turn upside down', 'Turn left'][turnToMatch(group, group.ids.indexOf(id), it)]}
+            </button>
+          )}
+          <button className="icon-btn" onClick={() => api.openExternal(id)} title="Open with default app">
+            <ExternalLink size={15} />
+          </button>
+          <button className="icon-btn" onClick={() => api.reveal(id)} title="Show in folder">
+            <FolderOpen size={15} />
+          </button>
+          {group && (
+            <button className="link" onClick={() => keepOnly(id)}>
+              Keep only this
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="compare" role="dialog" aria-label="Compare">
       <div className="compare-head">
@@ -167,7 +285,7 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
             </button>
           </div>
         )}
-        <div className="compare-zoom">
+        <div className="compare-zoom" hidden={syncedVideos}>
           <button className="icon-btn" onClick={() => setView((v) => clampView({ ...v, zoom: v.zoom / 1.5 }))} title="Zoom out (−)">
             <Minus size={16} />
           </button>
@@ -208,111 +326,27 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
             )}
           </div>
         </div>
+      ) : syncedVideos ? (
+        <SyncedVideos
+          ref={videoRef}
+          items={items}
+          offsets={ids.map((id) => group.offsets?.[group.ids.indexOf(id)] ?? 0)}
+          refIndex={refIdx}
+          overlay={badges}
+          footer={info}
+          onSelect={setFocus}
+        />
       ) : (
         <div className="compare-cols" style={{ gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}>
-          {items.map((it, i) => {
-            const id = it.id
-            const prot = isProtected(id)
-            const marked = marks.has(id)
-            const f = facts[id]
-            return (
-              <div key={id} className={`compare-col${i === focus ? ' focused' : ''}${marked ? ' marked' : ''}`}>
-                <div className="compare-stage">
-                  {pane(i)}
-                  {!single && <span className={`compare-num${i === focus ? ' on' : ''}`}>{i + 1}</span>}
-                  {prot ? (
-                    <span className="ctile-badge protected">
-                      <ShieldCheck size={12} /> PROTECTED
-                    </span>
-                  ) : (
-                    <span className={`ctile-badge ${marked ? 'remove' : 'keep'}`}>{marked ? 'REMOVE' : 'KEEP'}</span>
-                  )}
-                </div>
-                <div className="compare-info" onClick={() => setFocus(i)}>
-                  <div className="compare-name" title={it.path}>
-                    {it.name}
-                  </div>
-                  {group && <div className={`compare-match${i === refIdx ? ' ref' : ''}`}>{matchText(group, group.ids.indexOf(id))}{group.sharpest === group.ids.indexOf(id) ? ' · Sharpest' : ''}</div>}
-                  <table>
-                    <tbody>
-                      <tr>
-                        <th>Resolution</th>
-                        <td>{f && f[3] ? `${f[3]} × ${f[4]}` : '—'}</td>
-                      </tr>
-                      <tr>
-                        <th>File size</th>
-                        <td>{formatBytes(it.size)}</td>
-                      </tr>
-                      {it.type === 'video' ? (
-                        <tr>
-                          <th>Duration</th>
-                          <td>{formatDuration(it.duration) || '—'}</td>
-                        </tr>
-                      ) : (
-                        <tr>
-                          <th>Sharpness</th>
-                          <td>{f && f[0] > 0 && maxSharp > 0 ? `${Math.round((f[0] / maxSharp) * 100)}%` : '—'}</td>
-                        </tr>
-                      )}
-                      <tr>
-                        <th>Date taken</th>
-                        <td>{it.taken ? dateTimeFmt.format(it.taken) : '—'}</td>
-                      </tr>
-                      <tr>
-                        <th>Modified</th>
-                        <td>{dateTimeFmt.format(it.mtime)}</td>
-                      </tr>
-                      <tr>
-                        <th>Folder</th>
-                        <td className="compare-dir" title={it.dir}>
-                          {it.dir}
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                  <div className="compare-actions">
-                    {prot ? (
-                      <span className="compare-prot">
-                        <ShieldCheck size={14} /> Protected folder: always kept
-                      </span>
-                    ) : (
-                      <label className="compare-switch" onClick={(e) => e.stopPropagation()}>
-                        <button role="switch" aria-checked={marked} className={`switch danger${marked ? ' on' : ''}`} onClick={() => setMark(id, !marked)}>
-                          <span />
-                        </button>
-                        Remove this file
-                      </label>
-                    )}
-                    <div className="spacer" />
-                    {group && turnToMatch(group, group.ids.indexOf(id), it) > 0 && (
-                      <button
-                        className="btn ghost"
-                        title="Turn this copy the same way as the best copy (lossless: only the orientation tag changes)"
-                        onClick={async () => {
-                          const turns = turnToMatch(group, group.ids.indexOf(id), it)
-                          const res = await api.rotateLossless([id], turns)
-                          onToast(res.done ? `Turned ${it.name}. Undo it from History if needed.` : `Couldn't turn ${it.name}: ${res.errors[0] ?? ''}`)
-                        }}
-                      >
-                        {['', 'Turn right', 'Turn upside down', 'Turn left'][turnToMatch(group, group.ids.indexOf(id), it)]}
-                      </button>
-                    )}
-                    <button className="icon-btn" onClick={() => api.openExternal(id)} title="Open with default app">
-                      <ExternalLink size={15} />
-                    </button>
-                    <button className="icon-btn" onClick={() => api.reveal(id)} title="Show in folder">
-                      <FolderOpen size={15} />
-                    </button>
-                    {group && (
-                      <button className="link" onClick={() => keepOnly(id)}>
-                        Keep only this
-                      </button>
-                    )}
-                  </div>
-                </div>
+          {items.map((it, i) => (
+            <div key={it.id} className={`compare-col${i === focus ? ' focused' : ''}${marks.has(it.id) ? ' marked' : ''}`}>
+              <div className="compare-stage">
+                {pane(i)}
+                {badges(i)}
               </div>
-            )
-          })}
+              {info(i)}
+            </div>
+          ))}
         </div>
       )}
 
@@ -330,7 +364,9 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
         <div className="compare-keys">
           {(single
             ? [['K', 'keep'], ['D', 'remove'], ['Space', 'next'], ['Wheel', 'zoom']]
-            : [['1–9', 'choose'], ['K', 'keep only'], ['D', 'toggle remove'], ['A', 'auto'], ['S', 'swipe'], ['Space', 'next'], ['Wheel', 'zoom']]
+            : group?.video && !swipe
+              ? [['1–9', 'choose'], ['K', 'keep only'], ['D', 'toggle remove'], ['A', 'auto'], ['Space', 'play / pause'], ['→', 'next']]
+              : [['1–9', 'choose'], ['K', 'keep only'], ['D', 'toggle remove'], ['A', 'auto'], ['S', 'swipe'], ['Space', 'next'], ['Wheel', 'zoom']]
           ).map(([k, label]) => (
             <span key={k}>
               <kbd>{k}</kbd> {label}

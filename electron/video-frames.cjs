@@ -25,8 +25,9 @@ const TRIM_FACTOR = 2.5
 const CONCURRENCY = 1 // one video at a time: the GPU's decoder is shared with everything on screen
 const GAP_MS = 40 // breather between videos
 const SAVE_MS = 15_000
-const CHANGED_MS = 20_000
-const FAILURES_IN_A_ROW = 5 // then something is wrong with the worker itself: stop, retry later
+const CHANGED_MS = 60_000 // regroup at most this often while videos are being read (and once at the end)
+const UNANSWERED_IN_A_ROW = 5 // the worker itself is in trouble: stop, retry on the next pump()
+const UNANSWERED_MAX = 2 // a video the worker never answers for (hangs it) is given up after this
 
 const FLAG_SUMMARY = 1
 const FLAG_FAILED = 2
@@ -55,7 +56,7 @@ function encode(records) {
   const entries = [...records]
   let size = HEADER
   const ids = entries.map(([id]) => Buffer.from(id, 'utf8'))
-  entries.forEach(([, r], i) => (size += 2 + ids[i].length + 30 + ((r.s?.length ?? 0) + (r.x?.length ?? 0)) * 4))
+  entries.forEach(([, r], i) => (size += 2 + ids[i].length + 28 + ((r.s?.length ?? 0) + (r.x?.length ?? 0)) * 4))
   const buf = Buffer.alloc(size)
   buf.write(MAGIC, 0, 'latin1')
   buf.writeUInt32LE(VERSION, 4)
@@ -153,7 +154,6 @@ function videosMatch(a, b, maxDist) {
   if (shorter.d < MIN_TRIMMED || !longer.x || !shorter.x) return false
   return sig.alignRobust(longer.x, shorter.x).distance <= trimLimit(maxDist)
 }
-
 
 /**
  * DupeLens' trimmed-clip test, alignRobust(longer, shorter).distance <= limit, answered exactly
@@ -289,9 +289,9 @@ function findVideoPairs(videos, maxDist) {
         const S = shorter.x.length / 4
         if (near.length < L * S) near = new Int8Array(L * S)
         stats.trimFramePairs += L * S
-        const t = performance.now()
+        const checked = performance.now()
         const hit = trimMatches(longer.x, shorter.x, trimLimit(maxDist), near)
-        stats.msTrim += performance.now() - t
+        stats.msTrim += performance.now() - checked
         if (hit) pairs.push(va.d > vb.d ? [dense[a], dense[b]] : [dense[b], dense[a]])
       }
     }
@@ -345,14 +345,20 @@ parentPort.once('message', ({ videos, maxDist }) => parentPort.postMessage(vf.fi
 class VideoFrames extends EventEmitter {
   /**
    * @param {string} file  the sidecar (userData/video-frames.bin)
-   * @param {{ canRun(): boolean, analyze(item, { signal, onProgress }): Promise<object | null> }} options
-   *   canRun: false while previews are being made; analyze: Thumbnails.videoFrames
+   * @param {object} options
+   * @param {() => boolean} options.canRun  false while previews are being made
+   * @param {(item, { signal, gentle }) => Promise<object | null | undefined>} options.analyze
+   *   Thumbnails.videoFrames: the frames, null (can't be decoded) or undefined (no answer)
+   * @param {() => boolean} [options.gentle]  true while the user is looking at the app: frames are
+   *   then read by playing (~16× real time, no effect on the app's smoothness) instead of seeking
+   *   (30–100×, but the app's windows drop some frames meanwhile)
    */
-  constructor(file, { canRun, analyze }) {
+  constructor(file, { canRun, analyze, gentle = () => false }) {
     super()
     this.file = file
     this.canRun = canRun
     this.analyze = analyze
+    this.gentle = gentle
     this.records = new Map() // id -> { m, z, d, w, h, s, x, f }
     this.videos = [] // library videos
     this.byId = new Map()
@@ -362,6 +368,7 @@ class VideoFrames extends EventEmitter {
     this.progress = { running: false, done: 0, total: 0, current: null }
     this.timers = {}
     this.fresh = 0 // analysed since the last 'changed'
+    this.unanswered = new Map() // id -> times the worker gave no answer (this session)
   }
 
   async load() {
@@ -400,11 +407,6 @@ class VideoFrames extends EventEmitter {
   get(item) {
     const r = this.records.get(item.id)
     return r && r.m === item.mtime && r.z === item.size ? r : undefined
-  }
-
-  /** Not analysed yet (queued or running). */
-  pending(item) {
-    return item.type === 'video' && !this.get(item)
   }
 
   /** Called whenever the library changes: forgets removed / changed videos. Doesn't start work. */
@@ -477,7 +479,8 @@ class VideoFrames extends EventEmitter {
     this.running = true
     this.controller = new AbortController()
     const { signal } = this.controller
-    let failures = []
+    let silent = 0
+    const tried = new Set()
     try {
       const todo = this.queue()
       let next = 0
@@ -485,10 +488,24 @@ class VideoFrames extends EventEmitter {
         while (next < todo.length && !this.disposed && !signal.aborted) {
           if (!this.canRun()) return // previews first; pump() resumes later
           const item = this.byId.get(todo[next++].id) // the library may have changed meanwhile
-          if (!item || this.get(item)) continue
+          if (!item || this.get(item) || tried.has(item.id)) continue
+          tried.add(item.id)
           this.setProgress(item.id)
-          const res = await this.analyze(item, { signal })
+          const res = await this.analyze(item, { signal, gentle: !!this.gentle() })
           if (this.disposed || signal.aborted) return
+          if (res === undefined) {
+            // No answer: try again on a later run, and give up on a video that keeps hanging the worker.
+            const times = (this.unanswered.get(item.id) ?? 0) + 1
+            this.unanswered.set(item.id, times)
+            if (times < UNANSWERED_MAX) {
+              if (++silent >= UNANSWERED_IN_A_ROW) {
+                console.error('[video-frames] the media worker keeps failing; pausing')
+                return
+              }
+              continue
+            }
+          }
+          silent = 0
           const r = { m: item.mtime, z: item.size, d: 0, w: 0, h: 0, s: null, x: null, f: 1 }
           if (res && res.duration > 0) {
             Object.assign(r, { d: res.duration, w: res.width || 0, h: res.height || 0, s: toWords(res.summary), x: toWords(res.dense) })
@@ -497,16 +514,7 @@ class VideoFrames extends EventEmitter {
             if (!r.s) r.x = null
             r.f = r.s ? 0 : 1
           }
-          this.records.set(item.id, r)
-          if (r.f) {
-            failures.push(item.id)
-            if (failures.length >= FAILURES_IN_A_ROW) {
-              // Probably not these videos but the worker: forget the failures and retry later.
-              for (const id of failures) this.records.delete(id)
-              console.error('[video-frames] several videos in a row failed; pausing')
-              return
-            }
-          } else failures = []
+          this.records.set(item.id, r) // can't be read (r.f): exact copies only, until the file changes
           this.fresh++
           this.setProgress(item.id)
           this.saveSoon()

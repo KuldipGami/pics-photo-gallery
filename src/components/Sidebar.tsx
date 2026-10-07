@@ -2,7 +2,7 @@ import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, Loade
 import { useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
-import type { Album, DuplicatesProgress, MediaItem, PeopleProgress, ScanStatus, SmartProgress, ThumbProgress, View } from '../types'
+import type { Album, DuplicatesProgress, MediaItem, PeopleProgress, ScanStatus, SmartProgress, ThumbProgress, VideosProgress, View } from '../types'
 import { albumCover } from './AlbumsView'
 import { CoverImage } from './CoverImage'
 
@@ -18,6 +18,7 @@ interface Props {
   peopleProgress: PeopleProgress
   smartProgress: SmartProgress
   dupesProgress: DuplicatesProgress
+  videosProgress?: VideosProgress
   /** "Watching 2 folders for new duplicates" (empty when not watching). */
   watchStatus?: string
   onNewAlbum(): void
@@ -156,6 +157,14 @@ export function Sidebar(props: Props) {
             <LoaderCircle size={14} className="spin" />
             <span>Finding duplicates · {pct(dupesProgress.done, dupesProgress.total)}%</span>
             <span className="scan-progress" style={{ width: `${pct(dupesProgress.done, dupesProgress.total)}%` }} />
+          </>
+        ) : props.videosProgress?.running ? (
+          <>
+            <LoaderCircle size={14} className="spin" />
+            <span title={`${formatCount(props.videosProgress.done)} of ${formatCount(props.videosProgress.total)} videos read, for finding look-alike videos`}>
+              Comparing videos · {pct(props.videosProgress.done, props.videosProgress.total)}%
+            </span>
+            <span className="scan-progress" style={{ width: `${pct(props.videosProgress.done, props.videosProgress.total)}%` }} />
           </>
         ) : (
           <>

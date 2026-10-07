@@ -1,0 +1,169 @@
+/* Synced video comparison (SyncedVideos.tsx): a column per video, one control bar for all. */
+
+.sv {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.sv-row {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 1px;
+  background: var(--border);
+}
+
+.sv-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface);
+}
+
+.sv-player {
+  position: relative;
+  flex: 1;
+  min-height: 120px;
+  overflow: hidden;
+  background: #0b0c0e;
+  cursor: pointer;
+}
+.sv-player video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+}
+
+/* "This clip starts in 0:09" / "This clip has ended" / can't play */
+.sv-veil {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
+}
+
+.sv-pill {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  max-width: calc(100% - 60px);
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.sv-sound {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.sv-sound:hover {
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+}
+.sv-sound.on {
+  background: var(--accent);
+  color: #fff;
+}
+
+.sv-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.sv-skip {
+  height: 30px;
+  padding: 0 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sv-timeline {
+  flex: 1;
+  min-width: 80px;
+  height: 18px;
+  margin: 0 6px;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.sv-timeline::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--accent) var(--sv-fill, 0%), var(--border-strong) var(--sv-fill, 0%));
+}
+.sv-timeline::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.sv-timeline:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 2px;
+}
+
+.sv-time {
+  flex-shrink: 0;
+  min-width: 84px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.sv-audio {
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: 13px var(--font);
+}
+
+@media (max-width: 720px) {
+  .sv-skip {
+    display: none;
+  }
+}

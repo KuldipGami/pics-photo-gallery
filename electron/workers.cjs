@@ -102,6 +102,11 @@ class MediaWorker {
     return new Promise((resolve) => {
       const id = ++seq
       const win = this.win
+      if (!win || win.isDestroyed()) {
+        // closed while starting (the app is quitting)
+        this.inflight--
+        return resolve(null)
+      }
       const finish = (msg) => {
         signal?.removeEventListener('abort', expire)
         resolve(msg)
@@ -118,7 +123,7 @@ class MediaWorker {
       }
       pending.set(id, { resolve: finish, timer: setTimeout(expire, timeoutMs), worker: this, expire, timeoutMs, onProgress })
       signal?.addEventListener('abort', expire)
-      this.win.webContents.send('worker:job', { ...job, seq: id })
+      win.webContents.send('worker:job', { ...job, seq: id })
     })
   }
 

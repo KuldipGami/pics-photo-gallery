@@ -27,6 +27,7 @@ const { Thumbnails } = require('./thumbs.cjs')
 const { FaceIndex } = require('./faces.cjs')
 const { Albums } = require('./albums.cjs')
 const { Duplicates } = require('./duplicates.cjs')
+const { VideoFrames } = require('./video-frames.cjs')
 const { Places } = require('./places.cjs')
 const { SmartIndex } = require('./smart.cjs')
 const { Editor } = require('./editor.cjs')
@@ -173,6 +174,8 @@ let faces
 let albums
 /** @type {Duplicates} */
 let dupes
+/** @type {VideoFrames} */
+let videoFrames
 /** @type {Places} */
 let places
 /** @type {SmartIndex} */
@@ -214,7 +217,15 @@ function startServices() {
     hintFile: path.join(userData, 'face-engine.json'),
   })
   smart.enabled = store.get('smartSearch') !== false
-  dupes = new Duplicates(path.join(userData, 'duplicates.json'), { canRun: idle, thumb: (item) => thumbs.ensure(item) })
+  // Look-alike videos: frames read from the videos themselves, one at a time in the background.
+  // While the window is in use, frames are read by playing (smooth) rather than seeking.
+  videoFrames = new VideoFrames(path.join(userData, 'video-frames.bin'), {
+    canRun: idle,
+    analyze: (item, options) => thumbs.videoFrames(item, options),
+    gentle: () => !!win && !win.isDestroyed() && win.isVisible() && win.isFocused() && !win.isMinimized(),
+  })
+  dupes = new Duplicates(path.join(userData, 'duplicates.json'), { canRun: idle, thumb: (item) => thumbs.ensure(item), videoFrames })
+  videoFrames.on('progress', (progress) => send('dupes:videos', progress))
   configureDupes()
   history = new History(path.join(userData, 'history.json'))
   history.on('changed', () => send('history:changed', history.list()))
@@ -619,6 +630,7 @@ const appState = () => ({
   dupes: dupes.snapshot(),
   history: history.list(),
   dupesProgress: dupes.progressInfo(),
+  videosProgress: videoFrames.progressInfo(),
   smartProgress: smart.progressInfo(),
   version: app.getVersion(),
   launch: takeLaunchRequest(),
@@ -800,7 +812,7 @@ async function relocate(pairs) {
         } catch {}
       }
     }
-    for (const map of [dupes.records, smart.vectors]) {
+    for (const map of [dupes.records, smart.vectors, videoFrames.records]) {
       if (map.has(oldId)) {
         map.set(newId, map.get(oldId))
         map.delete(oldId)
@@ -821,6 +833,7 @@ async function relocate(pairs) {
   albums.remapPaths(paths)
   dupes.saveSoon(2000)
   smart.saveSoon(2000)
+  videoFrames.saveSoon(2000)
   if (favChanged) {
     store.set({ favorites: [...favs.values()] })
     send('settings:changed', settingsPayload())
@@ -847,7 +860,7 @@ async function retime(changes) {
         thumbs.cached.add(after)
       } catch {}
     }
-    for (const r of [dupes.records.get(it.id), smart.vectors.get(it.id)]) if (r) r.m = next.mtime
+    for (const r of [dupes.records.get(it.id), smart.vectors.get(it.id), videoFrames.records.get(it.id)]) if (r) r.m = next.mtime
     faceChanges.push({ id: it.id, mtime: next.mtime })
   }
   library.setItems(items)

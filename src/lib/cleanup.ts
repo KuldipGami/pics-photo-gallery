@@ -47,7 +47,18 @@ export function matchText(g: DupGroup, i: number) {
   if (info[0] === 'best') return 'Best copy'
   if (info[0] === 'identical') return 'Identical copy'
   if (typeof info[0] !== 'number') return ''
-  const kind = info[1] === 'rotated' ? ' · rotated' : info[1] === 'mirrored' ? ' · mirrored' : info[1] === 'cropped' ? ' · cropped' : ''
+  const kind =
+    info[1] === 'rotated'
+      ? ' · rotated'
+      : info[1] === 'mirrored'
+        ? ' · mirrored'
+        : info[1] === 'cropped'
+          ? ' · cropped'
+          : info[1] === 'trimmed'
+            ? ' · trimmed clip'
+            : info[1] === 'longer'
+              ? ' · longer version'
+              : ''
   return `${Math.round(info[0] * 100)}% match${kind}`
 }
 

@@ -296,16 +296,20 @@ class Thumbnails extends EventEmitter {
 
   /**
    * Frame fingerprints of a video for duplicate detection (see worker.cjs / video-frames.cjs):
-   * { duration, width, height, summary, dense, stats } or null. Runs in its own worker, so a long
-   * video never holds up thumbnails; that worker renders offscreen, so it may also read frames by
-   * playing. `signal` cancels; the timeout counts from the last progress report.
+   * { duration, width, height, summary, dense, stats }; null when the video can't be decoded;
+   * undefined when there was no answer (cancelled, timed out, worker crashed, quitting).
+   * Runs in its own worker, so a long video never holds up thumbnails; that worker renders
+   * offscreen, so it may also read frames by playing. `gentle`: prefer playing, which keeps the
+   * app's windows smoother than seeking (for while the user is looking). `signal` cancels; the
+   * timeout counts from the last progress report.
    */
-  async videoFrames(item, { signal, onProgress } = {}) {
-    if (this.disposed) return null
+  async videoFrames(item, { signal, onProgress, gentle = false } = {}) {
+    if (this.disposed) return undefined
     this.frameWorkers ??= new WorkerPool(1, { offscreen: true })
-    const job = { type: 'frames', url: pathToFileURL(item.path).href, play: true }
+    const job = { type: 'frames', url: pathToFileURL(item.path).href, play: true, gentle }
     const res = await this.frameWorkers.run(job, 60_000, { signal, onProgress })
-    const data = res?.data ?? null
+    if (!res) return undefined
+    const data = res.data ?? null
     if (data?.duration && !item.duration) this.emit('duration', item.id, data.duration)
     return data
   }

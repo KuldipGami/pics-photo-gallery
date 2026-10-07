@@ -62,6 +62,7 @@ contextBridge.exposeInMainWorld('lumen', {
   onShowDuplicates: (cb) => on('app:show-duplicates', cb),
   onDuplicates: (cb) => on('dupes:changed', cb),
   onDuplicatesProgress: (cb) => on('dupes:progress', cb),
+  onVideosProgress: (cb) => on('dupes:videos', cb),
   smartSearch: (query) => ipcRenderer.invoke('smart:search', query),
   editPreview: (id, recipe, size) => ipcRenderer.invoke('edit:preview', id, recipe, size),
   editSave: (id, recipe) => ipcRenderer.invoke('edit:save', id, recipe),

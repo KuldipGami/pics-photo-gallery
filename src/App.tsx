@@ -113,6 +113,7 @@ export default function App() {
     places,
     dupes,
     dupesProgress,
+    videosProgress,
     smartProgress,
     history,
     launch,
@@ -1817,6 +1818,7 @@ export default function App() {
         peopleProgress={peopleProgress}
         smartProgress={smartProgress}
         dupesProgress={dupesProgress}
+        videosProgress={videosProgress}
         onNewAlbum={() => setNewAlbum(true)}
         canDropItems={() => internalDrag.current && draggingIds.current.length > 0}
         onDropOnAlbum={(albumId) => {

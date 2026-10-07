@@ -3829,3 +3829,6 @@ html[data-platform='darwin'] .titlebar {
   font-size: 12px;
   color: var(--text-2);
 }
+.compare-zoom[hidden] {
+  display: none;
+}

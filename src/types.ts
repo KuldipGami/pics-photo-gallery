@@ -135,7 +135,7 @@ export interface PlacesData {
 export type KeepRule = 'best' | 'sharpest' | 'largest' | 'oldest' | 'newest'
 
 /** How a file relates to its group's best copy: ['best'], ['identical'], [''] or [similarity, kind, quarter turns]. */
-export type MatchInfo = ['best'] | ['identical'] | [''] | [number, 'same' | 'rotated' | 'mirrored' | 'cropped', number]
+export type MatchInfo = ['best'] | ['identical'] | [''] | [number, 'same' | 'rotated' | 'mirrored' | 'cropped' | 'trimmed' | 'longer', number]
 
 export interface DupGroup {
   /** Group number (exact groups first, then by path). */
@@ -152,6 +152,16 @@ export interface DupGroup {
   orders: number[][]
   /** Index of the clearly sharpest shot of a burst, or -1. */
   sharpest: number
+  /** Video groups: where each clip starts on the longest clip's timeline (s), indexed like ids. */
+  offsets?: number[]
+}
+
+/** Reading videos' frames for look-alike videos (background). */
+export interface VideosProgress {
+  running: boolean
+  done: number
+  total: number
+  current: string | null
 }
 
 export interface DuplicatesData {

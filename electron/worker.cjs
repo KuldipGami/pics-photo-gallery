@@ -2,7 +2,9 @@
 //  - video: decode a frame with the GPU's hardware video decoder (<video> + createImageBitmap)
 //  - shell: Windows Shell / macOS QuickLook thumbnails (HEIC, RAW, …). These calls are synchronous,
 //           so they live here instead of blocking the app's main process.
+//  - frames: fingerprints of a video's frames for duplicate detection (see below)
 const { ipcRenderer, nativeImage } = require('electron')
+const sig = require('./signature.cjs')
 
 /** True for (near) single-colour images, e.g. the grey frame Windows returns for some videos. */
 function isBlank(img) {
@@ -112,7 +114,9 @@ function videoFrame({ url, size }) {
 // best, and in a hidden window frames are only presented about once a second, so it reads the
 // wrong frames. Only when key frames are far apart (each seek then decodes seconds of video) does
 // playing win; then, in a worker that renders offscreen (`play`), the rest is read by playing.
-const sig = require('./signature.cjs')
+// Playing is also gentler: back-to-back seeks (H.264 especially) make the app's own windows drop
+// frames (1080p H.264: ~170 instead of 240 fps), playing at 16× doesn't. So while the user is
+// looking at the app (`gentle`), frames are read by playing.
 
 const SAMPLE = 144 // drawn size: 2×2 pixels per grid cell
 const EPS = 0.04 // a frame up to 40 ms before a target counts (as in DupeLens)
@@ -174,13 +178,18 @@ async function seekRead(video, t, read, signal) {
 }
 
 /**
- * Plays the video muted from just before the next target and fingerprints the first frame
- * presented at or after each target (pushed to `frames`, how late it was to `lags`). Resolves to
- * why it stopped: 'done' | 'ended' | 'slow' | 'stalled' | 'cancelled' | 'error'.
+ * Seeks to the next target, then plays the video muted from there and fingerprints the first
+ * frame presented at or after each further target (pushed to `frames`, how late it was to
+ * `lags`). Resolves to why it stopped: 'done' | 'ended' | 'slow' | 'stalled' | 'cancelled' | 'error'.
  */
 async function playFrames(video, targets, frames, lags, read, signal, onFrame) {
-  video.currentTime = Math.max(0, targets[frames.length] - 0.25)
-  if (!(await once(video, 'seeked', SEEK_TIMEOUT, signal))) return 'error'
+  // The first frames after play() arrive late (the pipeline starting up): seek to the first one.
+  const first = await seekRead(video, targets[frames.length], read, signal)
+  if (!first) return 'error'
+  frames.push(first)
+  lags.push(0)
+  onFrame()
+  if (frames.length >= targets.length) return 'done'
   return new Promise((resolve) => {
     let lastFrame = performance.now()
     let settled = false
@@ -230,15 +239,15 @@ const pack = (frames) => {
 }
 
 /**
- * Job { url, count = 6, interval = 1, max = 1200, play = false, size = 144 } →
+ * Job { url, count = 6, interval = 1, max = 1200, play = false, gentle = false, size = 144 } →
  * { duration, width, height, summary, dense, stats } with `summary` / `dense` as packed
  * fingerprints, or null when the video can't be decoded. `summary` is null when any of the
  * `count` frames couldn't be read (the video is then only checked for exact copies); `dense` holds
  * the frames read up to the first failure. `play`: this window renders offscreen, so frames may be
- * read by playing (see above).
+ * read by playing; `gentle`: prefer playing (see above).
  */
 async function videoFingerprints(job, signal, progress) {
-  const { url, count = 6, interval = 1, max = 1200, play = false, size = SAMPLE } = job
+  const { url, count = 6, interval = 1, max = 1200, play = false, gentle = false, size = SAMPLE } = job
   const started = performance.now()
   const video = document.createElement('video')
   video.muted = true
@@ -260,7 +269,7 @@ async function videoFingerprints(job, signal, progress) {
     }
     if (!Number.isFinite(duration) || duration <= 0 || !video.videoWidth) return null
     const read = frameReader(size)
-    const stats = { seeks: 0, played: 0, reason: '', maxLag: 0, ms: 0 }
+    const stats = { seeks: 0, playedFrom: -1, reason: '', maxLag: 0, ms: 0 }
     const targets = []
     for (let t = interval / 2; t < duration && targets.length < max; t += interval) targets.push(t)
     const total = targets.length + count
@@ -272,9 +281,9 @@ async function videoFingerprints(job, signal, progress) {
     const denseStart = performance.now()
     while (frames.length < targets.length && !signal.aborted) {
       const k = frames.length
-      const seconds = (performance.now() - denseStart) / 1000
-      if (play && !stats.played && k >= 5 && targets.length - k >= 10 && targets[k - 1] < SWITCH_SPEED * seconds) {
-        stats.played = k
+      const slow = k >= 5 && targets[k - 1] < (SWITCH_SPEED * (performance.now() - denseStart)) / 1000
+      if (play && stats.playedFrom < 0 && targets.length - k >= 10 && (gentle || slow)) {
+        stats.playedFrom = k
         stats.reason = await playFrames(video, targets, frames, lags, read, signal, report)
         continue // anything left (the last frames after 'ended', or after a stall) is sought
       }
