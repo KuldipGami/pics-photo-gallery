@@ -4,7 +4,7 @@ const { BrowserWindow, ipcMain } = require('electron')
 // Main-process side of the hidden media worker windows (see worker.cjs).
 
 let seq = 0
-const pending = new Map() // seq -> { resolve, timer, worker }
+const pending = new Map() // seq -> { resolve, timer, worker, expire, timeoutMs, onProgress }
 
 ipcMain.on('worker:done', (event, msg) => {
   const job = pending.get(msg?.seq)
@@ -15,8 +15,23 @@ ipcMain.on('worker:done', (event, msg) => {
   job.resolve(msg)
 })
 
+// Long jobs (video fingerprints) report progress; each report restarts their timeout, so the
+// timeout means "no progress for this long" rather than a limit on the whole job.
+ipcMain.on('worker:progress', (event, msg) => {
+  const job = pending.get(msg?.seq)
+  if (!job || job.worker.win?.webContents !== event.sender) return
+  clearTimeout(job.timer)
+  job.timer = setTimeout(job.expire, job.timeoutMs)
+  try {
+    job.onProgress?.(msg.fraction)
+  } catch {}
+})
+
 class MediaWorker {
-  constructor() {
+  /** `offscreen`: render the page offscreen at `frameRate` (see WorkerPool). */
+  constructor({ offscreen = false, frameRate = 240 } = {}) {
+    this.offscreen = offscreen
+    this.frameRate = frameRate
     this.win = null
     this.ready = null
     this.inflight = 0
@@ -44,9 +59,13 @@ class MediaWorker {
         nodeIntegration: false,
         backgroundThrottling: false,
         spellcheck: false,
+        ...(this.offscreen ? { offscreen: true } : {}),
       },
     })
     const win = this.win
+    // Video fingerprints play videos (fast, muted): nothing from these windows should ever be heard.
+    win.webContents.setAudioMuted(true)
+    if (this.offscreen) win.webContents.setFrameRate(this.frameRate)
     win.webContents.on('will-navigate', (e) => e.preventDefault())
     win.webContents.on('render-process-gone', () => this.reset(win))
     win.on('closed', () => this.reset(win))
@@ -66,8 +85,13 @@ class MediaWorker {
     if (!win.isDestroyed()) win.destroy()
   }
 
-  /** Resolves to { data, duration } or null on failure / timeout. */
-  async run(job, timeoutMs = 20_000) {
+  /**
+   * Resolves to the worker's reply ({ data, duration } for thumbnails) or null on failure /
+   * timeout / cancel. Options: `signal` (AbortSignal) cancels the job; `onProgress(fraction)` is
+   * called for jobs that report progress, and each report restarts the timeout.
+   */
+  async run(job, timeoutMs = 20_000, { signal, onProgress } = {}) {
+    if (signal?.aborted) return null
     this.inflight++
     try {
       await this.start()
@@ -77,12 +101,23 @@ class MediaWorker {
     }
     return new Promise((resolve) => {
       const id = ++seq
-      const timer = setTimeout(() => {
+      const win = this.win
+      const finish = (msg) => {
+        signal?.removeEventListener('abort', expire)
+        resolve(msg)
+      }
+      // Timed out or cancelled: answer null now and tell the worker to stop.
+      const expire = () => {
+        const entry = pending.get(id)
+        if (!entry) return
         pending.delete(id)
+        clearTimeout(entry.timer)
         this.inflight--
-        resolve(null)
-      }, timeoutMs)
-      pending.set(id, { resolve, timer, worker: this })
+        if (win && !win.isDestroyed()) win.webContents.send('worker:cancel', id)
+        finish(null)
+      }
+      pending.set(id, { resolve: finish, timer: setTimeout(expire, timeoutMs), worker: this, expire, timeoutMs, onProgress })
+      signal?.addEventListener('abort', expire)
       this.win.webContents.send('worker:job', { ...job, seq: id })
     })
   }
@@ -94,15 +129,19 @@ class MediaWorker {
   }
 }
 
-/** A small set of workers; each job goes to the least busy one. */
+/**
+ * A small set of workers; each job goes to the least busy one. `{ offscreen: true }` makes
+ * windows that render offscreen: unlike hidden windows they present video frames as they play
+ * (requestVideoFrameCallback fires at `frameRate`), which video fingerprints can use.
+ */
 class WorkerPool {
-  constructor(size) {
-    this.workers = Array.from({ length: size }, () => new MediaWorker())
+  constructor(size, options) {
+    this.workers = Array.from({ length: size }, () => new MediaWorker(options))
   }
 
-  run(job, timeoutMs) {
+  run(job, timeoutMs, options) {
     const worker = this.workers.reduce((a, b) => (b.inflight < a.inflight ? b : a))
-    return worker.run(job, timeoutMs)
+    return worker.run(job, timeoutMs, options)
   }
 
   /**

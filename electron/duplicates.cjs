@@ -8,14 +8,19 @@ const { Worker } = require('node:worker_threads')
 const sharp = require('sharp')
 const exifr = require('exifr')
 const sig = require('./signature.cjs')
+const { findVideoPairsAsync, sameLength, alignOffset, DENSE_INTERVAL } = require('./video-frames.cjs')
 
 // Duplicate detection, ported from DupeLens:
 //  - exact copies: same size + same content hash
 //  - look-alikes: perceptual fingerprints (signature.cjs) within the match threshold, in any of 8
 //    orientations or as a centre crop; all matching pairs are joined (union-find), so a group can
 //    hold photos less alike than the threshold — those are flagged "check before removing".
+//  - look-alike videos: DupeLens' VideosMatch on frames read from the videos themselves
+//    (video-frames.cjs): same-length copies by 6 sampled frames, trimmed clips by lining up a
+//    frame per second. Until a video has been read, its preview frame stands in.
 // Fingerprints, sharpness and brightness come from the cached preview; everything is cached in
-// duplicates.json so after the first pass only new or changed files are read.
+// duplicates.json so after the first pass only new or changed files are read (video frames live
+// in their own binary sidecar, see video-frames.cjs).
 
 const VERSION = 2
 const FULL_HASH_MAX = 32 * 1024 * 1024 // smaller files are hashed whole; bigger ones (videos) sampled
@@ -147,11 +152,18 @@ class UnionFind {
 }
 
 class Duplicates extends EventEmitter {
-  constructor(file, { canRun, thumb }) {
+  /**
+   * `videoFrames` (optional): a VideoFrames (video-frames.cjs). Duplicates loads, syncs, starts
+   * (after its own pass) and disposes it, and regroups as its results come in.
+   */
+  constructor(file, { canRun, thumb, videoFrames = null }) {
     super()
     this.file = file
     this.canRun = canRun
     this.thumb = thumb // item -> Promise<Buffer | null> (cached thumbnail)
+    this.videoFrames = videoFrames
+    this.memo = new Map() // video alignments for describe(), keyed by both files' versions
+    videoFrames?.on('changed', () => this.regroupSoon())
     this.records = new Map() // id -> { m, z, x?, s?, c, lo, sh, br, a, d? }
     this.dismissed = new Set()
     this.items = []
@@ -164,6 +176,7 @@ class Duplicates extends EventEmitter {
   }
 
   async load() {
+    await this.videoFrames?.load()
     try {
       const data = JSON.parse(await fsp.readFile(this.file, 'utf8'))
       this.dismissed = new Set(data.dismissed ?? [])
@@ -214,6 +227,7 @@ class Duplicates extends EventEmitter {
   /** Called whenever the library changes; the scan itself waits until previews are done. */
   sync(items) {
     this.items = items
+    this.videoFrames?.sync(items)
     clearTimeout(this.timers.sync)
     this.timers.sync = setTimeout(() => this.pump(), 1500)
   }
@@ -303,8 +317,25 @@ class Duplicates extends EventEmitter {
       if (this.again) {
         this.again = false
         this.pump()
+      } else if (!this.disposed) {
+        // then read the videos' frames (slow; in the background, only while previews are done)
+        this.videoFrames?.pump()
       }
     }
+  }
+
+  /** New video frames arrived: re-form the groups (not while a scan runs: it regroups anyway). */
+  regroupSoon() {
+    if (this.disposed || !this.items.length) return
+    if (this.running) {
+      this.again = true
+      return
+    }
+    clearTimeout(this.timers.regroup)
+    this.timers.regroup = setTimeout(() => {
+      if (this.running || this.disposed) return
+      this.regroup().catch((err) => console.error('[duplicates] regroup failed', err))
+    }, 1000)
   }
 
   /** Re-forms the groups from cached facts (also after changing the match threshold). */
@@ -343,13 +374,36 @@ class Duplicates extends EventEmitter {
       for (let k = 0; k < part.length; k += 2) uf.union(index.get(photos[part[k]].id), index.get(photos[part[k + 1]].id))
     }
 
-    // look-alike videos (for now from their preview frame; same length within 1.5 s or 3 %)
-    const videos = items.filter((it) => it.type === 'video' && words.has(it.id))
-    for (let i = 0; i < videos.length; i++) {
-      const a = videos[i]
-      for (let j = i + 1; j < videos.length; j++) {
-        const b = videos[j]
-        if (a.duration && b.duration && Math.abs(a.duration - b.duration) > Math.max(1.5, 0.03 * Math.max(a.duration, b.duration))) continue
+    // look-alike videos (DupeLens' VideosMatch, see video-frames.cjs): same length within 1.5 s or
+    // 3 %: the 6 sampled frames; a shorter clip of 6 s or more: lined up inside the longer one.
+    // A video whose analysis failed is only matched as an exact copy.
+    const analysed = []
+    const waiting = []
+    for (const it of items) {
+      if (it.type !== 'video') continue
+      const f = this.videoFrames?.get(it)
+      if (f) {
+        if (f.s) analysed.push(it)
+      } else if (words.has(it.id)) waiting.push(it)
+    }
+    if (analysed.length > 1) {
+      const input = analysed.map((it) => {
+        const f = this.videoFrames.get(it)
+        return { d: f.d, s: f.s, x: f.x }
+      })
+      const { pairs } = await findVideoPairsAsync(input, maxDist)
+      for (const [a, b] of pairs) uf.union(index.get(analysed[a].id), index.get(analysed[b].id))
+    }
+    // Not read yet: for now the preview frame stands in (same length only), as before.
+    const previewed = [...waiting, ...analysed.filter((it) => words.has(it.id))]
+    const length = (it) => this.videoFrames?.get(it)?.d || it.duration
+    for (let i = 0; i < waiting.length; i++) {
+      const a = waiting[i]
+      for (let j = i + 1; j < previewed.length; j++) {
+        const b = previewed[j]
+        const la = length(a)
+        const lb = length(b)
+        if (la && lb && !sameLength(la, lb)) continue
         const wa = words.get(a.id)
         const wb = words.get(b.id)
         const d = sig.popcount(wa[0] ^ wb[0]) + sig.popcount(wa[1] ^ wb[1]) + sig.popcount(wa[16] ^ wb[16]) + sig.popcount(wa[17] ^ wb[17])
@@ -397,7 +451,9 @@ class Duplicates extends EventEmitter {
   /** One group: kind, best copy, how every file relates to it, and the keep order for each rule. */
   describe(list, words) {
     const recs = list.map((it) => this.records.get(it.id) ?? {})
-    const pixels = (i) => (recs[i].d ? recs[i].d[0] * recs[i].d[1] : 0)
+    // videos: frame fingerprints, length and size as read by video-frames.cjs
+    const vf = list.map((it) => (it.type === 'video' ? this.videoFrames?.get(it) : undefined))
+    const pixels = (i) => (recs[i].d ? recs[i].d[0] * recs[i].d[1] : vf[i]?.w ? vf[i].w * vf[i].h : 0)
     const sharp = (i) => (Number.isFinite(recs[i].sh) ? recs[i].sh : -1)
     const maxSharp = Math.max(0, ...list.map((_, i) => sharp(i)))
     const step = (i) => (maxSharp > 0 && sharp(i) > 0 ? Math.round((sharp(i) / maxSharp) * 5) : 0)
@@ -431,6 +487,20 @@ class Duplicates extends EventEmitter {
     const info = list.map((it, i) => {
       if (i === ref) return ['best']
       if (recs[i].x && recs[i].x === recs[ref].x) return ['identical']
+      if (vf[i]?.s && vf[ref]?.s) {
+        // DupeLens: a trimmed clip by how well it lines up inside the longer video, else frame by frame
+        const a = vf[ref]
+        const b = vf[i]
+        const trimmed = !sameLength(a.d, b.d)
+        let s
+        if (trimmed && a.x && b.x) {
+          const key = `fit|${list[ref].id}:${list[ref].mtime}|${list[i].id}:${list[i].mtime}`
+          if (!this.memo.has(key)) this.memo.set(key, a.d > b.d ? sig.bestAlignment(a.x, b.x) : sig.bestAlignment(b.x, a.x))
+          s = 1 - this.memo.get(key) / sig.BITS
+        } else s = 1 - sig.framesDistance(a.s, b.s) / sig.BITS
+        min = Math.min(min, s)
+        return [+s.toFixed(3), trimmed ? (b.d < a.d ? 'trimmed' : 'longer') : 'same', 0]
+      }
       if (w(i) && w(ref)) {
         const c = sig.compare(w(ref), !!recs[ref].c, w(i), !!recs[i].c)
         const s = 1 - c.distance / sig.BITS
@@ -446,17 +516,39 @@ class Duplicates extends EventEmitter {
       ranked.length >= 2 &&
       sharp(ranked[0]) > sharp(ranked[1]) * 1.15 &&
       ranked.every((i) => Math.abs(pixels(i) - pixels(ranked[0])) <= pixels(ranked[0]) * 0.1)
+    const video = list.every((it) => it.type === 'video')
     return {
       ids: list.map((it) => it.id),
       exact,
-      video: list.every((it) => it.type === 'video'),
+      video,
       ref,
       min: +min.toFixed(3),
       info,
       orders,
       sharpest: clear ? ranked[0] : -1,
+      ...(video ? { offsets: this.videoOffsets(list, vf) } : {}),
       first: list[0].path.toLowerCase(),
     }
+  }
+
+  /**
+   * Videos: where each clip starts on the longest clip's timeline (seconds), so that they can play
+   * in sync (a trimmed copy starts later). DupeLens: lined up on the per-second frames.
+   */
+  videoOffsets(list, vf) {
+    const length = (i) => vf[i]?.d || list[i].duration || 0
+    let longest = 0
+    list.forEach((_, i) => {
+      if (length(i) > length(longest)) longest = i
+    })
+    return list.map((it, i) => {
+      const a = vf[longest]?.x
+      const b = vf[i]?.x
+      if (i === longest || !a || !b || length(longest) - length(i) <= 1.5) return 0
+      const key = `offset|${list[longest].id}:${list[longest].mtime}|${it.id}:${it.mtime}`
+      if (!this.memo.has(key)) this.memo.set(key, alignOffset(a, b) * DENSE_INTERVAL)
+      return this.memo.get(key)
+    })
   }
 
   /** "These aren't duplicates": hide this group (it comes back if its members change). */
@@ -474,7 +566,8 @@ class Duplicates extends EventEmitter {
     for (const it of this.items) {
       const r = this.records.get(it.id)
       if (!r || r.s === undefined) continue
-      facts[it.id] = [r.sh ?? -1, r.br ?? -1, r.lo ? 1 : 0, r.d?.[0] ?? 0, r.d?.[1] ?? 0]
+      const v = it.type === 'video' ? this.videoFrames?.get(it) : undefined // a video's size, as decoded
+      facts[it.id] = [r.sh ?? -1, r.br ?? -1, r.lo ? 1 : 0, r.d?.[0] ?? v?.w ?? 0, r.d?.[1] ?? v?.h ?? 0]
     }
     return { groups: this.result.groups, facts, sensitivity: this.settings.sensitivity, findCrops: this.settings.findCrops }
   }
@@ -492,6 +585,8 @@ class Duplicates extends EventEmitter {
   dispose() {
     this.disposed = true
     clearTimeout(this.timers.sync)
+    clearTimeout(this.timers.regroup)
+    this.videoFrames?.dispose()
     this.saveNow()
   }
 }

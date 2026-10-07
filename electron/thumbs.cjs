@@ -145,6 +145,7 @@ class Thumbnails extends EventEmitter {
     this.shell = new Lane(4, 3)
     this.videoWorkers = new WorkerPool(2)
     this.shellWorkers = new WorkerPool(4)
+    this.frameWorkers = null // video fingerprints (duplicates): its own offscreen worker, made on first use
     this.background = { pending: 0, total: 0 }
     this.progressTimer = null
   }
@@ -293,6 +294,22 @@ class Thumbnails extends EventEmitter {
     return pipeline.jpeg({ quality: 80 }).toBuffer()
   }
 
+  /**
+   * Frame fingerprints of a video for duplicate detection (see worker.cjs / video-frames.cjs):
+   * { duration, width, height, summary, dense, stats } or null. Runs in its own worker, so a long
+   * video never holds up thumbnails; that worker renders offscreen, so it may also read frames by
+   * playing. `signal` cancels; the timeout counts from the last progress report.
+   */
+  async videoFrames(item, { signal, onProgress } = {}) {
+    if (this.disposed) return null
+    this.frameWorkers ??= new WorkerPool(1, { offscreen: true })
+    const job = { type: 'frames', url: pathToFileURL(item.path).href, play: true }
+    const res = await this.frameWorkers.run(job, 60_000, { signal, onProgress })
+    const data = res?.data ?? null
+    if (data?.duration && !item.duration) this.emit('duration', item.id, data.duration)
+    return data
+  }
+
   warmUp(items) {
     if (items.some((it) => it.type === 'video')) this.videoWorkers.warmUp()
   }
@@ -362,6 +379,7 @@ class Thumbnails extends EventEmitter {
     }
     this.videoWorkers.destroy()
     this.shellWorkers.destroy()
+    this.frameWorkers?.destroy()
   }
 }
 
