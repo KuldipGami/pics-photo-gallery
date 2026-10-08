@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Columns2, ExternalLink, FolderOpen, Maximize2, Minus, Plus, ShieldCheck, SplitSquareHorizontal, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Columns2, ExternalLink, FolderOpen, Maximize2, Minus, Plus, ShieldCheck, SplitSquareHorizontal, Trash, X } from 'lucide-react'
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { api, fullImageUrl, mediaUrl, thumbUrl } from '../api'
 import { isLastCopy, kindText, matchText, needsReview, ruleMarks, type Facts } from '../lib/cleanup'
@@ -36,6 +36,8 @@ interface Props {
   paused?: boolean
   onClose(): void
   onFullScreen(ids: string[], index: number): void
+  /** Recycle Bin for these files (asks first). */
+  onRecycle?(ids: string[]): void
   onToast(text: string): void
 }
 
@@ -43,7 +45,7 @@ interface Props {
 const isTextInput = (el: EventTarget | null) =>
   el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button', 'submit', 'color'].includes(el.type))
 
-export function CompareView({ source, byId, facts, marks, keepRule, isProtected, setMarks, groupOf, paused, onClose, onFullScreen, onToast }: Props) {
+export function CompareView({ source, byId, facts, marks, keepRule, isProtected, setMarks, groupOf, paused, onClose, onFullScreen, onRecycle, onToast }: Props) {
   const [index, setIndex] = useState(source.index)
   const count = source.mode === 'groups' ? source.groups.length : source.items.length
   const group = source.mode === 'groups' ? source.groups[Math.min(index, count - 1)] : null
@@ -54,10 +56,14 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
   const [split, setSplit] = useState(0.5)
   const [right, setRight] = useState<number | null>(null)
 
+  // this group's copies sent to the Recycle Bin (once they're gone, on to the next group)
+  const [recycling, setRecycling] = useState<string[] | null>(null)
+
   // new group: fit, focus the clicked file (or the best copy)
   useEffect(() => {
     setView(FIT)
     setRight(null)
+    setRecycling(null)
     const f = source.mode === 'groups' && index === source.index && source.focus ? ids.indexOf(source.focus) : -1
     setFocus(Math.max(0, f))
   }, [index])
@@ -111,6 +117,20 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
   }
   const go = (d: number) => setIndex((i) => Math.max(0, Math.min(count - 1, i + d)))
   const next = () => (index < count - 1 ? go(1) : onToast(source.mode === 'groups' ? 'That was the last group' : 'That was the last file'))
+
+  // Recycle: just this group's selected copies, never every copy (the confirm comes from the app)
+  const markedHere = group ? ids.filter((id) => marks.has(id)) : []
+  const everyCopy = markedHere.length > 0 && markedHere.length === ids.length
+  const recycle = () => {
+    if (!onRecycle || !markedHere.length || everyCopy) return
+    setRecycling(markedHere)
+    onRecycle(markedHere)
+  }
+  useEffect(() => {
+    if (!recycling || recycling.some((id) => byId.has(id))) return
+    setRecycling(null)
+    next()
+  }, [byId, recycling])
 
   // ---------- keyboard (DupeLens' review keys) ----------
   const videoRef = useRef<SyncedVideosHandle>(null)
@@ -338,6 +358,22 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
             Fit
           </button>
         </div>
+        {group && onRecycle && (
+          <button
+            className="btn danger"
+            disabled={!markedHere.length || everyCopy}
+            onClick={recycle}
+            title={
+              everyCopy
+                ? 'Every copy is selected: unselect the one to keep first'
+                : markedHere.length
+                  ? `Move the ${markedHere.length === 1 ? 'selected copy' : `${formatCount(markedHere.length)} selected copies`} of this group to the Recycle Bin`
+                  : 'Select the copies to remove first (D, or A for auto)'
+            }
+          >
+            <Trash size={15} /> {markedHere.length && !everyCopy ? `Recycle ${formatCount(markedHere.length)}` : 'Recycle'}
+          </button>
+        )}
         <button className="icon-btn" onClick={() => onFullScreen(ids, focus)} title="View full screen">
           <Maximize2 size={17} />
         </button>

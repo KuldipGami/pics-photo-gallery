@@ -3069,7 +3069,9 @@ html[data-platform='darwin'] .titlebar {
 }
 .clean-actions .btn:disabled,
 .clean-toolbar .btn:disabled,
-.clean-group-head .btn:disabled {
+.clean-group-head .btn:disabled,
+.compare-head .btn:disabled,
+.compare-foot .btn:disabled {
   opacity: 0.45;
   cursor: default;
 }

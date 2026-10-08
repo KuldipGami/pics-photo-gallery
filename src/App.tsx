@@ -2664,9 +2664,11 @@ export default function App() {
           isProtected={isProtected}
           setMarks={setMarks}
           groupOf={(id) => groupOf.get(id)}
-          paused={!!viewer}
+          // (the viewer and confirm dialogs over it take the keys)
+          paused={!!viewer || !!confirm}
           onClose={() => setCompare(null)}
           onFullScreen={(ids, index) => setViewer({ ids, index })}
+          onRecycle={recycle}
           onToast={toast}
         />
       )}
