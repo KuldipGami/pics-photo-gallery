@@ -36,7 +36,7 @@ interface Props {
   onToast(text: string): void
   /** Add or change where it was taken. */
   onLocate?(item: MediaItem): void
-  /** Rating & tags (Lumen's own, else the file's). */
+  /** Rating & tags (Pics' own, else the file's). */
   marks?: { rating: number; tags: string[] }
   tagSuggestions?: TagCount[]
   onRate?(rating: number): void
@@ -246,7 +246,7 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
               {m.lat!.toFixed(5)}, {m.lon!.toFixed(5)} <ExternalLink size={12} />
             </button>
             {onLocate && (
-              <button className="info-secondary info-map" onClick={() => onLocate(item)} title={m.userLocation ? 'Set in Lumen' : undefined}>
+              <button className="info-secondary info-map" onClick={() => onLocate(item)} title={m.userLocation ? 'Set in Pics' : undefined}>
                 Change location…
               </button>
             )}

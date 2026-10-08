@@ -2,7 +2,7 @@ const { writeAtomicSync, readJsonSync } = require('./safe-file.cjs')
 
 /**
  * Tiny JSON-backed settings store with debounced, atomic writes. A damaged settings.json is kept
- * aside (settings.json.damaged-<time>) and Lumen starts from the defaults; one that exists but
+ * aside (settings.json.damaged-<time>) and Pics starts from the defaults; one that exists but
  * can't be read (still locked by another program) is never saved over during this session, so
  * the library folders listed in it aren't lost.
  */

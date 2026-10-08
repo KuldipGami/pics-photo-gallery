@@ -330,7 +330,7 @@ class ImportMemory {
 /**
  * PowerShell, run hidden with -Sta. Reads one JSON request per line on stdin and answers with JSON
  * lines carrying the request's id: { t: 'files' | 'dir' } while working, then { t: 'done' } or
- * { t: 'error', message }. Exits when stdin closes (so it never outlives Lumen).
+ * { t: 'error', message }. Exits when stdin closes (so it never outlives Pics).
  *   list                     → done { devices: [{ name, path, type }], disks: [{ letter, type, label, serial, size, free, fs }] }
  *   scan { root, folders }   → files { files: [{ rel, name, size, mtime, taken }] }…, done { roots }
  *   copy { root, rel, dest, size } → done { path, size }  (dest must be a new empty folder)
@@ -500,7 +500,7 @@ const POWERSHELL = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32'
 
 // The agent runs from a plain script file. An -EncodedCommand is what malware uses, so antivirus
 // "behaviour shields" kill it and show the user a threat warning. (A file inside app.asar can't be
-// run, so the script is written next to Lumen's data.)
+// run, so the script is written next to Pics' data.)
 let scriptDir = require('node:os').tmpdir()
 function agentScript() {
   const file = path.join(scriptDir, 'import-agent.ps1')
@@ -666,7 +666,7 @@ function deviceSource(dev) {
     removable: true,
     hasDcim: true,
     // Phones can't be asked to delete safely through the Shell (it shows its own confirmation
-    // and can't confirm what it removed), so Lumen never deletes from them.
+    // and can't confirm what it removed), so Pics never deletes from them.
     canDelete: false,
   }
 }
@@ -773,7 +773,7 @@ class Importer {
    * Resolves to an ImportScan (see src/components/ImportView.tsx).
    */
   async scan(source, opts = {}) {
-    if (this.busy) throw new Error(`Lumen is still ${this.busy}.`)
+    if (this.busy) throw new Error(`Pics is still ${this.busy}.`)
     this.busy = 'looking through a device'
     try {
       const session = {
@@ -1107,7 +1107,7 @@ class Importer {
    *               destination, files, entry } — `entry` is the History entry (null if nothing came in).
    */
   async run(scanId, options = {}) {
-    if (this.busy) throw new Error(`Lumen is still ${this.busy}.`)
+    if (this.busy) throw new Error(`Pics is still ${this.busy}.`)
     const session = this.sessionFor(scanId)
     const o = { ...DEFAULTS, ...options }
     if (!o.destination || !path.isAbsolute(o.destination)) throw new Error('Choose where the photos go first.')
@@ -1210,7 +1210,7 @@ class Importer {
             if (source.kind === 'folder' && o.trash) await o.trash(r.c.path)
             else await fsp.unlink(r.c.path)
             res.removed++
-            // Lumen now holds the only copies: undoing the import must never recycle them
+            // Pics now holds the only copies: undoing the import must never recycle them
             r.rec.sourceRemoved = true
             if (r.jpg) r.jpg.sourceRemoved = true
           } catch (err) {
@@ -1347,7 +1347,7 @@ class Importer {
       r.rec.to = out.moved.to // the HEIC original, kept aside (outside the scanned folders)
       r.kept = out.moved.to
     } else if (o.heicOriginals === 'none') {
-      // the original stays on the phone or card; Lumen keeps only the JPG
+      // the original stays on the phone or card; Pics keeps only the JPG
       await fsp.unlink(heic)
       res.files.splice(res.files.indexOf(r.rec), 1)
       r.kept = null

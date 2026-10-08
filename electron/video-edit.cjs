@@ -70,7 +70,7 @@ async function keyframes(file, { signal } = {}) {
 async function videoInfo(file, { signal } = {}) {
   const ext = path.extname(file).slice(1).toLowerCase()
   const [p, keys] = await Promise.all([probe(file, { signal }), keyframes(file, { signal }).catch(() => [])])
-  if (!p.video) throw new FfmpegError("This file has no picture Lumen can edit")
+  if (!p.video) throw new FfmpegError("This file has no picture Pics can edit")
   encoders().catch(() => {}) // warm up the encoder check while the person edits
   return {
     duration: p.duration,
@@ -165,7 +165,7 @@ function targetBitrate(p, { toH264 = false, fps = 0 } = {}) {
 async function saveEdit(item, recipe, { onProgress, signal } = {}) {
   const t0 = Date.now()
   const p = await probe(item.path, { signal })
-  if (!p.video) throw new FfmpegError("This file has no picture Lumen can edit")
+  if (!p.video) throw new FfmpegError("This file has no picture Pics can edit")
   const r = cleanRecipe(recipe, p.duration)
   if (isIdentity(r, p.duration)) throw new FfmpegError('Nothing to save — no changes yet')
   const ext = path.extname(item.path).slice(1).toLowerCase()
@@ -334,7 +334,7 @@ const frameLabel = (s) => `${Math.floor(s / 60)}m${String(Math.floor(s % 60)).pa
  */
 async function saveFrame(item, seconds, { signal } = {}) {
   const p = await probe(item.path, { signal })
-  if (!p.video) throw new FfmpegError("This file has no picture Lumen can save")
+  if (!p.video) throw new FfmpegError("This file has no picture Pics can save")
   const fps = p.video.fps || 30
   const t = clamp(seconds, 0, Math.max(0, p.duration - 0.5 / fps))
   // the player shows the frame whose time is at or just before `t`
@@ -348,7 +348,7 @@ async function saveFrame(item, seconds, { signal } = {}) {
   if (!stdout?.length) throw new FfmpegError("That frame couldn't be read")
   const facts = videoFacts(p.metadata)
   const when = (Number(item.date) || Date.now()) + t * 1000
-  const ifd0 = { Software: 'Lumen', ImageDescription: `Frame from ${item.name || path.basename(item.path)}` }
+  const ifd0 = { Software: 'Pics', ImageDescription: `Frame from ${item.name || path.basename(item.path)}` }
   if (facts.make || item.meta?.make) ifd0.Make = facts.make || item.meta.make
   if (facts.model || item.meta?.model) ifd0.Model = facts.model || item.meta.model
   const exif = {

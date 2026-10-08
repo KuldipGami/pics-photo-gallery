@@ -139,7 +139,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
         <EmptyState
           icon={<TriangleAlert size={40} strokeWidth={1.5} />}
           title="Something went wrong"
-          text="Lumen ran into a problem showing this page. Your photos and files are fine: reload to carry on."
+          text="Pics ran into a problem showing this page. Your photos and files are fine: reload to carry on."
           action={
             <button className="btn primary large" onClick={() => window.location.reload()}>
               Reload

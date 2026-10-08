@@ -428,7 +428,7 @@ async function withRetry(fn) {
 // ── swapping a rewritten file in ─────────────────────────────────────────────
 // For a moment during a swap the photo exists only under its "old" name. Every swap in progress is
 // listed in a journal file (setSwapJournal), written before the first rename and updated once the
-// swap is done, so if Lumen is closed or crashes in between, recoverSwaps() at the next start puts
+// swap is done, so if Pics is closed or crashes in between, recoverSwaps() at the next start puts
 // the photo back. Each swap uses names of its own, so two writers never share a temp or old file.
 
 let journalFile = null
@@ -560,7 +560,7 @@ function imageData(data) {
 
 /**
  * True when both files are JPEGs with byte-identical compressed pictures: the same photo, whatever
- * Lumen's lossless edits (date, rotation, place, rating, tags) changed in their headers.
+ * Pics' lossless edits (date, rotation, place, rating, tags) changed in their headers.
  */
 async function sameImageData(a, b) {
   try {

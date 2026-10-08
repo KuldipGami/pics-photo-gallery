@@ -1,4 +1,4 @@
-# Lumen's text recognition engine: Windows' own OCR (Windows.Media.Ocr), offline.
+# Pics' text recognition engine: Windows' own OCR (Windows.Media.Ocr), offline.
 # ocr.cjs copies this file next to its cache (app.asar can't be run from) and starts it with -File
 # (an -EncodedCommand child gets killed by security software after a few seconds). It answers one
 # request per line until stdin closes, so PowerShell and WinRT start only once.

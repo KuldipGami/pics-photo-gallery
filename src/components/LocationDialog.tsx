@@ -145,7 +145,7 @@ export function LocationDialog({ items, byId, suggest, search, describe, onSave,
   const located = items.filter(hasPosition).length
   const jpegs = items.filter((it) => JPEG.has(it.ext.toLowerCase())).length
   // Keyed on the ids themselves: `items` is a new array on every render of the window (up to every
-  // half second while Lumen works in the background), and a new set would move the map back each time.
+  // half second while Pics works in the background), and a new set would move the map back each time.
   const idKey = items.map((it) => it.id).join('\n')
   const ids = useMemo(() => new Set(idKey ? idKey.split('\n') : []), [idKey])
 
@@ -377,8 +377,8 @@ export function LocationDialog({ items, byId, suggest, search, describe, onSave,
     jpegs === items.length
       ? 'The location is saved in the photo files (without re-saving the pictures). You can undo it in History.'
       : jpegs === 0
-        ? `Lumen remembers the location for ${items.length === 1 ? 'this file' : 'these files'}: ${items.length === 1 ? 'its' : 'their'} format can't hold one without re-saving.`
-        : `JPEG photos get it saved in the file; Lumen remembers it for the other ${formatCount(items.length - jpegs)}. You can undo it in History.`
+        ? `Pics remembers the location for ${items.length === 1 ? 'this file' : 'these files'}: ${items.length === 1 ? 'its' : 'their'} format can't hold one without re-saving.`
+        : `JPEG photos get it saved in the file; Pics remembers it for the other ${formatCount(items.length - jpegs)}. You can undo it in History.`
 
   const sourceThumbs = (s: LocationSuggestion) =>
     s.sources

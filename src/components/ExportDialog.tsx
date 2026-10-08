@@ -65,7 +65,7 @@ export interface ExportResult {
 
 /** What the dialog needs from the app (wire to the export:* IPC handlers). */
 export interface ExportBridge {
-  /** Default destinations for this export (Pictures\Lumen exports\<label>) and the last used options. */
+  /** Default destinations for this export (Pictures\Pics exports\<label>) and the last used options. */
   defaults(label: string): Promise<{ folder: string; zip: string; root: string; options: Partial<ExportOptions> | null }>
   /** Folder picker (kind 'folder') or save dialog for a .zip; null when cancelled. */
   pick(kind: 'folder' | 'zip', current: string): Promise<string | null>
@@ -497,7 +497,7 @@ export function ExportDialog({ items, label = '', bridge, onClose, onDone }: Exp
                 {[
                   phase.result.converted ? `${plural(phase.result.converted, 'photo was', 'photos were')} saved as JPG.` : '',
                   phase.result.keptVideoDetails
-                    ? `${plural(phase.result.keptVideoDetails, 'video')} kept ${phase.result.keptVideoDetails === 1 ? 'its' : 'their'} details: they can only be removed from MP4 and MOV videos Lumen can read.`
+                    ? `${plural(phase.result.keptVideoDetails, 'video')} kept ${phase.result.keptVideoDetails === 1 ? 'its' : 'their'} details: they can only be removed from MP4 and MOV videos Pics can read.`
                     : '',
                 ]
                   .filter(Boolean)

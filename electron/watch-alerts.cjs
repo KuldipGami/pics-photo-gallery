@@ -11,7 +11,7 @@ const { keyOf, extOf, isMedia, VIDEO_EXT, skippedExtensions } = require('./libra
 // an exact copy (same size + same content hash) or, for photos, looks like a known photo
 // (perceptual fingerprint within the duplicate-matching threshold).
 //
-// The index of known files is Lumen's own: the library items plus the duplicate finder's cached
+// The index of known files is Pics' own: the library items plus the duplicate finder's cached
 // records (content hash `x`, fingerprint `s`, crops `c`, low detail `lo`). Paths come from the
 // library's folder watcher (Library 'file' events) through queue().
 
@@ -246,7 +246,7 @@ class WatchAlerts extends EventEmitter {
     this.pending.clear()
   }
 
-  /** Don't alert about these files for a while (e.g. ones Lumen itself just wrote or restored). */
+  /** Don't alert about these files for a while (e.g. ones Pics itself just wrote or restored). */
   ignore(files, ms = 60_000) {
     const until = this.options.now() + ms
     for (const f of Array.isArray(files) ? files : [files]) if (typeof f === 'string') this.ignored.set(keyOf(path.resolve(f)), until)

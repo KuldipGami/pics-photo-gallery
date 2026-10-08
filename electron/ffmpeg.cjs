@@ -36,7 +36,7 @@ let binary = null
 function ffmpegPath() {
   if (binary) return binary
   let p = process.env.LUMEN_FFMPEG || require('ffmpeg-static')
-  if (!p) throw new FfmpegError("Lumen's video tools aren't available on this computer")
+  if (!p) throw new FfmpegError("Pics' video tools aren't available on this computer")
   binary = p.replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2')
   return binary
 }
@@ -46,12 +46,12 @@ function explain(stderr, fallback = "The video couldn't be processed") {
   const s = String(stderr || '')
   if (/No such file or directory|Error opening input file/i.test(s)) return "The video file can't be found — it may have been moved or deleted"
   if (/No space left on device/i.test(s)) return 'The disk is full'
-  if (/Permission denied|Access is denied/i.test(s)) return "Lumen isn't allowed to write in this folder"
+  if (/Permission denied|Access is denied/i.test(s)) return "Pics isn't allowed to write in this folder"
   if (/moov atom not found|Invalid data found when processing input|could not find codec parameters/i.test(s))
-    return "This file is damaged or isn't a video Lumen can read"
+    return "This file is damaged or isn't a video Pics can read"
   if (/Error while opening encoder|OpenEncodeSession|No capable devices|nvcuda|Cannot load|DLL .* failed|MFX|amfrt/i.test(s))
     return "The graphics card's video encoder couldn't start"
-  if (/Decoder .* not found|Unsupported codec|no decoder/i.test(s)) return "This video uses a format Lumen can't decode"
+  if (/Decoder .* not found|Unsupported codec|no decoder/i.test(s)) return "This video uses a format Pics can't decode"
   return fallback
 }
 
@@ -88,7 +88,7 @@ function run(args, opts = {}) {
     try {
       child = spawn(ffmpegPath(), full, { windowsHide: true, stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
     } catch (err) {
-      return reject(new FfmpegError("Lumen's video tools couldn't start", String(err?.message || err)))
+      return reject(new FfmpegError("Pics' video tools couldn't start", String(err?.message || err)))
     }
     let stderr = ''
     const chunks = []
@@ -158,7 +158,7 @@ function run(args, opts = {}) {
     child.on('error', (err) => {
       clearTimeout(timer)
       signal?.removeEventListener('abort', onAbort)
-      reject(new FfmpegError("Lumen's video tools couldn't start", String(err?.message || err)))
+      reject(new FfmpegError("Pics' video tools couldn't start", String(err?.message || err)))
     })
     child.on('close', (code) => {
       clearTimeout(timer)
@@ -241,7 +241,7 @@ const seconds = (h, m, s) => Number(h) * 3600 + Number(m) * 60 + Number(s)
 async function probe(file, { signal } = {}) {
   const { stderr } = await run(['-i', file], { signal, allowFail: true, idleTimeout: 30_000 })
   const info = parseProbe(stderr)
-  if (!info) throw new FfmpegError(explain(stderr, "This file isn't a video Lumen can read"), tail(stderr))
+  if (!info) throw new FfmpegError(explain(stderr, "This file isn't a video Pics can read"), tail(stderr))
   return info
 }
 

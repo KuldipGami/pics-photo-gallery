@@ -107,7 +107,7 @@ class FaceEngine {
     if (this.closed) return Promise.reject(new Error('The app is closing'))
     if (this.child) return this.ready
     const child = utilityProcess.fork(path.join(__dirname, 'face-engine.cjs'), [], {
-      serviceName: 'Lumen face recognition',
+      serviceName: 'Pics face recognition',
       stdio: 'ignore',
     })
     this.child = child
@@ -285,10 +285,10 @@ class FaceIndex extends EventEmitter {
     const r = await readJson(this.file)
     if (r.error) {
       // Still locked after a few tries (antivirus, a backup program): starting empty would save over
-      // every name and correction, so People stays off until Lumen is started again.
+      // every name and correction, so People stays off until Pics is started again.
       this.blocked = true
       this.halted = true
-      this.error = "Lumen couldn't open its People data (faces.json). It will try again when Lumen restarts."
+      this.error = "Pics couldn't open its People data (faces.json). It will try again when Pics restarts."
       console.error('[faces] faces.json could not be read; leaving it alone this session', r.error)
       return
     }
@@ -307,7 +307,7 @@ class FaceIndex extends EventEmitter {
         this.migrateFromV1(data)
       }
     } catch (err) {
-      // readable, but not what Lumen writes: kept aside like a damaged file
+      // readable, but not what Pics writes: kept aside like a damaged file
       for (const map of [this.items, this.faces, this.people, this.legacy]) map.clear()
       this.migrated = false
       console.error(`[faces] faces.json couldn't be used (kept as ${keepAside(this.file)}); starting again`, err)
@@ -503,7 +503,7 @@ class FaceIndex extends EventEmitter {
       if (!res || res.timeout || res.stage === 'run') {
         if (this.engine.failures >= MAX_FAILURES && !this.halted) {
           this.halted = true
-          this.error = 'Its engine keeps failing on this computer. It tries again when Lumen restarts.'
+          this.error = 'Its engine keeps failing on this computer. It tries again when Pics restarts.'
           console.error(`[faces] analysis stopped for this session: ${this.error}`)
           this.emitProgress()
         }
@@ -934,7 +934,7 @@ class FaceIndex extends EventEmitter {
   }
 
   /**
-   * Photos that changed (Lumen's own lossless edits) or left the library. Their faces go, but the
+   * Photos that changed (Pics' own lossless edits) or left the library. Their faces go, but the
    * user's choices for them wait to be carried over if the photo is analysed again (for a photo
    * that's gone, until the next sync with the library).
    */
@@ -948,7 +948,7 @@ class FaceIndex extends EventEmitter {
   }
 
   /**
-   * Files Lumen moved or renamed keep their faces: re-key photos and faces from old to new item
+   * Files Pics moved or renamed keep their faces: re-key photos and faces from old to new item
    * ids (face ids are "<item id>:<n>"), and follow chosen cover faces.
    */
   remapIds(map) {

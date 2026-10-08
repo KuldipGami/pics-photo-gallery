@@ -61,7 +61,7 @@ export interface AppState {
   smartProgress: SmartProgress
   ocrProgress: OcrProgress
   history: HistoryEntry[]
-  /** Lumen was started for a folder or to review duplicates (taken once). */
+  /** Pics was started for a folder or to review duplicates (taken once). */
   launch: { folder?: string; duplicates?: boolean } | null
   tags: TagsData
 }
@@ -123,7 +123,7 @@ export interface LumenApi {
   suggestLocations(ids: string[], hours: number): Promise<LocationSuggestions>
   searchPlaces(query: string): Promise<PlaceHit[]>
   describePlace(lat: number, lon: number): Promise<PlaceName | null>
-  /** JPEGs get the place in their EXIF (undo from History); other files keep it in Lumen. */
+  /** JPEGs get the place in their EXIF (undo from History); other files keep it in Pics. */
   setLocations(assignments: LocationAssignment[], label: string): Promise<{ done: number; kept: { name: string; reason: string }[]; errors: string[] }>
   renameAlbum(id: string, name: string): Promise<void>
   deleteAlbum(id: string): Promise<void>
@@ -160,14 +160,14 @@ export interface LumenApi {
   pickOrganizeRoot(): Promise<string | null>
   runOrganize(action: 'dates' | 'folders' | 'rename' | 'convert', skip: string[]): Promise<{ done: number; errors: string[] }>
   onOrganizeProgress(cb: (progress: { done: number; total: number } | null) => void): Unsubscribe
-  /** Lumen moved or renamed files: [old id, new id] pairs. */
+  /** Pics moved or renamed files: [old id, new id] pairs. */
   onRelocated(cb: (pairs: [string, string][]) => void): Unsubscribe
-  /** Adds/removes "Scan with Lumen" in the folder right-click menu. */
+  /** Adds/removes "Scan with Pics" in the folder right-click menu. */
   setContextMenu(on: boolean): Promise<{ ok: boolean; error?: string }>
   setStartWithWindows(on: boolean): Promise<{ ok: boolean; error?: string }>
   onWatchAlert(cb: (data: { alert: WatchAlert; log: string[] }) => void): Unsubscribe
   onWatchStatus(cb: (status: { watching: boolean; folders: string[]; text: string }) => void): Unsubscribe
-  /** Lumen was asked to open a folder (right-click menu, command line). */
+  /** Pics was asked to open a folder (right-click menu, command line). */
   onOpenFolder(cb: (dir: string) => void): Unsubscribe
   onShowDuplicates(cb: () => void): Unsubscribe
   onDuplicates(cb: (data: DuplicatesData) => void): Unsubscribe

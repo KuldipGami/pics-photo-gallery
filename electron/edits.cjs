@@ -107,7 +107,7 @@ async function setLocation(item, location, backupsDir) {
 
 /**
  * Is the file at `f.from` still the photo this edit changed? Yes when it is exactly as the edit left
- * it, or when its picture is byte-identical to the backup's (Lumen's edits are lossless, so a rating
+ * it, or when its picture is byte-identical to the backup's (Pics' edits are lossless, so a rating
  * or another edit written since doesn't count as a different photo).
  */
 async function stillEdited(f) {

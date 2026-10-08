@@ -4,10 +4,10 @@ const { execFile } = require('node:child_process')
 const { EventEmitter } = require('node:events')
 
 // Background running (ported from DupeLens' MainWindow / InstallService / App):
-//  - a notification-area (tray) icon while Lumen watches folders, with Open / Stop watching / Exit
+//  - a notification-area (tray) icon while Pics watches folders, with Open / Stop watching / Exit
 //  - notifications (clicking one opens the window)
 //  - "Start with Windows" (login item started with --tray)
-//  - "Scan with Lumen" in Explorer's folder right-click menu (HKCU, no admin rights; via reg.exe)
+//  - "Scan with Pics" in Explorer's folder right-click menu (HKCU, no admin rights; via reg.exe)
 //  - command-line arguments: --folder <path> or a folder as the first argument, --tray, --autoscan
 //
 // Electron is only loaded when a function needs it, so the pure parts (parseArgs, the registry
@@ -17,22 +17,24 @@ const { EventEmitter } = require('node:events')
 const ICON = path.join(__dirname, '..', 'resources', 'icon.png')
 
 const TEXTS = {
-  trayTooltip: 'Lumen: watching for duplicates',
-  trayOpen: 'Open Lumen',
+  trayTooltip: 'Pics: watching for duplicates',
+  trayOpen: 'Open Pics',
   trayStop: 'Stop watching',
   trayExit: 'Exit',
-  /** Shown when closing the window hides Lumen in the notification area. */
-  stillWatchingTitle: 'Lumen is still watching',
+  /** Shown when closing the window hides Pics in the notification area. */
+  stillWatchingTitle: 'Pics is still watching',
   stillWatchingBody: 'It will tell you when new duplicates appear. Right-click the icon to exit.',
   newDuplicateTitle: 'New duplicate found',
-  contextMenu: 'Scan with Lumen',
+  contextMenu: 'Scan with Pics',
 }
 
 /** Where Explorer's folder right-click entries live (per user: no admin rights needed). */
 const CONTEXT_MENU_KEYS = [
-  'HKCU\\Software\\Classes\\Directory\\shell\\Lumen',
-  'HKCU\\Software\\Classes\\Directory\\Background\\shell\\Lumen',
+  'HKCU\\Software\\Classes\\Directory\\shell\\Pics',
+  'HKCU\\Software\\Classes\\Directory\\Background\\shell\\Pics',
 ]
+/** The same entries from before Pics was renamed (Lumen, up to 1.15): replaced by the ones above. */
+const LEGACY_CONTEXT_MENU_KEYS = CONTEXT_MENU_KEYS.map((key) => key.replace(/\\Pics$/, '\\Lumen'))
 
 const electron = () => require('electron')
 
@@ -58,9 +60,9 @@ const cleanPath = (p) => {
 }
 
 /**
- * Lumen's own arguments from `argv` (process.argv, or the argv of a second launch):
+ * Pics' own arguments from `argv` (process.argv, or the argv of a second launch):
  *  --folder <path> (or --folder=<path>), else the first plain argument when it is a folder
- *  (e.g. from "Scan with Lumen" / "Open with"); --tray: start hidden in the notification area
+ *  (e.g. from "Scan with Pics" / "Open with"); --tray: start hidden in the notification area
  *  (used when starting with Windows); --autoscan: look for duplicates right away.
  * Chromium/Electron switches (--foo, --foo=bar) are ignored. When run as `electron <app>` (not
  * packaged), the first plain argument is the app itself and is skipped. A second launch's argv
@@ -101,7 +103,7 @@ function parseArgs(argv = process.argv, { cwd = process.cwd(), defaultApp = !!pr
 // ---------- what Windows should run ----------
 
 /**
- * The program (and arguments before Lumen's own) that starts this Lumen: the installed exe when
+ * The program (and arguments before Pics' own) that starts this Pics: the installed exe when
  * packaged; in development `electron.exe <app folder>`.
  * @returns {{ exe: string, args: string[], packaged: boolean }}
  */
@@ -121,7 +123,7 @@ function loginItemOptions(app, execPath) {
   return { path: launch.exe, args: [...launch.args.map(quote), '--tray'] }
 }
 
-/** Start Lumen quietly in the notification area when the user signs in (HKCU Run key). */
+/** Start Pics quietly in the notification area when the user signs in (HKCU Run key). */
 function startWithWindows(on, { app, execPath } = {}) {
   app ??= electron().app
   const o = loginItemOptions(app, execPath)
@@ -129,7 +131,7 @@ function startWithWindows(on, { app, execPath } = {}) {
 }
 
 /**
- * Whether Lumen will really start when the user signs in. openAtLogin stays true when Lumen was
+ * Whether Pics will really start when the user signs in. openAtLogin stays true when Pics was
  * turned off in Task Manager → Startup apps (or Settings → Apps → Startup), so an entry only counts
  * while Windows has it enabled.
  */
@@ -146,7 +148,31 @@ function isStartWithWindows({ app, execPath } = {}) {
   return !!s?.openAtLogin && s.executableWillLaunchAtLogin !== false
 }
 
-// ---------- "Scan with Lumen" in Explorer ----------
+/**
+ * After an update that changed the program's file (Lumen.exe became Pics.exe in 1.16, or it was
+ * installed somewhere else), the "Start with Windows" entry still names the old one, which isn't
+ * there any more. Points it at this one, on or off in Task Manager as it was. Call once at startup
+ * (installed copies only). Returns true when it was changed.
+ */
+function refreshStartWithWindows({ app, execPath, exists = fs.existsSync } = {}) {
+  app ??= electron().app
+  const o = loginItemOptions(app, execPath)
+  const s = app.getLoginItemSettings({ path: o.path, args: o.args })
+  const items = (Array.isArray(s?.launchItems) ? s.launchItems : []).filter((item) => item.scope === 'user')
+  const same = (a, b) => path.resolve(String(a)).toLowerCase() === path.resolve(String(b)).toLowerCase()
+  if (items.some((item) => same(item.path, o.path))) return false
+  const old = items.find((item) => item.args?.includes('--tray') && /[\\/](lumen|pics)\.exe$/i.test(String(item.path)) && !exists(String(item.path)))
+  if (!old) return false
+  app.setLoginItemSettings({ openAtLogin: true, path: o.path, args: o.args, enabled: old.enabled !== false })
+  // (an entry under another name than this one's would stay behind)
+  const now = app.getLoginItemSettings({ path: o.path, args: o.args })
+  if ((now?.launchItems ?? []).some((item) => item.scope === 'user' && item.name === old.name && !same(item.path, o.path))) {
+    app.setLoginItemSettings({ openAtLogin: false, path: old.path, args: old.args, name: old.name })
+  }
+  return true
+}
+
+// ---------- "Scan with Pics" in Explorer ----------
 
 /**
  * Runs reg.exe with `args` (no shell, so %V stays literal). Resolves { code, stdout, stderr }.
@@ -165,9 +191,9 @@ function contextMenuCommand(launch = launchInfo()) {
   return [launch.exe, ...launch.args, '%V'].map(quote).join(' ')
 }
 
-/** The reg.exe calls (argument lists) that add or remove the "Scan with Lumen" entries. */
+/** The reg.exe calls (argument lists) that add or remove the "Scan with Pics" entries. */
 function contextMenuCommands(enabled, launch) {
-  if (!enabled) return CONTEXT_MENU_KEYS.map((key) => ['delete', key, '/f'])
+  if (!enabled) return [...CONTEXT_MENU_KEYS, ...LEGACY_CONTEXT_MENU_KEYS].map((key) => ['delete', key, '/f'])
   launch ??= launchInfo()
   const command = contextMenuCommand(launch)
   return CONTEXT_MENU_KEYS.flatMap((key) => [
@@ -178,7 +204,7 @@ function contextMenuCommands(enabled, launch) {
 }
 
 /**
- * Adds or removes "Scan with Lumen" for folders and folder backgrounds. Throws when Windows
+ * Adds or removes "Scan with Pics" for folders and folder backgrounds. Throws when Windows
  * refused (message from reg.exe).
  * @param {{ run?: (args: string[]) => Promise<{ code: number, stdout?: string, stderr?: string }>, launch?: object, app?: object }} [options]
  */
@@ -193,10 +219,15 @@ async function setContextMenu(enabled, { run = runReg, launch, app } = {}) {
 }
 
 async function isContextMenuEnabled({ run = runReg } = {}) {
-  return (await run(['query', CONTEXT_MENU_KEYS[0]])).code === 0
+  return (await run(['query', CONTEXT_MENU_KEYS[0]])).code === 0 || (await hasLegacyContextMenu({ run }))
 }
 
-/** The command registered for "Scan with Lumen" (null when there is none). */
+/** "Scan with Lumen" from before the rename is still there. */
+async function hasLegacyContextMenu({ run = runReg } = {}) {
+  return (await run(['query', LEGACY_CONTEXT_MENU_KEYS[0]])).code === 0
+}
+
+/** The command registered for "Scan with Pics" (null when there is none). */
 async function readContextMenuCommand({ run = runReg } = {}) {
   const res = await run(['query', `${CONTEXT_MENU_KEYS[0]}\\command`, '/ve'])
   if (res.code !== 0) return null
@@ -205,12 +236,18 @@ async function readContextMenuCommand({ run = runReg } = {}) {
 }
 
 /**
- * When "Scan with Lumen" is on but points at another Lumen.exe (moved or reinstalled elsewhere),
+ * When "Scan with Pics" is on but points at another Pics.exe (moved or reinstalled elsewhere),
  * registers it again for this one. Resolves true when it was updated. Call once at startup.
  */
 async function refreshContextMenu({ run = runReg, launch, app } = {}) {
   if (!(await isContextMenuEnabled({ run }))) return false
   launch ??= launchInfo({ app })
+  // "Scan with Lumen" (before the rename) becomes "Scan with Pics"
+  if (await hasLegacyContextMenu({ run })) {
+    await setContextMenu(true, { run, launch })
+    for (const key of LEGACY_CONTEXT_MENU_KEYS) await run(['delete', key, '/f'])
+    return true
+  }
   if ((await readContextMenuCommand({ run })) === contextMenuCommand(launch)) return false
   await setContextMenu(true, { run, launch })
   return true
@@ -219,7 +256,7 @@ async function refreshContextMenu({ run = runReg, launch, app } = {}) {
 // ---------- tray icon & notifications ----------
 
 /**
- * The notification-area icon and notifications. Emits 'open' (Open Lumen, double-click, a
+ * The notification-area icon and notifications. Emits 'open' (Open Pics, double-click, a
  * notification clicked), 'stop-watching' and 'exit'.
  */
 class Background extends EventEmitter {
@@ -324,6 +361,8 @@ module.exports = {
   TEXTS,
   ICON,
   CONTEXT_MENU_KEYS,
+  LEGACY_CONTEXT_MENU_KEYS,
+  refreshStartWithWindows,
   parseArgs,
   launchInfo,
   startWithWindows,

@@ -18,7 +18,7 @@ const SKIP_DIRS = new Set(['node_modules', '$recycle.bin', 'system volume inform
 
 /**
  * File types the user can include or skip (Settings → Skip during scans), grouped the way people
- * think of them (from DupeLens' FileTypes). Every extension Lumen reads is in exactly one group.
+ * think of them (from DupeLens' FileTypes). Every extension Pics reads is in exactly one group.
  */
 const FILE_TYPES = [
   { key: 'jpeg', label: 'JPEG photos', extensions: ['jpg', 'jpeg', 'jfif'], video: false },
@@ -332,7 +332,7 @@ async function buildItem(file, st) {
     date: Math.min(mtime, birth),
     /** Capture date from the file itself (EXIF / video metadata), or null: not just a file date. */
     taken: null,
-    /** Stars saved in the file (0 = none); Lumen's own ratings live in tags.json. */
+    /** Stars saved in the file (0 = none); Pics' own ratings live in tags.json. */
     rating: 0,
   }
   if (type === 'image' && EXIF_EXT.has(ext)) {
@@ -360,7 +360,7 @@ async function buildItem(file, st) {
 }
 
 /**
- * A video cached before Lumen read the recorder's own clock: only its date is read again (id,
+ * A video cached before Pics read the recorder's own clock: only its date is read again (id,
  * path, size and modified time stay, so its preview and analysis stay valid).
  */
 async function withLocalTime(prev) {
@@ -413,7 +413,7 @@ class Library extends EventEmitter {
         this.setItems(new Map(items.map((it) => [keyOf(it.path), it])))
         this.loadState = 'ok'
       } else {
-        // not a library Lumen knows (a newer version's?): kept aside rather than overwritten
+        // not a library Pics knows (a newer version's?): kept aside rather than overwritten
         const keptAs = keepAside(this.cacheFile)
         console.error('Library cache not understood; kept as', keptAs)
         this.loadState = 'corrupt'
@@ -531,7 +531,7 @@ class Library extends EventEmitter {
         try {
           await walk(root, files, onFound, walkExclude, skip.exts, unread)
         } catch {
-          // A drive that isn't connected, a network share not there yet (Lumen starts with
+          // A drive that isn't connected, a network share not there yet (Pics starts with
           // Windows), a folder renamed in Explorer, no permission…: that says nothing about what's
           // in it, so it isn't taken as empty (which would forget its people, tags, text…)
           unreachable.push(root)
@@ -559,7 +559,7 @@ class Library extends EventEmitter {
         }
         if (st.size < skip.minBytes) return // "Skip tiny files" (stickers, icons, thumbnails)
         const prev = this.items.get(key)
-        // (items cached by Lumen < 1.8 lack `taken`: read their metadata again once)
+        // (items cached by Pics < 1.8 lack `taken`: read their metadata again once)
         if (prev && prev.size === st.size && prev.mtime === Math.round(st.mtimeMs) && prev.taken !== undefined && prev.rating !== undefined) {
           if (needsLocalTime(prev)) {
             changed = true

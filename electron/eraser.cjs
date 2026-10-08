@@ -177,7 +177,7 @@ class EraserEngine {
     try {
       electron = require('electron')
     } catch {}
-    if (electron?.utilityProcess) return electron.utilityProcess.fork(file, [], { serviceName: 'Lumen magic eraser', stdio: 'ignore' })
+    if (electron?.utilityProcess) return electron.utilityProcess.fork(file, [], { serviceName: 'Pics magic eraser', stdio: 'ignore' })
     // plain Node (tests)
     const child = require('node:child_process').fork(file, [], { serialization: 'advanced', stdio: 'inherit' })
     child.postMessage = (msg) => child.send(msg)

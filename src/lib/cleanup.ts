@@ -319,7 +319,7 @@ export function buildReports(r: ReportInput) {
       cards.push(`<section><h2>${esc(name)} <span class="pill">${formatCount(list.length)} files</span></h2><table><tr><th>File</th><th>Why</th><th>Size</th><th>Folder</th></tr>${trs.join('')}</table></section>`)
   }
   const csv = rows.map((row) => row.map(csvCell).join(',')).join('\r\n')
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lumen report</title><style>
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pics report</title><style>
 :root{--bg:#f3f4f7;--card:#fff;--text:#13161b;--muted:#586172;--line:#e3e6eb;--red:#dc3d43;--green:#16935a;--accent:#4a67ea}
 @media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#191c22;--text:#edf0f5;--muted:#9ba3b3;--line:#242831;--red:#ef5a60;--green:#3fd58e;--accent:#6f8cff}}
 body{margin:0;padding:32px 16px;background:var(--bg);color:var(--text);font:14px/1.45 "Segoe UI",system-ui,sans-serif}main{max-width:1100px;margin:auto}
@@ -329,7 +329,7 @@ section{background:var(--card);border:1px solid var(--line);border-radius:12px;p
 .pill{font-size:12px;font-weight:600;padding:2px 8px;border-radius:10px;background:color-mix(in srgb,var(--accent) 15%,transparent);color:var(--accent);margin-left:6px}
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:5px 8px;border-top:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600}
 .rm{color:var(--red);font-weight:600}.keep{color:var(--green);font-weight:600}.dir{color:var(--muted);word-break:break-all}</style></head><body><main>
-<h1>Lumen report</h1><p class="sub">${esc(r.summary)} · generated ${new Date().toLocaleString()}</p>
+<h1>Pics report</h1><p class="sub">${esc(r.summary)} · generated ${new Date().toLocaleString()}</p>
 <div class="stats"><div class="stat"><b>${formatCount(r.groups.length)}</b><span>Duplicate groups</span></div><div class="stat"><b>${formatCount(extra)}</b><span>Extra copies</span></div><div class="stat"><b>${formatCount(selected)}</b><span>Selected to remove</span></div><div class="stat"><b>${formatBytes(free)}</b><span>Space to free</span></div></div>
 ${cards.join('\n')}</main></body></html>`
   return { html, csv }

@@ -127,12 +127,12 @@ const ffmpegTag = pkg(join(nm, 'ffmpeg-static'))['ffmpeg-static']['binary-releas
 let doc = `LUMEN - THIRD-PARTY NOTICES
 ${rule('=')}
 
-Lumen includes software, AI models and data made by others. Each part keeps its
+Pics includes software, AI models and data made by others. Each part keeps its
 own license. This file lists them with the copyright notices and license texts
 that those licenses ask to be passed on.
 
-Where things are in the folder Lumen is installed in:
-  LICENSE.electron.txt, LICENSES.chromium.html   next to Lumen.exe
+Where things are in the folder Pics is installed in:
+  LICENSE.electron.txt, LICENSES.chromium.html   next to Pics.exe
   resources\\licenses\\                            this file and ffmpeg-source.txt
   resources\\app.asar.unpacked\\node_modules\\      ffmpeg, sharp/libvips, ONNX Runtime
   resources\\models\\                              the AI models and place names
@@ -140,11 +140,11 @@ Where things are in the folder Lumen is installed in:
 Contents
   1. Please note: restrictions and source code
   2. Electron, Chromium and Node.js
-  3. The Lumen window: React, Lucide icons, Leaflet, build tools
+  3. The Pics window: React, Lucide icons, Leaflet, build tools
   4. Photo and video engines: exifr, sharp/libvips, ONNX Runtime, DirectML, FFmpeg
   5. AI models and data: InsightFace, SigLIP, LaMa, GeoNames
   6. The map: OpenStreetMap
-  7. Windows features Lumen uses
+  7. Windows features Pics uses
   8. Supporting packages
   Appendix A. Apache License 2.0
   Appendix B. GNU General Public License, version 3
@@ -154,10 +154,10 @@ doc += chapter('1. PLEASE NOTE: RESTRICTIONS AND SOURCE CODE')
 doc += `
 * Face recognition (People) uses the InsightFace "buffalo_l" models. InsightFace
   makes these models available for NON-COMMERCIAL RESEARCH PURPOSES ONLY. Do not
-  use Lumen's face recognition commercially. It can be switched off in
+  use Pics' face recognition commercially. It can be switched off in
   Settings > People. See section 5.1.
 
-* FFmpeg (ffmpeg.exe) is a separate program that Lumen runs to save edited videos
+* FFmpeg (ffmpeg.exe) is a separate program that Pics runs to save edited videos
   and make memory movies. It is licensed under the GNU General Public License,
   version 3 (Appendix B). Where to get its complete source code is explained in
   ffmpeg-source.txt next to this file and in section 4.5.
@@ -170,14 +170,14 @@ doc += `
   (c) OpenStreetMap contributors, and are loaded over the internet only while a
   map is on screen. See sections 5.4 and 6.
 
-Lumen runs on your computer: your photos, faces, text and searches are analysed
+Pics runs on your computer: your photos, faces, text and searches are analysed
 there and are not uploaded. The only internet use is loading map images while a
-map is open, and the web pages you choose to open from Lumen.`
+map is open, and the web pages you choose to open from Pics.`
 
 doc += chapter('2. ELECTRON, CHROMIUM AND NODE.JS')
 doc += entry(
   `2.1 Electron ${v.electron}`,
-  ['Copyright (c) Electron contributors', 'Copyright (c) 2013-2020 GitHub Inc.', 'License: MIT', repoUrl(pkg(join(nm, 'electron'))), '(Also in LICENSE.electron.txt next to Lumen.exe.)'],
+  ['Copyright (c) Electron contributors', 'Copyright (c) 2013-2020 GitHub Inc.', 'License: MIT', repoUrl(pkg(join(nm, 'electron'))), '(Also in LICENSE.electron.txt next to Pics.exe.)'],
   read(nm, 'electron', 'LICENSE'),
 )
 doc += entry(
@@ -186,8 +186,8 @@ doc += entry(
     'Electron contains Chromium, the V8 JavaScript engine, Node.js and hundreds of',
     'other open-source projects (among them Chromium\'s own FFmpeg build under the',
     'LGPL, and the DirectX Shader Compiler). Their copyright notices and license',
-    'texts are in LICENSES.chromium.html, in the folder where Lumen is installed',
-    '(next to Lumen.exe). Open it in a web browser to read it.',
+    'texts are in LICENSES.chromium.html, in the folder where Pics is installed',
+    '(next to Pics.exe). Open it in a web browser to read it.',
   ],
 )
 doc += entry(
@@ -256,7 +256,7 @@ doc += entry(
     '',
     `LGPL libraries: ${lgplLibs.join(', ')}.`,
     'They are covered by the GNU LGPL version 3 (Appendix C, together with the GNU',
-    'GPL version 3 in Appendix B). Lumen uses them only through the DLL files above;',
+    'GPL version 3 in Appendix B). Pics uses them only through the DLL files above;',
     'you may replace those files with your own build of the same libvips version.',
     '',
     'Source code:',
@@ -310,7 +310,7 @@ doc += entry(
     '  and the build details in ffmpeg.exe.README next to ffmpeg.exe. More in',
     '  ffmpeg-source.txt next to this file.',
     'Location: resources\\app.asar.unpacked\\node_modules\\ffmpeg-static\\ffmpeg.exe',
-    'Lumen runs ffmpeg.exe as a separate program; it is not part of Lumen\'s code.',
+    'Pics runs ffmpeg.exe as a separate program; it is not part of Pics\'s code.',
     '',
     `The ffmpeg-static ${v.ffmpegStatic} package (the small script that finds ffmpeg.exe) is by`,
     'Eugene Ware, Jannis R and contributors, licensed under the GNU GPL version 3',
@@ -330,7 +330,7 @@ doc += entry(
     'LICENSE: NON-COMMERCIAL RESEARCH USE ONLY.',
     'The InsightFace code is MIT-licensed, but InsightFace makes its pretrained',
     'models, including buffalo_l, available for non-commercial research purposes',
-    'only. Lumen\'s face recognition is therefore only for personal, non-commercial',
+    'only. Pics\'s face recognition is therefore only for personal, non-commercial',
     'use. For any commercial use, switch face recognition off (Settings > People)',
     'or obtain a commercial license from InsightFace.',
   ],
@@ -360,7 +360,7 @@ doc += entry(
     '  (revision c3c0c9e468934d62e79c329e35d82dd09ff8c444, lama_fp32.onnx)',
     'License: Apache License 2.0 (Appendix A)',
     '',
-    'Changed by Lumen: the file was modified so that it runs with DirectML. Its',
+    'Changed by Pics: the file was modified so that it runs with DirectML. Its',
     'batched 5-D Fourier-transform matrix multiplications were rewritten as',
     'equivalent 4-D ones, its shape calculations were replaced by constants for',
     'the fixed 512 x 512 input, and the graph was simplified with ONNX Runtime\'s',
@@ -375,7 +375,7 @@ doc += entry(
     '  countryInfo from https://download.geonames.org/export/dump/)',
     'License: Creative Commons Attribution 4.0 International (CC BY 4.0)',
     '  https://creativecommons.org/licenses/by/4.0/',
-    'Changed by Lumen: reduced to populated places with their region and country',
+    'Changed by Pics: reduced to populated places with their region and country',
     'names. Parts of cities and historical, abandoned or destroyed places are left',
     'out, and city districts listed as towns of their own are merged into their',
     'city. GeoNames provides the data "as is", without warranty.',
@@ -398,8 +398,8 @@ doc += entry(
 
 doc += chapter('7. WINDOWS FEATURES LUMEN USES')
 doc += `
-These are parts of Windows that Lumen asks Windows to use. They are not included
-with Lumen and are covered by your Windows license.
+These are parts of Windows that Pics asks Windows to use. They are not included
+with Pics and are covered by your Windows license.
 
   Windows text recognition (Windows.Media.Ocr)   Text in photos
   Windows Hello                                  Unlocking Private
@@ -411,7 +411,7 @@ with Lumen and are covered by your Windows license.
 doc += chapter('8. SUPPORTING PACKAGES')
 doc += `
 These small packages come with the libraries above (mostly for their installers)
-and are copied into Lumen with them.
+and are copied into Pics with them.
 `
 // group packages whose license text is identical
 const groups = []

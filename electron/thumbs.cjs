@@ -28,7 +28,7 @@ const OWN_TEMP = `.${process.pid}-`
 let tempCount = 0
 /**
  * Writes a cached file whole or not at all: to a temp file of its own, then renamed into place, so
- * Lumen crashing mid-write can't leave half a preview behind. Not flushed to disk (unlike Lumen's
+ * Pics crashing mid-write can't leave half a preview behind. Not flushed to disk (unlike Pics'
  * own data): it's only a cache, and flushing each of ~30,000 files would slow the first run down;
  * what a power cut might leave is caught by looksWhole() and made again.
  */

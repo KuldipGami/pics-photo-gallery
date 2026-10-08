@@ -3,7 +3,7 @@ const { EventEmitter } = require('node:events')
 const { writeAtomic, writeAtomicSync, serial, readJson } = require('./safe-file.cjs')
 
 /**
- * Everything Lumen has done to files (history.json, newest first): moves, Recycle Bin, renames,
+ * Everything Pics has done to files (history.json, newest first): moves, Recycle Bin, renames,
  * date fixes, edits, conversions. Entries that can be undone keep what's needed to put files back.
  *
  * Entry: { id, time, kind, destination?, note?, files: [{ from, to?, size, restored?, oldMtime?, sidecar? }],
@@ -21,7 +21,7 @@ const keyOf = (p) => (process.platform === 'win32' ? String(p).toLowerCase() : S
  * Which side of an entry's file records names where the file is now (until it's undone):
  * an edit's or date fix's photo (`from`; an edit's `to` is its backup), a move's, rename's, copy's
  * or import's destination (`to`), and both for a conversion (the HEIC stays when kept in place).
- * A recycled file isn't anywhere Lumen could follow.
+ * A recycled file isn't anywhere Pics could follow.
  */
 const LIVE = {
   edited: ['from'],
@@ -131,7 +131,7 @@ class History extends EventEmitter {
   }
 
   /**
-   * Files Lumen moved or renamed since ([{ from, to, sidecar?: { from, to } }]): entries that still
+   * Files Pics moved or renamed since ([{ from, to, sidecar?: { from, to } }]): entries that still
    * point at a file's old path follow it, so undoing an older edit, date fix or move acts on the
    * file where it is now, not on whatever took its old place. Only the side of a record that names
    * where the file is now changes (LIVE), and records already undone are left alone. Returns how

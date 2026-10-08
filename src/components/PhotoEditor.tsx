@@ -421,7 +421,7 @@ export function PhotoEditor({ item, onClose, onSaved, onToast }: Props) {
   const eraserHint = !eraser
     ? ''
     : !eraser.available || !eraserApi.editErase
-      ? "The magic eraser isn't included in this copy of Lumen."
+      ? "The magic eraser isn't included in this copy of Pics."
       : eraser.error
         ? eraser.error
         : erasing

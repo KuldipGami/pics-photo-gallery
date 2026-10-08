@@ -15,9 +15,9 @@ export function TitleBar({ query, onQuery, placeholder, inputRef, version }: Pro
     <header className="titlebar">
       <div className="brand">
         <Logo size={22} />
-        <span>Lumen</span>
+        <span>Pics</span>
         {version && (
-          <span className="version-badge" title={`Lumen version ${version}`}>
+          <span className="version-badge" title={`Pics version ${version}`}>
             v{version}
           </span>
         )}

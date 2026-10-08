@@ -383,7 +383,7 @@ export function CleanupView(props: Props) {
         <EmptyState
           icon={<LoaderCircle size={40} className="spin" />}
           title="Looking for duplicates…"
-          text={props.waiting ? 'This starts as soon as every preview is ready.' : `${status}. You can keep using Lumen meanwhile.`}
+          text={props.waiting ? 'This starts as soon as every preview is ready.' : `${status}. You can keep using Pics meanwhile.`}
         />
       ) : (
         <EmptyState icon={<Check size={44} strokeWidth={1.5} />} title="No duplicates found" text="Every photo and video in your library is one of a kind." />

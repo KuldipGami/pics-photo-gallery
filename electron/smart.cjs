@@ -46,7 +46,7 @@ class SmartEngine {
     if (this.closed) return Promise.reject(new Error('The app is closing'))
     if (this.child) return this.ready
     const child = utilityProcess.fork(path.join(__dirname, 'smart-engine.cjs'), [], {
-      serviceName: 'Lumen smart search',
+      serviceName: 'Pics smart search',
       stdio: 'ignore',
     })
     this.child = child
@@ -392,7 +392,7 @@ class SmartIndex extends EventEmitter {
       if (res?.stage === 'run') this.engine.fail()
       if (this.engine.failures >= MAX_FAILURES && !this.halted) {
         this.halted = true
-        this.error = 'its engine keeps failing on this computer (it tries again when Lumen restarts)'
+        this.error = 'its engine keeps failing on this computer (it tries again when Pics restarts)'
         console.error(`[smart] indexing stopped for this session: ${this.error}`)
         this.emitProgress()
       }

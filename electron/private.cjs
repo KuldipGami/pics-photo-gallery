@@ -12,18 +12,20 @@ const { writeAtomic, writeAtomicSync, readJson } = require('./safe-file.cjs')
 /**
  * Private: photos and videos marked private disappear from every view and only show on the
  * Private page, which unlocks with Windows Hello (face, fingerprint or Windows PIN) or, where
- * Windows Hello isn't set up, a Lumen PIN. Unlocked until Lumen closes or is locked again.
+ * Windows Hello isn't set up, a Pics PIN. Unlocked until Pics closes or is locked again.
  *
- * Honest limits (said in the UI too): this hides files inside Lumen. They stay normal files in
- * File Explorer unless moved into the hidden private folder ("<library folder>\Lumen Private",
+ * Honest limits (said in the UI too): this hides files inside Pics. They stay normal files in
+ * File Explorer unless moved into the hidden private folder ("<library folder>\Pics Private",
  * hidden attribute), and even then anyone who shows hidden items in Explorer can open them.
  *
  * private.json (userData) stores no file names: each private file is a salted hash of its path.
- * The Lumen PIN is stored as a salted scrypt hash. Files inside a "Lumen Private" folder at the
+ * The Pics PIN is stored as a salted scrypt hash. Files inside a "Pics Private" folder at the
  * top of a library folder are always private.
  */
 
-const VAULT = 'Lumen Private'
+const VAULT = 'Pics Private'
+/** What the hidden folder was called before Pics was renamed (1.16): one that exists is still used. */
+const LEGACY_VAULT = 'Lumen Private'
 const PIN_MIN = 4
 const PIN_MAX = 32
 const SCRYPT = { N: 1 << 15, r: 8, p: 1, maxmem: 96 * 1024 * 1024 }
@@ -43,6 +45,9 @@ const trimSep = (p) => p.replace(/[\\/]+$/, '')
  * A library folder as a directory to join paths onto: no trailing separator, except a drive root
  * keeps its own ("D:\", not "D:", which Windows reads as "the current folder on drive D").
  */
+/** The hidden folder's name in a library folder: "Lumen Private" where that one exists, else "Pics Private". */
+const vaultName = (root) => (fs.existsSync(path.join(root, LEGACY_VAULT)) ? LEGACY_VAULT : VAULT)
+
 const rootDir = (r) => {
   const t = trimSep(r)
   if (!t) return r
@@ -53,7 +58,7 @@ class PrivateFolder extends EventEmitter {
   /**
    * @param {string} file private.json
    * @param {{ roots?: () => string[], dataDir?: string, hello?: HelloBridge, now?: () => number, count?: () => number }} [opts]
-   *   roots: the library folders (each gets its own hidden "Lumen Private" folder when used).
+   *   roots: the library folders (each gets its own hidden "Pics Private" folder when used).
    *   dataDir: where the Windows Hello helper script (private-agent.ps1) is written: pass userData
    *   (default: the folder of `file`).
    *   count: how many library items are private now (default: how many files are marked).
@@ -135,7 +140,7 @@ class PrivateFolder extends EventEmitter {
 
   /** "<library folder>\lumen private\" keys of every library folder. */
   vaultKeys() {
-    return this.roots().map((r) => keyOf(path.join(rootDir(r), VAULT)) + path.sep)
+    return this.roots().flatMap((r) => [VAULT, LEGACY_VAULT].map((name) => keyOf(path.join(rootDir(r), name)) + path.sep))
   }
 
   /** The library folder a path is in (the longest match), or null. A drive root comes back as "D:\". */
@@ -154,7 +159,7 @@ class PrivateFolder extends EventEmitter {
     return best
   }
 
-  /** Inside a "<library folder>\Lumen Private" folder. */
+  /** Inside a "<library folder>\Pics Private" folder. */
   inVault(p) {
     const key = keyOf(p)
     return this.vaultKeys().some((v) => key.startsWith(v))
@@ -211,7 +216,7 @@ class PrivateFolder extends EventEmitter {
     return n
   }
 
-  /** Files Lumen moved or renamed ([{ from, to }]): their private mark follows them. */
+  /** Files Pics moved or renamed ([{ from, to }]): their private mark follows them. */
   remap(pairs) {
     let n = 0
     for (const { from, to } of pairs) {
@@ -289,10 +294,10 @@ class PrivateFolder extends EventEmitter {
   }
 
   /**
-   * Shows the Windows Hello prompt (owned by `hwnd`, Lumen's window, so it opens in front of it).
+   * Shows the Windows Hello prompt (owned by `hwnd`, Pics' window, so it opens in front of it).
    * Resolves to { ok, reason? } where reason is a RESULT value or 'error'.
    */
-  async unlockWithHello(hwnd, message = 'Unlock Private in Lumen') {
+  async unlockWithHello(hwnd, message = 'Unlock Private in Pics') {
     try {
       const { result } = await this.hello.verify(hwnd, message)
       const reason = RESULT[result] ?? 'error'
@@ -340,7 +345,7 @@ class PrivateFolder extends EventEmitter {
     return { ok: false, error: `Wrong PIN. ${left} ${left === 1 ? 'try' : 'tries'} left before a short wait.` }
   }
 
-  /** Sets (or changes) the Lumen PIN. Allowed while unlocked, or for a first PIN when canSetup(). */
+  /** Sets (or changes) the Pics PIN. Allowed while unlocked, or for a first PIN when canSetup(). */
   async setPin(pin) {
     if (this.pin && !this.unlocked) return { ok: false, error: 'Unlock Private first.' }
     if (!this.pin && !this.unlocked && !this.canSetup()) return { ok: false, error: 'Unlock Private first.' }
@@ -356,7 +361,7 @@ class PrivateFolder extends EventEmitter {
     return { ok: true }
   }
 
-  /** Removes the Lumen PIN (only while unlocked and when Windows Hello can unlock instead). */
+  /** Removes the Pics PIN (only while unlocked and when Windows Hello can unlock instead). */
   removePin() {
     if (!this.unlocked || this.helloState !== 'available') return false
     this.pin = null
@@ -367,7 +372,7 @@ class PrivateFolder extends EventEmitter {
 
   /**
    * "Forgot PIN": forgets every private mark and the PIN, so everything shows in the library again
-   * (Lumen can't show private items without unlocking — this is the only way back in). Files in
+   * (Pics can't show private items without unlocking — this is the only way back in). Files in
    * the hidden folder must be moved out first (vaultItems + moveOutOfVault), or they stay private.
    */
   reset() {
@@ -382,26 +387,28 @@ class PrivateFolder extends EventEmitter {
 
   // ── the hidden private folder ─────────────────────────────────────────────
 
-  /** "<library folder>\Lumen Private" for a file, or null when the file isn't in a library folder. */
+  /** "<library folder>\Pics Private" for a file, or null when the file isn't in a library folder. */
   vaultDirFor(file) {
     const root = this.rootOf(file)
-    return root ? path.join(root, VAULT) : null
+    return root ? path.join(root, vaultName(root)) : null
   }
 
   /** Where a file goes in the hidden folder: its path relative to its library folder is kept. */
   vaultTarget(file) {
     const root = this.rootOf(file)
     if (!root) return null
-    return path.join(root, VAULT, path.relative(root, file))
+    return path.join(root, vaultName(root), path.relative(root, file))
   }
 
   /** Where a file in the hidden folder came from. */
   originOf(file) {
     const root = this.rootOf(file)
     if (!root) return null
-    const vault = path.join(root, VAULT)
-    if (!keyOf(file).startsWith(keyOf(vault) + path.sep)) return null
-    return path.join(root, path.relative(vault, file))
+    for (const name of [VAULT, LEGACY_VAULT]) {
+      const vault = path.join(root, name)
+      if (keyOf(file).startsWith(keyOf(vault) + path.sep)) return path.join(root, path.relative(vault, file))
+    }
+    return null
   }
 
   vaultItems(items) {
@@ -503,7 +510,7 @@ async function removeEmptyDirs(dir, stop) {
  * WinRT projection needed):
  *  - CheckAvailabilityAsync (IUserConsentVerifierStatics {AF4F3F91-564C-4DDC-B8B5-973447627C65})
  *  - RequestVerificationForWindowAsync(hwnd, message) (IUserConsentVerifierInterop
- *    {39E050C3-4E74-441A-8DC0-B81104DF949C}): the prompt is owned by Lumen's window, so it opens in
+ *    {39E050C3-4E74-441A-8DC0-B81104DF949C}): the prompt is owned by Pics' window, so it opens in
  *    front of it instead of behind. If that fails, RequestVerificationAsync(message) is used and the
  *    prompt window ("Credential Dialog Xaml Host") is pulled to the front for a few seconds.
  * Async operations are awaited by polling IAsyncInfo.Status (MTA thread, so nothing needs a message
@@ -745,7 +752,7 @@ class HelloBridge {
   }
 
   /**
-   * Shows the Windows Hello prompt. `hwnd`: Lumen's window handle (BigInt / number / decimal string,
+   * Shows the Windows Hello prompt. `hwnd`: Pics' window handle (BigInt / number / decimal string,
    * from win.getNativeWindowHandle().readBigUInt64LE(0)) so the prompt belongs to that window.
    * Resolves to { result: UserConsentVerificationResult (0 = verified … 6 = canceled), how: 'window' | 'plain' }.
    */
@@ -813,7 +820,7 @@ function registerIpc({ ipcMain, priv, getWindow, privateItems, send }) {
       const h = win.getNativeWindowHandle()
       hwnd = h.length >= 8 ? h.readBigUInt64LE(0) : BigInt(h.readUInt32LE(0))
     }
-    return priv.unlockWithHello(hwnd, 'Unlock Private in Lumen')
+    return priv.unlockWithHello(hwnd, 'Unlock Private in Pics')
   })
   ipcMain.handle('private:unlock-pin', (_e, pin) => (typeof pin === 'string' ? priv.unlockWithPin(pin.slice(0, 64)) : { ok: false, error: 'Enter your PIN.' }))
   ipcMain.handle('private:set-pin', (_e, pin) => (typeof pin === 'string' ? priv.setPin(pin) : { ok: false, error: 'Enter a PIN.' }))
@@ -822,4 +829,4 @@ function registerIpc({ ipcMain, priv, getWindow, privateItems, send }) {
   ipcMain.handle('private:items', () => (priv.unlocked ? privateItems() : []))
 }
 
-module.exports = { PrivateFolder, HelloBridge, VAULT, AVAILABILITY, RESULT, registerIpc, hideFolder }
+module.exports = { PrivateFolder, HelloBridge, VAULT, LEGACY_VAULT, AVAILABILITY, RESULT, registerIpc, hideFolder }

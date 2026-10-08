@@ -200,7 +200,7 @@ class Albums extends EventEmitter {
     this.changed()
   }
 
-  /** Files Lumen moved or renamed stay in their albums: old path → new path. */
+  /** Files Pics moved or renamed stay in their albums: old path → new path. */
   remapPaths(map) {
     let changed = false
     for (const album of this.albums) {

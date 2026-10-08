@@ -430,7 +430,7 @@ export default function App() {
   }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip, similar, byId, shownPrivate])
 
   // ---------- search ----------
-  // Every word is matched against what Lumen knows about an item (name, folder, date, camera,
+  // Every word is matched against what Pics knows about an item (name, folder, date, camera,
   // people, place). Known names, places and dates must match; other words left over are looked up
   // by what's in the photo (smart search): "goa beach 2023" = taken in Goa, in 2023, showing a beach.
   const knownWords = useMemo(() => {
@@ -670,7 +670,7 @@ export default function App() {
     const dest = settings.moveDestination ?? settings.defaultMoveDestination
     setConfirm({
       title: `Move ${formatCount(n)} file${n === 1 ? '' : 's'}?`,
-      message: `${formatBytes(bytes)} will be moved out of your photo folders into the folder below (it isn't shown in Lumen). You can undo this afterwards, even after closing Lumen.${clipsNote(selected, ids)}`,
+      message: `${formatBytes(bytes)} will be moved out of your photo folders into the folder below (it isn't shown in Pics). You can undo this afterwards, even after closing Pics.${clipsNote(selected, ids)}`,
       confirmLabel: 'Move files',
       warning: allCopiesWarning(ids),
       extra: (
@@ -882,7 +882,7 @@ export default function App() {
     else go()
   }
 
-  // Lumen moved or renamed files (Organize, HEIC convert, History): selections, the files the keep
+  // Pics moved or renamed files (Organize, HEIC convert, History): selections, the files the keep
   // rule has seen, the open viewer, Find similar, a map selection and open dialogs follow them.
   useEffect(
     () =>
@@ -1026,7 +1026,7 @@ export default function App() {
   )
   const viewerIndex = viewer ? Math.min(viewer.index, viewerItems.length - 1) : -1
   // What the open dialogs get: the same objects from render to render (the window re-renders up to
-  // every half second while Lumen works in the background), so nothing in them starts over.
+  // every half second while Pics works in the background), so nothing in them starts over.
   const itemsOf = (ids: string[] | undefined) => (ids ? ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it) : [])
   const exportItems = useMemo(() => itemsOf(exporting?.ids), [exporting, byId])
   const movieItems = useMemo(() => itemsOf(movie?.ids), [movie, byId])
@@ -1373,7 +1373,7 @@ export default function App() {
   }
 
   // Native context-menu actions that need the renderer.
-  // Opened for a folder ("Scan with Lumen", command line): show it once its files are in.
+  // Opened for a folder ("Scan with Pics", command line): show it once its files are in.
   const [openingFolder, setOpeningFolder] = useState<string | null>(null)
   const openFolder = useEvent((dir: string) => {
     navigate({ kind: 'folders' })
@@ -1437,7 +1437,7 @@ export default function App() {
   useEffect(() => api.onMovieProgress(setMovieProgress), [])
   const findSimilar = async (id: string) => {
     const res = await api.findSimilar(id)
-    if (res.ids.length <= 1) return toast('Nothing looks like this one yet. Lumen may still be preparing smart search.')
+    if (res.ids.length <= 1) return toast('Nothing looks like this one yet. Pics may still be preparing smart search.')
     setSimilar({ id, ...res })
     setQuery('')
     navigate({ kind: 'similar', id })
@@ -1588,7 +1588,7 @@ export default function App() {
   } else if (view.kind === 'organize') {
     subtitle = 'Fix dates, sort into dated folders, rename and convert · nothing changes without your confirmation'
   } else if (view.kind === 'history') {
-    subtitle = 'Every change Lumen has made to your files'
+    subtitle = 'Every change Pics has made to your files'
   } else if (view.kind === 'memories') {
     subtitle = trips.length ? `${formatCount(trips.length)} trip${trips.length === 1 ? '' : 's'} · worked out from where and when your photos were taken` : 'Trips and photos from this day in earlier years'
   } else if (view.kind === 'folders') {
@@ -1997,7 +1997,7 @@ export default function App() {
     body = (
       <EmptyState
         icon={<Logo size={72} />}
-        title="Welcome to Lumen"
+        title="Welcome to Pics"
         text="Add a folder with your photos and videos to get started. You can also drag a folder onto this window."
         action={addButton}
       />
@@ -2291,7 +2291,7 @@ export default function App() {
       <EmptyState
         icon={<AlbumIcon size={44} strokeWidth={1.5} />}
         title="This album is empty"
-        text="Select photos anywhere in Lumen and choose “Add to album” (or right-click → Add to album), or drag them onto this album in the sidebar."
+        text="Select photos anywhere in Pics and choose “Add to album” (or right-click → Add to album), or drag them onto this album in the sidebar."
         action={
           <button className="btn primary large" onClick={() => navigate({ kind: 'photos' })}>
             <Images size={17} /> Go to Photos
@@ -2446,9 +2446,9 @@ export default function App() {
         {view.kind === 'private' && privStatus?.unlocked && privateItems.length > 0 && (
           <PrivateBar
             count={privateItems.length}
-            visibleInExplorer={privateItems.filter((it) => !/[\\/]Lumen Private[\\/]/i.test(it.path)).length}
+            visibleInExplorer={privateItems.filter((it) => !/[\\/](Pics|Lumen) Private[\\/]/i.test(it.path)).length}
             onLock={() => api.privateLock()}
-            onHideInExplorer={() => hideInExplorer(privateItems.filter((it) => !/[\\/]Lumen Private[\\/]/i.test(it.path)).map((it) => it.id))}
+            onHideInExplorer={() => hideInExplorer(privateItems.filter((it) => !/[\\/](Pics|Lumen) Private[\\/]/i.test(it.path)).map((it) => it.id))}
             onPin={() => setPinDialog(true)}
             hasPin={privStatus.hasPin}
           />

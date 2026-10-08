@@ -123,7 +123,7 @@ export function HistoryView({
     <div className="folders-scroll">
       <div className="history-list">
         <div className="history-top">
-          <span>Every change Lumen has made to your files. Moved files can be put back where they came from.</span>
+          <span>Every change Pics has made to your files. Moved files can be put back where they came from.</span>
           <button className="btn ghost" onClick={onClear}>
             Clear history
           </button>

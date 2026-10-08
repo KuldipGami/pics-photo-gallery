@@ -28,9 +28,9 @@ function cleanEntry(e) {
 const plainEntry = ({ gen, tries, ...e }) => JSON.parse(JSON.stringify(e))
 
 /**
- * Star ratings and tags set in Lumen (tags.json), keyed by file path like favorites and albums.
+ * Star ratings and tags set in Pics (tags.json), keyed by file path like favorites and albums.
  * A library item carries what its file says (item.rating / item.tags, read during scans); a value
- * set here wins over the file's until the file changes on disk after Lumen wrote it. JPEGs also get
+ * set here wins over the file's until the file changes on disk after Pics wrote it. JPEGs also get
  * the values written inside them (xmp.cjs), one file at a time in the background; other formats
  * stay in this store, plus an XMP sidecar when that setting is on.
  *
@@ -77,7 +77,7 @@ class Tags extends EventEmitter {
     const data = res.data
     if (data === undefined) return // first run, or damaged (kept aside): start empty
     if (data?.version !== 1 || !Array.isArray(data.items)) {
-      this.loadError = new Error('tags.json is in a format this version of Lumen does not know')
+      this.loadError = new Error('tags.json is in a format this version of Pics does not know')
       console.error(this.loadError.message)
       return
     }
@@ -133,8 +133,8 @@ class Tags extends EventEmitter {
   }
 
   /**
-   * For the UI: { byItem: { [itemId]: { rating?, tags? } } } — only values set in Lumen.
-   * With `paths` (an array): the entries Lumen holds for those files, as plain JSON, so they can
+   * For the UI: { byItem: { [itemId]: { rating?, tags? } } } — only values set in Pics.
+   * With `paths` (an array): the entries Pics holds for those files, as plain JSON, so they can
    * be put back with restoreEntries() (e.g. when a Clean up move that forgot them is undone).
    */
   snapshot(paths) {
@@ -156,7 +156,7 @@ class Tags extends EventEmitter {
     return { byItem }
   }
 
-  /** What to show for a library item: Lumen's value when set, else the file's. */
+  /** What to show for a library item: Pics' value when set, else the file's. */
   valuesOf(item) {
     const e = this.entries.get(keyOf(item.path))
     return {
@@ -234,7 +234,7 @@ class Tags extends EventEmitter {
     return [...counts.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
   }
 
-  /** Files Lumen moved or renamed keep their rating and tags: Map(old key → new path). */
+  /** Files Pics moved or renamed keep their rating and tags: Map(old key → new path). */
   remapPaths(map) {
     let changed = false
     for (const [key, e] of [...this.entries]) {
@@ -250,7 +250,7 @@ class Tags extends EventEmitter {
     if (changed) this.changed()
   }
 
-  /** Files that left the library (recycled / moved away by Lumen). */
+  /** Files that left the library (recycled / moved away by Pics). */
   forget(itemIds) {
     const drop = new Set(itemIds)
     let changed = false
@@ -285,7 +285,7 @@ class Tags extends EventEmitter {
   }
 
   /**
-   * Writes Lumen's rating and tags into these files again (e.g. after History put an edited photo's
+   * Writes Pics' rating and tags into these files again (e.g. after History put an edited photo's
    * original back, which doesn't have them). Returns how many files were queued.
    */
   rewrite(paths) {
@@ -308,7 +308,7 @@ class Tags extends EventEmitter {
   }
 
   /**
-   * After a scan: a photo Lumen wrote whose file changed since (Explorer, Lightroom…) goes back
+   * After a scan: a photo Pics wrote whose file changed since (Explorer, Lightroom…) goes back
    * to the file's values; one whose library item now shows the same values needs no entry.
    */
   reconcile(items) {
@@ -330,7 +330,7 @@ class Tags extends EventEmitter {
     if (changed) this.changed()
   }
 
-  /** Drops entries whose files no longer exist (deleted outside Lumen). */
+  /** Drops entries whose files no longer exist (deleted outside Pics). */
   async prune(items) {
     const known = new Set(items.map((it) => keyOf(it.path)))
     let changed = false
@@ -363,7 +363,7 @@ class Tags extends EventEmitter {
   }
 
   /**
-   * Runs `fn` while no file is being written (e.g. Lumen moving, rotating or re-dating photos),
+   * Runs `fn` while no file is being written (e.g. Pics moving, rotating or re-dating photos),
    * then carries on. Held jobs run one at a time, in the order asked, each after the tag write in
    * progress (so two quick rotations never read the same old bytes). A hold asked for from inside a
    * running one runs straight away, as part of it. Resolves to fn's result.
@@ -432,7 +432,7 @@ class Tags extends EventEmitter {
     if (!e?.dirty) return
     const embed = this.writeFiles && xmp.canEmbed(e.path)
     if (!embed && !this.sidecars) {
-      e.dirty = 0 // kept in Lumen only
+      e.dirty = 0 // kept in Pics only
       this.saveSoon()
       return
     }
@@ -457,7 +457,7 @@ class Tags extends EventEmitter {
       setTimeout(() => this.queueWrite(key), 4000 * e.tries) // open in another program: try again shortly
       return
     }
-    // Gone (moved or deleted outside Lumen): nothing to report. Otherwise Lumen keeps the value.
+    // Gone (moved or deleted outside Pics): nothing to report. Otherwise Pics keeps the value.
     e.dirty = 0
     if (!/ENOENT|no such file/i.test(res.error ?? '')) this.emit('write-error', { id: idOf(e.path), path: e.path, name: path.basename(e.path), message: res.error })
     this.saveSoon()

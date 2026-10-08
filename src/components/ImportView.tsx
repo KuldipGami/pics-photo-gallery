@@ -184,7 +184,7 @@ export interface ImportViewProps {
   options: ImportOptions
   /** The destination shown when options.destination is null (the first library folder). */
   defaultDestination: string
-  /** The destination isn't inside a library folder (Lumen would add it). */
+  /** The destination isn't inside a library folder (Pics would add it). */
   destinationOutside?: boolean
   /** Where HEIC originals go for 'aside'. */
   originalsDir?: string
@@ -314,7 +314,7 @@ function Sources(props: ImportViewProps) {
         </span>
         <div className="imp-intro-text">
           <h2>Import photos and videos</h2>
-          <p>Connect a phone or camera, or insert a memory card. Lumen copies only what isn't in your library yet, into folders by date.</p>
+          <p>Connect a phone or camera, or insert a memory card. Pics copies only what isn't in your library yet, into folders by date.</p>
         </div>
         <button className="btn ghost" onClick={props.onRefresh} disabled={looking} title="Look for phones and cards again">
           {looking ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />} {looking ? 'Looking…' : 'Refresh'}
@@ -519,8 +519,8 @@ function Results(props: ImportViewProps & { scan: ImportScan }) {
                 counts.imported > 0
                   ? `${plural(counts.imported, 'file')} came from ${source.name} before and ${counts.imported === 1 ? "isn't" : "aren't"} in your library now (probably deleted).`
                   : source.remembered > 0
-                    ? `Lumen remembers ${plural(source.remembered, 'file')} from ${source.name}, so photos you delete don't come back.`
-                    : "Lumen remembers what it imports from each device, so photos you delete don't come back next time."
+                    ? `Pics remembers ${plural(source.remembered, 'file')} from ${source.name}, so photos you delete don't come back.`
+                    : "Pics remembers what it imports from each device, so photos you delete don't come back next time."
               }
               extra={
                 source.remembered > 0 ? (

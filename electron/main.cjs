@@ -10,6 +10,13 @@ const fs = require('node:fs')
 const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, nativeImage, Menu, clipboard, session, powerMonitor, screen } = require('electron')
 
 if (process.env.LUMEN_USER_DATA) app.setPath('userData', path.resolve(process.env.LUMEN_USER_DATA))
+else {
+  // Pics was called Lumen before 1.16. Its data folder (people's names, ratings, albums, History,
+  // previews…) stays where it is and is used as it is: moving it isn't worth any risk to it.
+  const has = (dir) => fs.existsSync(path.join(dir, 'settings.json'))
+  const lumen = path.join(app.getPath('appData'), 'Lumen')
+  if (!has(app.getPath('userData')) && has(lumen)) app.setPath('userData', lumen)
+}
 
 // LUMEN_TRACE=<file>: append startup/shutdown milestones with timestamps (for diagnosing).
 const trace = process.env.LUMEN_TRACE
@@ -53,7 +60,7 @@ const { registerScheme, handleProtocol } = require('./protocol.cjs')
 
 registerScheme()
 
-// "Scan with Lumen" (folder right-click), --folder <dir>, --autoscan, --tray (started with Windows)
+// "Scan with Pics" (folder right-click), --folder <dir>, --autoscan, --tray (started with Windows)
 const launchArgs = bgx.parseArgs(process.argv)
 
 // ---------- single instance (with hand-over to newer versions) ----------
@@ -98,7 +105,7 @@ function readInstanceFile() {
 const HANDOVER_LIMIT_MS = 100_000
 
 /**
- * Only one Lumen runs at a time. Launching a *newer* version while an older one (1.2+) is open
+ * Only one Pics runs at a time. Launching a *newer* version while an older one (1.2+) is open
  * makes the old one quit and hand over, so the newest build is always the one you see. An old
  * copy that can't quit (1.6.0 could get stuck in the background after its window closed) is
  * ended after 5 seconds, unless it said it is finishing a file job (instance.json
@@ -222,21 +229,21 @@ let eraser
 let history
 /** User-set places for files that can't store one (HEIC, PNG, videos). */
 let userLocations
-/** Ratings & tags set in Lumen (written into JPEGs in the background). */
+/** Ratings & tags set in Pics (written into JPEGs in the background). */
 let tags
 /** Import from phones, cameras, cards and folders. */
 let importer
 /** Text in photos (Windows' own OCR). */
 let ocr
-/** Private: items hidden from every view until unlocked (Windows Hello or a Lumen PIN). */
+/** Private: items hidden from every view until unlocked (Windows Hello or a Pics PIN). */
 let priv
 /** @type {WatchAlerts} */
 let alerts
 /** @type {import('./background.cjs').Background} */
 let background
-/** "Scan with Lumen" is in the folder right-click menu (read from Windows at startup). */
+/** "Scan with Pics" is in the folder right-click menu (read from Windows at startup). */
 let contextMenuOn = false
-// Folder events that came in while Lumen was moving files itself (replayed afterwards).
+// Folder events that came in while Pics was moving files itself (replayed afterwards).
 const heldFileEvents = []
 /** The analyses (faces, search, text, duplicates) haven't followed the library's latest change yet. */
 let indexesStale = false
@@ -319,7 +326,7 @@ function startServices() {
       dupes.saveSoon()
     }
   })
-  tags.on('write-error', ({ name, message }) => send('tags:error', `Couldn't save the rating or tags inside ${name}: ${message} Lumen keeps them anyway.`))
+  tags.on('write-error', ({ name, message }) => send('tags:error', `Couldn't save the rating or tags inside ${name}: ${message} Pics keeps them anyway.`))
   places = new Places(path.join(MODELS_DIR, 'places.json.gz'))
   eraser = new Eraser({
     modelsDir: MODELS_DIR,
@@ -480,7 +487,7 @@ const notify = (title, body, onClick) => {
   if (process.env.LUMEN_NO_NOTIFY !== '1') background?.notify(title, body, onClick)
 }
 
-/** Files Lumen itself just wrote, moved or put back: they are not new duplicates. */
+/** Files Pics itself just wrote, moved or put back: they are not new duplicates. */
 const ownFiles = (files) => alerts?.ignore(files.filter(Boolean))
 
 function showWindow() {
@@ -494,7 +501,7 @@ function showWindow() {
   win.focus()
 }
 
-/** Lumen was asked to open a folder: add it to the library unless it's already in it, then show it. */
+/** Pics was asked to open a folder: add it to the library unless it's already in it, then show it. */
 async function openFolder(dir) {
   try {
     if (!fs.statSync(dir).isDirectory()) return
@@ -602,7 +609,7 @@ const strictlyInsideLibrary = (dir) => {
   return folders.some((f) => isWithin(dir, f) && folderKey(dir) !== folderKey(f)) && !folders.some((f) => isWithin(f, dir))
 }
 
-/** A native message box in front of Lumen's window (or on its own when there's none). */
+/** A native message box in front of Pics' window (or on its own when there's none). */
 const messageBox = (options) =>
   (win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options)).catch(() => null)
 
@@ -634,7 +641,7 @@ function moveDestinationProblem(dest) {
 
 /** Explains (in a message box) why a folder was refused for removed duplicates. */
 const refuseMoveDestination = (problem) =>
-  messageBox({ type: 'warning', title: 'Lumen', message: "That folder can't hold removed duplicates", detail: `${problem}\n\nThe folder they go to isn't shown in Lumen, so this one would hide your photos.`, buttons: ['OK'] })
+  messageBox({ type: 'warning', title: 'Pics', message: "That folder can't hold removed duplicates", detail: `${problem}\n\nThe folder they go to isn't shown in Pics, so this one would hide your photos.`, buttons: ['OK'] })
 
 /** Folders never scanned: removed duplicates, HEIC originals kept aside after converting. */
 function excludedFolders() {
@@ -643,7 +650,7 @@ function excludedFolders() {
     moveDestination(),
     ...(first ? [path.join(first, 'HEIC originals')] : []),
     // exports land in Pictures (a library folder by default): they'd all show up as duplicates
-    path.join(app.getPath('pictures'), 'Lumen exports'),
+    path.join(app.getPath('pictures'), 'Pics exports'),
     // Only a folder inside a library folder is left out (one outside isn't scanned anyway). Leaving
     // out a library folder itself, one holding a library folder or a whole drive ("D:\") would hide
     // the library from scans, and the scan would then drop everything known about it.
@@ -658,7 +665,7 @@ function configureDupes() {
   })
 }
 
-// While Lumen itself moves or renames files, scans wait: a scan halfway through would drop the
+// While Pics itself moves or renames files, scans wait: a scan halfway through would drop the
 // moved files' faces, fingerprints and previews before relocate() can carry them over.
 let scanHolds = 0
 let scanWanted = false
@@ -698,14 +705,14 @@ async function withScansHeld(task) {
       // (not while quitting: everything moved was carried over by relocate() and saved)
       if (!quitting) {
         scan()
-        // new files that arrived meanwhile still get checked (Lumen's own are ignored by now)
+        // new files that arrived meanwhile still get checked (Pics' own are ignored by now)
         for (const [file, event] of heldFileEvents.splice(0)) alerts?.queue(file, event)
       }
     }
   }
 }
 
-// ---------- file jobs (finished and recorded before Lumen quits) ----------
+// ---------- file jobs (finished and recorded before Pics quits) ----------
 
 /**
  * Jobs that move, rename, convert, remove or put back files (Organize, Clean up, Import, History,
@@ -729,7 +736,7 @@ function fileJob(task) {
   })()
   return job.done
 }
-const CLOSING = 'Lumen is closing.'
+const CLOSING = 'Pics is closing.'
 
 function watchFolders() {
   library.watch(store.get('folders'), scan)
@@ -765,7 +772,7 @@ function createWindow() {
     minWidth: 820,
     minHeight: 560,
     show: false,
-    title: 'Lumen',
+    title: 'Pics',
     icon: ICON,
     backgroundColor: MICA ? '#00000000' : nativeTheme.shouldUseDarkColors ? '#1b1c20' : '#eceef2',
     ...(MICA ? { backgroundMaterial: 'mica' } : {}),
@@ -1201,7 +1208,7 @@ async function refreshEdited(paths) {
 }
 
 /**
- * Files Lumen moved or renamed inside the library: an item's id is a hash of its path, so carry
+ * Files Pics moved or renamed inside the library: an item's id is a hash of its path, so carry
  * everything known about it (library entry, preview, fingerprint, faces, search vector, favorite,
  * albums, History) over to the new path instead of analysing it again. `pairs`: [{ from, to, sidecar? }].
  * `history: false` for pairs that aren't moves (a HEIC handing over to the JPG made from it): History
@@ -1531,7 +1538,7 @@ const exports_ = exporter.registerIpc({
 
 // ---------- import (phones, cameras, cards, folders) ----------
 
-// Only sources Lumen listed (or the user picked) can be scanned: the UI never passes a path.
+// Only sources Pics listed (or the user picked) can be scanned: the UI never passes a path.
 const importSources = new Map()
 let importAbort = null
 const importHashOf = (it) => {
@@ -1568,7 +1575,7 @@ ipcMain.handle('import:pick-folder', async () => {
  * still stops the one that's running.
  */
 function refuseIfImporting() {
-  if (importAbort || importer.busy) throw new Error(`Lumen is still ${importer.busy || 'busy with an import'}.`)
+  if (importAbort || importer.busy) throw new Error(`Pics is still ${importer.busy || 'busy with an import'}.`)
   if (quitting) throw new Error(CLOSING)
 }
 
@@ -1836,7 +1843,7 @@ async function removeItems(ids, how, dest) {
     let kept = null
     const res = await tags.hold(async () => {
       // what forgetItems() drops, so undoing the move can put it back (taken before the move: a scan
-      // finishing meanwhile could drop the moved files' Lumen-only ratings and tags)
+      // finishing meanwhile could drop the moved files' Pics-only ratings and tags)
       if (how === 'move') kept = rememberForUndo(items)
       return how === 'move' ? cleanup.moveTo(items, destination, { signal }) : cleanup.recycle(items, { signal })
     })
@@ -1858,7 +1865,7 @@ async function removeItems(ids, how, dest) {
 }
 
 /**
- * Favorites, album memberships and Lumen-only ratings/tags of items about to leave the library
+ * Favorites, album memberships and Pics-only ratings/tags of items about to leave the library
  * (forgetItems drops them): { favorites: [path], albums: [{ id, paths, cover? }], tags: [[path, entries]] }.
  */
 function rememberForUndo(items) {
@@ -2023,7 +2030,7 @@ ipcMain.handle('report:save', async (_e, html, csv) => {
   const stamp = new Date().toISOString().slice(0, 10)
   const res = await dialog.showSaveDialog(win, {
     title: 'Export a report',
-    defaultPath: path.join(app.getPath('documents'), `Lumen report ${stamp}.html`),
+    defaultPath: path.join(app.getPath('documents'), `Pics report ${stamp}.html`),
     filters: [
       { name: 'Web page report', extensions: ['html'] },
       { name: 'Spreadsheet', extensions: ['csv'] },
@@ -2127,7 +2134,7 @@ ipcMain.handle('items:menu', (event, id, ids) => {
                   label: 'Copy image',
                   click: () =>
                     copyImage(item).then((ok) => {
-                      if (!ok) messageBox({ type: 'warning', title: 'Lumen', message: "Couldn't copy this image", detail: `${item.name} couldn't be read as a picture. The clipboard wasn't changed.`, buttons: ['OK'] })
+                      if (!ok) messageBox({ type: 'warning', title: 'Pics', message: "Couldn't copy this image", detail: `${item.name} couldn't be read as a picture. The clipboard wasn't changed.`, buttons: ['OK'] })
                     }),
                 },
               ]
@@ -2145,7 +2152,7 @@ ipcMain.on('items:drag', (event, ids) => {
   if (!items.length) return
   const cached = thumbs.cachedPath(items[0])
   let icon = cached ? nativeImage.createFromPath(cached) : nativeImage.createFromPath(ICON)
-  // (a WebP thumbnail reads as empty here: Windows needs an icon to show, so Lumen's own goes instead)
+  // (a WebP thumbnail reads as empty here: Windows needs an icon to show, so Pics' own goes instead)
   if (icon.isEmpty()) icon = nativeImage.createFromPath(ICON)
   if (!icon.isEmpty()) icon = icon.resize({ width: 96 })
   event.sender.startDrag({ file: items[0].path, files: items.map((it) => it.path), icon })
@@ -2182,14 +2189,14 @@ nativeTheme.on('updated', () => {
 app.on('second-instance', (_event, argv, cwd, data) => {
   trace(`second launch (v${data?.version}) · window ${win ? 'open' : 'none'}`)
   if (data?.version && isNewer(data.version, VERSION)) {
-    // A newer Lumen was just launched: close so it can take over.
+    // A newer Pics was just launched: close so it can take over.
     app.quit()
     return
   }
   const args = bgx.parseArgs(argv, { cwd })
   if (args.tray && !args.folder) return // started with Windows again: already running
   if (quitting) {
-    // Lumen was opened again while this copy finishes quitting (a file job, the last saves): it
+    // Pics was opened again while this copy finishes quitting (a file job, the last saves): it
     // can't take this launch any more, so a new copy starts the moment this one has exited.
     if (!relaunchAsked) {
       relaunchAsked = true
@@ -2209,7 +2216,7 @@ app.on('second-instance', (_event, argv, cwd, data) => {
   }
 })
 
-/** instance.json: which Lumen runs (for a newer one launching), plus `extra` (e.g. finishingUntil). */
+/** instance.json: which Pics runs (for a newer one launching), plus `extra` (e.g. finishingUntil). */
 function writeInstanceFile(extra = {}) {
   try {
     fs.writeFileSync(INSTANCE_FILE, JSON.stringify({ version: VERSION, pid: process.pid, ...extra }))
@@ -2221,7 +2228,7 @@ app.whenReady().then(async () => {
   writeInstanceFile()
   if (process.platform === 'win32') app.setAppUserModelId('app.lumen.gallery')
   session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ['https://tile.openstreetmap.org/*'] }, (details, done) => {
-    done({ requestHeaders: { ...details.requestHeaders, 'User-Agent': `Lumen/${VERSION} (Windows photo gallery)` } })
+    done({ requestHeaders: { ...details.requestHeaders, 'User-Agent': `Pics/${VERSION} (Windows photo gallery)` } })
   })
   Menu.setApplicationMenu(null)
   startServices()
@@ -2243,10 +2250,17 @@ app.whenReady().then(async () => {
   bgx.isContextMenuEnabled().then(
     (on) => {
       contextMenuOn = on
-      if (on && app.isPackaged) bgx.refreshContextMenu().catch(() => {}) // follow an updated install
+      // follow an updated install (and "Scan with Lumen" becomes "Scan with Pics")
+      if (on && app.isPackaged) bgx.refreshContextMenu().catch(() => {})
     },
     () => {},
   )
+  // "Start with Windows" naming the old program file (Lumen.exe before the rename): point it here
+  if (app.isPackaged) {
+    try {
+      if (bgx.refreshStartWithWindows()) trace('start with Windows: now starts this copy')
+    } catch {}
+  }
   // A photo rewrite (rating, tags, rotation, date, location) cut short last time, by a crash or a
   // forced exit, can leave the photo only as "name.jpg.lumen.old": put it back before anything
   // reads the library folders.
@@ -2258,15 +2272,15 @@ app.whenReady().then(async () => {
       trace(`photo rewrites recovered: ${swaps.restored} put back, ${swaps.cleaned} tidied, ${keptCopies.length} kept as copies`)
     }
     if (keptCopies.length) {
-      // Lumen's own files (not new duplicates); said once, since they now show in the library
+      // Pics' own files (not new duplicates); said once, since they now show in the library
       ownFiles(keptCopies)
       for (const p of keptCopies) trace(`kept as a copy: ${p}`)
       const shown = keptCopies.slice(0, 8).join('\n') + (keptCopies.length > 8 ? `\n…and ${keptCopies.length - 8} more` : '')
       messageBox({
         type: 'info',
-        title: 'Lumen',
+        title: 'Pics',
         message: `${keptCopies.length === 1 ? 'A photo' : `${keptCopies.length} photos`} from an unfinished change ${keptCopies.length === 1 ? 'was' : 'were'} kept as ${keptCopies.length === 1 ? 'a copy' : 'copies'}`,
-        detail: `Last time Lumen closed while changing a photo, and the earlier version wasn't the same picture, so it was kept next to the photo instead of being deleted:\n\n${shown}\n\nCheck ${keptCopies.length === 1 ? 'it' : 'them'} and delete what you don't need.`,
+        detail: `Last time Pics closed while changing a photo, and the earlier version wasn't the same picture, so it was kept next to the photo instead of being deleted:\n\n${shown}\n\nCheck ${keptCopies.length === 1 ? 'it' : 'them'} and delete what you don't need.`,
         buttons: ['OK'],
       })
     }
@@ -2346,7 +2360,7 @@ const settleWithin = (promise, ms) =>
  * Every wait has a limit, so this always ends.
  */
 async function finishBeforeQuit() {
-  // a newer Lumen that is taking over waits for this instead of ending it after 5 s
+  // a newer Pics that is taking over waits for this instead of ending it after 5 s
   writeInstanceFile({ finishingUntil: Date.now() + QUIT_LIMIT_MS })
   // jobs that only make new files just stop (their temp files go at the end)
   videoJob?.abort()

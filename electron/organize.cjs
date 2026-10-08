@@ -551,7 +551,7 @@ async function convertHeicToJpeg(item, source, { quality = DEFAULTS.jpegQuality,
   const real = await heicSize(item.path)
   const jpgLong = Math.max(made?.width || 0, made?.height || 0)
   let keptOriginal = null
-  if (!real) keptOriginal = `${item.name}: converted, but the HEIC was kept where it is (Lumen couldn't check that the JPG has its full size)`
+  if (!real) keptOriginal = `${item.name}: converted, but the HEIC was kept where it is (Pics couldn't check that the JPG has its full size)`
   else if (jpgLong + 1 < Math.max(real.width, real.height))
     keptOriginal = `${item.name}: the JPG is smaller (${made.width} × ${made.height}) than the HEIC (${real.width} × ${real.height}), so the HEIC was kept where it is`
   if (keptOriginal) return { file, moved: null, moveError: null, keptOriginal }

@@ -11,14 +11,14 @@ interface Credit {
   url: string
   /** A second link, e.g. FFmpeg's source code. */
   extra?: { label: string; url: string }
-  /** Restricts how Lumen may be used. */
+  /** Restricts how Pics may be used. */
   warn?: boolean
 }
 
 // Keep in step with resources/licenses/THIRD-PARTY-NOTICES.txt (full texts and versions are there).
 const SOFTWARE: Credit[] = [
   { name: 'Electron', what: 'App framework, with Chromium and Node.js', license: 'MIT', url: 'https://www.electronjs.org' },
-  { name: 'React', what: 'The Lumen window', license: 'MIT', url: 'https://react.dev' },
+  { name: 'React', what: 'The Pics window', license: 'MIT', url: 'https://react.dev' },
   { name: 'Lucide', what: 'Icons', license: 'ISC', url: 'https://lucide.dev' },
   { name: 'Leaflet', what: 'The map, with Leaflet.markercluster (MIT)', license: 'BSD-2-Clause', url: 'https://leafletjs.com' },
   { name: 'exifr', what: 'Reads dates, places and camera details', license: 'MIT', url: 'https://github.com/MikeKovarik/exifr' },
@@ -83,14 +83,14 @@ interface Props {
   onShowNotices(): void
 }
 
-/** Settings › About & licenses: what Lumen is made with, under which licenses. */
+/** Settings › About & licenses: what Pics is made with, under which licenses. */
 export function AboutCard({ version, onOpenUrl, onShowNotices }: Props) {
   return (
     <section className="card about-card">
       <div className="card-head">
         <div>
           <h2>About & licenses</h2>
-          <p>Lumen {version}</p>
+          <p>Pics {version}</p>
         </div>
         <div className="card-actions">
           <button className="btn ghost" onClick={onShowNotices}>
@@ -99,7 +99,7 @@ export function AboutCard({ version, onOpenUrl, onShowNotices }: Props) {
         </div>
       </div>
       <p className="about-local">
-        Everything runs on this computer: your photos, faces and searches are never uploaded. Only the map uses the internet — while a map is open, Lumen loads
+        Everything runs on this computer: your photos, faces and searches are never uploaded. Only the map uses the internet — while a map is open, Pics loads
         map images from OpenStreetMap.
       </p>
       <div className="about-warning">
@@ -112,7 +112,7 @@ export function AboutCard({ version, onOpenUrl, onShowNotices }: Props) {
       <CreditList items={MODELS} onOpenUrl={onOpenUrl} />
       <p className="hint">
         Text in photos, Windows Hello and the HEIF and HEVC extensions are parts of Windows. The notices for Chromium, which Electron includes, are in
-        LICENSES.chromium.html in the folder Lumen is installed in.
+        LICENSES.chromium.html in the folder Pics is installed in.
       </p>
     </section>
   )
@@ -169,7 +169,7 @@ export function NoticesDialog({ onClose }: { onClose(): void }) {
         <pre ref={pre} className="notices-text" tabIndex={0}>
           {failed ? "The notices couldn't be loaded." : (texts?.[doc] ?? 'Loading…')}
         </pre>
-        <p className="notices-foot">These files are also in the folder Lumen is installed in, under resources\licenses.</p>
+        <p className="notices-foot">These files are also in the folder Pics is installed in, under resources\licenses.</p>
         <div className="modal-actions">
           <button className="btn primary" onClick={onClose}>
             Close

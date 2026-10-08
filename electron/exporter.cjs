@@ -134,11 +134,11 @@ function defaultLabel(label) {
 
 /**
  * Where an export goes unless the user picks somewhere else:
- * <Pictures>\Lumen exports\<label> (a new folder: " (2)" when that one already has files) and
- * <Pictures>\Lumen exports\<label>.zip (" (2)" when taken).
+ * <Pictures>\Pics exports\<label> (a new folder: " (2)" when that one already has files) and
+ * <Pictures>\Pics exports\<label>.zip (" (2)" when taken).
  */
 function defaultDestinations(picturesDir, label) {
-  const root = path.join(picturesDir, 'Lumen exports')
+  const root = path.join(picturesDir, 'Pics exports')
   const name = defaultLabel(label)
   let folder = path.join(root, name)
   for (let n = 2; nonEmptyDir(folder); n++) folder = path.join(root, `${name} (${n})`)
@@ -1361,7 +1361,7 @@ function unreadable(err) {
 
 function friendlyError(err) {
   if (err?.code === 'ENOSPC') return 'There is not enough free space on the drive.'
-  if (err?.code === 'EACCES' || err?.code === 'EPERM') return "Lumen isn't allowed to write there. Choose another folder."
+  if (err?.code === 'EACCES' || err?.code === 'EPERM') return "Pics isn't allowed to write there. Choose another folder."
   if (err?.code === 'EROFS') return "That drive can't be written to."
   return String(err?.message ?? err)
 }
@@ -1392,7 +1392,7 @@ function registerIpc({ ipcMain, dialog, shell, app, store, getWindow, itemsFor, 
 
   ipcMain.handle('export:pick', async (_e, kind, current) => {
     const win = getWindow()
-    const start = typeof current === 'string' && path.isAbsolute(current) ? current : path.join(app.getPath('pictures'), 'Lumen exports')
+    const start = typeof current === 'string' && path.isAbsolute(current) ? current : path.join(app.getPath('pictures'), 'Pics exports')
     if (kind === 'zip') {
       const res = await dialog.showSaveDialog(win, { title: 'Save the export as a .zip file', defaultPath: start, filters: [{ name: 'Zip file', extensions: ['zip'] }] })
       return res.canceled || !res.filePath ? null : res.filePath

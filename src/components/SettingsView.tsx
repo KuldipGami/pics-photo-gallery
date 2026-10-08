@@ -100,7 +100,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
           <div className="card-head">
             <div>
               <h2>Library folders</h2>
-              <p>Lumen shows every photo and video inside these folders, including subfolders.</p>
+              <p>Pics shows every photo and video inside these folders, including subfolders.</p>
             </div>
             <div className="card-actions">
               <button className="btn ghost" onClick={() => api.rescan()}>
@@ -430,7 +430,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
             <div>
               <div>Save ratings and tags inside photos</div>
               <div className="setting-hint">
-                JPEG photos get them inside the file (without re-saving the picture), so File Explorer, Lightroom and other apps see them too. Other files keep them in Lumen.
+                JPEG photos get them inside the file (without re-saving the picture), so File Explorer, Lightroom and other apps see them too. Other files keep them in Pics.
               </div>
             </div>
             <Toggle on={settings.tagsInFiles} onChange={() => api.setSettings({ tagsInFiles: !settings.tagsInFiles })} />
@@ -541,7 +541,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
           <div className={`setting-row${settings.watchFolders ? '' : ' disabled'}`}>
             <div>
               <div>Keep watching in the notification area when closed</div>
-              <div className="setting-hint">Closing the window hides Lumen next to the clock instead of exiting.</div>
+              <div className="setting-hint">Closing the window hides Pics next to the clock instead of exiting.</div>
             </div>
             <Toggle
               on={settings.minimizeToTray}
@@ -584,7 +584,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
             <h2>Windows integration</h2>
             <div className="setting-row">
               <div>
-                <div>“Scan with Lumen” in the folder right-click menu</div>
+                <div>“Scan with Pics” in the folder right-click menu</div>
                 <div className="setting-hint">On Windows 11 it appears under “Show more options”.</div>
               </div>
               <Toggle
@@ -596,7 +596,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
                     !res.ok
                       ? `Couldn't change the right-click menu: ${res.error ?? ''}`
                       : on
-                        ? 'Added “Scan with Lumen” to the folder right-click menu.'
+                        ? 'Added “Scan with Pics” to the folder right-click menu.'
                         : 'Removed the right-click menu entry.',
                   )
                 }}
@@ -641,7 +641,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
           </div>
           {gpu && gpu.highPerformanceRequested !== settings.highPerformanceGpu && (
             <div className="restart-note">
-              <span>Restart Lumen to switch graphics.</span>
+              <span>Restart Pics to switch graphics.</span>
               <button className="btn primary" onClick={() => api.relaunch()}>
                 <RotateCcw size={15} /> Restart now
               </button>

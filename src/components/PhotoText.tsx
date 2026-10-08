@@ -4,7 +4,7 @@ import { fold } from '../lib/search'
 import './photo-text.css'
 
 interface Props {
-  /** The text Lumen read in the photo (lines separated by \n), or null: nothing is shown. */
+  /** The text Pics read in the photo (lines separated by \n), or null: nothing is shown. */
   text: string | null
   /** The current search, to highlight its words in the text. */
   query?: string

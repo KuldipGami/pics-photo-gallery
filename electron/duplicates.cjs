@@ -302,7 +302,7 @@ class Duplicates extends EventEmitter {
   }
 
   /**
-   * Files Lumen moved or renamed (`ids`: Map old id → new id): their cached facts follow them, and
+   * Files Pics moved or renamed (`ids`: Map old id → new id): their cached facts follow them, and
    * so do "not duplicates" choices (a dismissed group is known by its members' ids).
    */
   remapIds(ids) {

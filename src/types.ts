@@ -1,7 +1,7 @@
 export type MediaType = 'image' | 'video'
 
 export interface MediaMeta {
-  /** The place was set in Lumen (the file can't hold one). */
+  /** The place was set in Pics (the file can't hold one). */
   userLocation?: true
   make?: string
   model?: string
@@ -15,7 +15,7 @@ export interface MediaMeta {
 }
 
 export interface MediaItem {
-  /** Stars saved in the file (0 = none); Lumen's own values come in TagsData. */
+  /** Stars saved in the file (0 = none); Pics' own values come in TagsData. */
   rating?: number
   /** Keywords saved in the file. */
   tags?: string[]

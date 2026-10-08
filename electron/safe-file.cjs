@@ -3,7 +3,7 @@ const fsp = require('node:fs/promises')
 const path = require('node:path')
 
 /**
- * Saving Lumen's own data (faces.json, library.json, tags.json…) so a crash, a full disk or a
+ * Saving Pics' own data (faces.json, library.json, tags.json…) so a crash, a full disk or a
  * scanner briefly holding the file never leaves it half written:
  * - every write goes to a temp file of its own (two saves never share one), is flushed to disk,
  *   then renamed over the real file, retrying while antivirus or the search indexer holds it;

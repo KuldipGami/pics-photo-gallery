@@ -1,15 +1,15 @@
 FFMPEG IN LUMEN - SOURCE CODE
 ================================================================================
 
-Lumen includes ffmpeg.exe, a separate program made by the FFmpeg project. Lumen
+Pics includes ffmpeg.exe, a separate program made by the FFmpeg project. Pics
 runs it to save edited videos and to make memory movies; it is not part of
-Lumen's own code. FFmpeg is free software under the GNU General Public License,
+Pics' own code. FFmpeg is free software under the GNU General Public License,
 version 3 (GPLv3): you may use, study, change and share it under that license.
 It comes WITHOUT ANY WARRANTY.
 
 The program
   File       resources\app.asar.unpacked\node_modules\ffmpeg-static\ffmpeg.exe
-             (in the folder where Lumen is installed)
+             (in the folder where Pics is installed)
   Version    FFmpeg 6.0, build "6.0-essentials_build-www.gyan.dev": a 64-bit
              static Windows build by Gyan Doshi, https://www.gyan.dev/ffmpeg/builds/
   Delivered  by the ffmpeg-static 5.2.0 npm package, binary release b6.0:
@@ -61,7 +61,7 @@ Where to get the source code
 Using your own FFmpeg
   You may replace ffmpeg.exe with your own build. Or leave it in place and set
   the environment variable LUMEN_FFMPEG to the full path of another ffmpeg.exe;
-  Lumen then uses that one.
+  Pics then uses that one.
 
 The ffmpeg-static package
   The small script that finds ffmpeg.exe (index.js in the same folder) comes

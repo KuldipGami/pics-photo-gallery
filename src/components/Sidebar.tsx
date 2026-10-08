@@ -126,7 +126,7 @@ export function Sidebar(props: Props) {
 
       <div className="nav-section">{item('settings', 'Settings', <Settings size={18} />)}</div>
       {props.watchStatus && (
-        <div className="nav-watch" title="Lumen tells you when a new photo or video is a copy of one you already have">
+        <div className="nav-watch" title="Pics tells you when a new photo or video is a copy of one you already have">
           <span className="dot on" />
           <span>{props.watchStatus}</span>
         </div>

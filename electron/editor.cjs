@@ -323,7 +323,7 @@ class Editor {
     const file = await freeName(item.dir, path.basename(item.name, path.extname(item.name)), ext)
     // The pixels were rebuilt, so write the facts that matter explicitly: capture date (the copy sits
     // next to the original in the timeline), camera and place.
-    const ifd0 = { Software: 'Lumen' }
+    const ifd0 = { Software: 'Pics' }
     if (item.meta?.make) ifd0.Make = item.meta.make
     if (item.meta?.model) ifd0.Model = item.meta.model
     const exif = { IFD0: ifd0, IFD2: { DateTimeOriginal: exifDate(item.date) } }

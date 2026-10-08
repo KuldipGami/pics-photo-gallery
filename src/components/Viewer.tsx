@@ -49,7 +49,7 @@ interface Props {
   /** An edited copy was saved (it appears in the library a moment later). */
   onEdited(original: MediaItem, id: string, name: string): void
   onLocate?(item: MediaItem): void
-  /** Rating & tags (Lumen's own, else the file's). */
+  /** Rating & tags (Pics' own, else the file's). */
   marksOf?(item: MediaItem): { rating: number; tags: string[] }
   tagSuggestions?: TagCount[]
   onRate?(item: MediaItem, rating: number): void

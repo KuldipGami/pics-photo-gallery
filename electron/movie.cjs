@@ -1034,7 +1034,7 @@ async function makeMovie(options, { onProgress, signal } = {}) {
       throw new FfmpegError("The movie's sound couldn't be mixed", err?.detail || String(err?.message || err))
     })
     const part = `${output}.part`
-    const meta = ['-metadata', `creation_time=${new Date(opt.date).toISOString()}`, '-metadata', 'comment=Made with Lumen']
+    const meta = ['-metadata', `creation_time=${new Date(opt.date).toISOString()}`, '-metadata', 'comment=Made with Pics']
     if (opt.title) meta.push('-metadata', `title=${[opt.title, opt.subtitle].filter(Boolean).join(' · ')}`)
     let file = output
     trackTemp(part)

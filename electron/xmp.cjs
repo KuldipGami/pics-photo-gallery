@@ -422,7 +422,7 @@ const NEW_PACKET = `<?xpacket begin="﻿" id="${PACKET_ID}"?>
 </x:xmpmeta>
 `
 const PACKET_END = '<?xpacket end="w"?>'
-const NEW_SIDECAR = `<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Lumen">
+const NEW_SIDECAR = `<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Pics">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""/>
  </rdf:RDF>
@@ -966,7 +966,7 @@ async function writeJpeg(file, { rating, tags } = {}) {
     if (out.error) return { error: out.error }
     if (!out.changed) return { ok: true, changed: false, size: st.size, mtime: Math.round(st.mtimeMs) }
     await replaceFile(file, out.data)
-    // A new rating shouldn't make an old photo look new (and Lumen's caches key on this date).
+    // A new rating shouldn't make an old photo look new (and Pics' caches key on this date).
     await withRetry(() => fsp.utimes(file, st.atimeMs / 1000, st.mtimeMs / 1000)).catch(() => {})
     const after = await fsp.stat(file)
     return { ok: true, changed: true, size: after.size, mtime: Math.round(after.mtimeMs) }

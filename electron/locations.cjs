@@ -122,7 +122,7 @@ class Locations extends EventEmitter {
     return this.map.size
   }
 
-  /** The location Lumen keeps for this file, or null. */
+  /** The location Pics keeps for this file, or null. */
   get(file) {
     const e = this.map.get(keyOf(file))
     return e ? { lat: e.lat, lon: e.lon } : null
@@ -168,7 +168,7 @@ class Locations extends EventEmitter {
     return result
   }
 
-  /** Files Lumen moved or renamed ([{ from, to }]): their locations go with them. */
+  /** Files Pics moved or renamed ([{ from, to }]): their locations go with them. */
   remap(pairs) {
     let n = 0
     for (const { from, to } of pairs ?? []) {
@@ -184,8 +184,8 @@ class Locations extends EventEmitter {
 
   /**
    * Undo (History) for the records assign() made. Call after edits.restoreBackups(entry.files):
-   * Lumen-only records ({ from, prev }) get their previous location back (or none); a JPEG that
-   * was restored from its backup gets back the Lumen-only location it had before (`prevStored`).
+   * Pics-only records ({ from, prev }) get their previous location back (or none); a JPEG that
+   * was restored from its backup gets back the Pics-only location it had before (`prevStored`).
    * Marks records `restored`; returns how many locations changed.
    */
   revert(files) {
@@ -217,16 +217,16 @@ const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`
 
 /**
  * Gives items a location. JPEGs get it written into the file (lossless, backed up, undoable from
- * History); other files — and JPEGs that can't take it without re-saving — get a Lumen-only
+ * History); other files — and JPEGs that can't take it without re-saving — get a Pics-only
  * location in `store`. `targets`: [{ item, lat, lon }]. With `writeFiles: false` nothing on disk
- * changes (every location is kept by Lumen).
+ * changes (every location is kept by Pics).
  *
  * Resolves {
  *   files:   records for one History entry (kind 'edited'): JPEG backups { from, to, size, oldMtime,
- *            location, prevStored } and Lumen-only records { from, location, prev },
+ *            location, prevStored } and Pics-only records { from, location, prev },
  *   written: [{ id, path, size, lat, lon }]  JPEGs changed on disk (update the library entry),
- *   stored:  [id]                             items now located by Lumen only,
- *   kept:    [{ name, reason }]               JPEGs that couldn't be changed (kept by Lumen instead),
+ *   stored:  [id]                             items now located by Pics only,
+ *   kept:    [{ name, reason }]               JPEGs that couldn't be changed (kept by Pics instead),
  *   errors:  [string]
  * }
  */
@@ -247,7 +247,7 @@ async function assignLocations(targets, { store, backupsDir, writeFiles = true, 
     if (writeFiles && isJpeg(item.ext || item.path)) {
       const res = await setLocation(item, location, backupsDir)
       if (!res.error) {
-        // the file holds it now: a location Lumen kept for it before would hide the new one
+        // the file holds it now: a location Pics kept for it before would hide the new one
         const prevStored = store.remove(item.path, { silent: true })
         files.push({ ...res.file, location, prevStored })
         written.push({ id: item.id, path: item.path, size: res.size, ...location })

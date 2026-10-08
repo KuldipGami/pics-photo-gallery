@@ -1,4 +1,4 @@
-// Downloads the models and data Lumen bundles into ./models. Run with: npm run models
+// Downloads the models and data Pics bundles into ./models. Run with: npm run models
 //
 //  - InsightFace "buffalo_l" (People: face detection + recognition)
 //    https://github.com/deepinsight/insightface, release v0.7. NON-COMMERCIAL use only.

@@ -8,7 +8,7 @@ import './tags.css'
 
 // ── data helpers (pure; usable anywhere in the renderer) ─────────────────────
 
-/** What the main process sends (tags:changed / app:state): values set in Lumen, by item id. */
+/** What the main process sends (tags:changed / app:state): values set in Pics, by item id. */
 export interface TagsData {
   byItem: Record<string, { rating?: number; tags?: string[] }>
 }
@@ -30,7 +30,7 @@ export interface RatingFilterValue {
 export const NO_FILTER: RatingFilterValue = { minRating: 0, tags: [] }
 const EMPTY: string[] = []
 
-/** The rating and tags to show: Lumen's value when set, else the file's. */
+/** The rating and tags to show: Pics' value when set, else the file's. */
 export function marksOf(item: Markable, data?: TagsData | null): { rating: number; tags: string[] } {
   const own = data?.byItem[item.id]
   return { rating: own?.rating ?? item.rating ?? 0, tags: own?.tags ?? item.tags ?? EMPTY }
