@@ -1,0 +1,618 @@
+/* Import view (ImportView.tsx): sources, what's new, options, progress, result. */
+
+.imp-scroll {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  container-type: inline-size;
+}
+.imp {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 980px;
+  padding: 8px 28px 40px;
+}
+.imp .btn:disabled {
+  opacity: 0.5;
+  filter: none;
+  cursor: default;
+}
+.imp h2 {
+  margin: 0;
+}
+.imp-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* ---------- sources ---------- */
+
+.imp-intro {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0 16px;
+}
+.imp-hero,
+.imp-source-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.imp-intro-text h2 {
+  margin-bottom: 3px;
+  font-size: 15.5px;
+}
+.imp-intro-text p {
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.imp-source-icon.drive {
+  background: color-mix(in srgb, #34c759 16%, transparent);
+  color: #2ea44f;
+}
+.imp-source-icon.folder {
+  background: color-mix(in srgb, #f3b744 20%, transparent);
+  color: #c4870f;
+}
+.imp-source-icon.small {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+}
+
+.imp-sources {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 12px;
+}
+.imp-source {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 14px;
+  min-height: 78px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
+}
+.imp-source:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.imp-source.folder {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+}
+.imp-source.folder:hover {
+  background: var(--hover);
+}
+.imp-source-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.imp-source-name,
+.imp-source-detail,
+.imp-source-memory {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.imp-source-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+.imp-source-detail {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.imp-source-memory {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: normal;
+}
+.imp-source-go {
+  grid-column: 2;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.imp-hints {
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: var(--hover);
+  font-size: 13px;
+  color: var(--text-2);
+}
+.imp-hints h3 {
+  margin: 0 0 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.imp-hints ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.6;
+}
+.imp-hints b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.imp-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.imp-banner svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.imp-banner.warn {
+  background: color-mix(in srgb, #f3b744 16%, transparent);
+  color: var(--text);
+}
+.imp-banner.warn svg {
+  color: #c4870f;
+}
+
+/* ---------- looking / importing ---------- */
+
+.imp-busy {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0 16px;
+}
+.imp-busy-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.imp-busy-body h2 {
+  font-size: 15.5px;
+}
+.card .imp-busy-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.imp-busy-name {
+  overflow: hidden;
+  font-weight: 400;
+  color: var(--text-2);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.imp-bar {
+  position: relative;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--active);
+}
+.imp-bar span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+.imp-bar.indeterminate span {
+  width: 30%;
+  animation: imp-slide 1.3s ease-in-out infinite;
+}
+@keyframes imp-slide {
+  from {
+    left: -30%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+/* ---------- results ---------- */
+
+.imp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.imp-head-text {
+  flex: 1;
+  min-width: 0;
+}
+.imp-head-text h2 {
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.imp-head-text p {
+  margin: 1px 0 0;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.imp-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.imp-stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 120px;
+  padding: 10px 16px 11px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-2);
+}
+.imp-stat-value {
+  font: 600 21px/1.2 var(--font-display);
+}
+.imp-stat-label {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.imp-stat-sub {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.imp-stat.accent {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+}
+.imp-stat.accent .imp-stat-value {
+  color: var(--accent);
+}
+.imp-stat.amber .imp-stat-value {
+  color: #c4870f;
+}
+
+.imp-form {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px 14px;
+}
+.imp-label {
+  align-self: start;
+  padding-top: 6px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.imp-root {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 6px 10px 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--hover);
+  color: var(--accent);
+}
+.imp-root-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+.imp-root .link {
+  flex-shrink: 0;
+  font-size: 12.5px;
+}
+.card .imp-warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: -4px;
+  font-size: 12.5px;
+  color: #c4870f;
+}
+.imp-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+.imp-select {
+  width: 240px;
+  max-width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: 13px var(--font);
+}
+.imp-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+.imp-switches {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 4px;
+}
+.imp-switch {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+.imp-switch .switch {
+  margin-top: 1px;
+}
+.imp-switch.disabled .imp-switch-label {
+  color: var(--text-3);
+}
+.imp-switch-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.imp-switch-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+.imp-switch-label .link {
+  font-size: 12.5px;
+}
+.imp-switch-hint {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.imp-seg {
+  align-self: flex-start;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.imp-go {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.imp-go-text {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.imp-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.imp-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.imp-tabs button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.imp-tabs button.active {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.imp-tab-n {
+  font-size: 11.5px;
+  opacity: 0.8;
+}
+
+.imp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 6px;
+}
+.imp-tile {
+  position: relative;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--surface-3);
+}
+.imp-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  animation: fade-in 0.2s;
+}
+.imp-tile.plain {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-3);
+}
+.imp-tile-name {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.imp-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+}
+.imp-badge.text {
+  right: auto;
+  left: 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.imp-tile.plain .imp-badge.text {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.imp-empty,
+.imp-more {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+/* ---------- done ---------- */
+
+.imp-done {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 0 16px;
+}
+.imp-done-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: color-mix(in srgb, #34c759 16%, transparent);
+  color: #2ea44f;
+}
+.imp-done-icon.warn {
+  background: color-mix(in srgb, #f3b744 20%, transparent);
+  color: #c4870f;
+}
+.imp-done-body h2 {
+  margin: 4px 0 8px;
+  font-size: 17px;
+}
+.imp-done-body > p {
+  font-size: 13px;
+  line-height: 1.55;
+}
+.imp-problems {
+  margin-top: 10px;
+  font-size: 12.5px;
+}
+.imp-problems ul {
+  max-height: 220px;
+  margin: 8px 0 0;
+  padding: 8px 12px 8px 28px;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: var(--hover);
+  color: var(--text-2);
+  line-height: 1.5;
+  user-select: text;
+}
+.imp-problems li.error {
+  color: var(--text);
+}
+.imp-done-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* ---------- narrow view (the content area, not the window) ---------- */
+
+@container (max-width: 640px) {
+  .imp {
+    padding: 8px 16px 32px;
+  }
+  .imp-intro,
+  .imp-busy {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+  .imp-intro > .btn,
+  .imp-busy > .btn {
+    grid-column: 2;
+    justify-self: start;
+    margin-top: 12px;
+  }
+  .imp-form {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+  .imp-form > span:empty {
+    display: none;
+  }
+  .imp-label {
+    padding-top: 8px;
+  }
+  .imp-go .btn {
+    width: 100%;
+  }
+  .imp-grid {
+    grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  }
+}

@@ -1,4 +1,4 @@
-import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, LoaderCircle, Map as MapIcon, MapPin, Plus, RefreshCw, Settings, Film, FolderTree, Sparkles, Users } from 'lucide-react'
+import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, Import, LoaderCircle, Map as MapIcon, MapPin, Plus, RefreshCw, Settings, Film, FolderTree, Sparkles, Users } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
@@ -68,6 +68,7 @@ export function Sidebar(props: Props) {
         </div>
         <div className="nav-heading">Library</div>
         <div className="nav-section">
+          {item('import', 'Import', <Import size={18} />)}
           {item('folders', 'Folders', <Folder size={18} />, counts.folders)}
           {item('cleanup', 'Clean up', <CopyX size={18} />, props.duplicateBytes > 0 ? formatBytes(props.duplicateBytes) : undefined)}
           {item('organize', 'Organize', <FolderTree size={18} />)}

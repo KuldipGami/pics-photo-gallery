@@ -22,7 +22,7 @@ const trace = process.env.LUMEN_TRACE
 trace(`start v${app.getVersion()}`)
 
 const { Store } = require('./store.cjs')
-const { Library, idOf, keyOf, extOf, FILE_TYPES } = require('./library.cjs')
+const { Library, idOf, keyOf, extOf, FILE_TYPES, skippedExtensions } = require('./library.cjs')
 const { Thumbnails } = require('./thumbs.cjs')
 const { FaceIndex } = require('./faces.cjs')
 const { Albums } = require('./albums.cjs')
@@ -39,6 +39,7 @@ const organize = require('./organize.cjs')
 const { Locations, assignLocations, historyNote } = require('./locations.cjs')
 const locSuggest = require('./location-suggest.cjs')
 const { Tags } = require('./tags.cjs')
+const { Importer } = require('./importer.cjs')
 const bgx = require('./background.cjs')
 const { WatchAlerts } = require('./watch-alerts.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
@@ -142,6 +143,12 @@ const store = new Store(path.join(userData, 'settings.json'), {
   carryDates: true,
   tagsInFiles: true,
   xmpSidecars: false,
+  // Import
+  importDestination: null,
+  importFolderPattern: organize.DEFAULTS.folderPattern,
+  importSkipKnown: true,
+  importConvertHeic: false,
+  importHeicOriginals: 'aside',
   blurThreshold: 30,
   largeFileMB: 10,
   // Organize (from DupeLens)
@@ -194,6 +201,8 @@ let history
 let userLocations
 /** Ratings & tags set in Lumen (written into JPEGs in the background). */
 let tags
+/** Import from phones, cameras, cards and folders. */
+let importer
 /** @type {WatchAlerts} */
 let alerts
 /** @type {import('./background.cjs').Background} */
@@ -240,6 +249,7 @@ function startServices() {
   history.on('changed', () => send('history:changed', history.list()))
   albums = new Albums(path.join(userData, 'albums.json'))
   userLocations = new Locations(path.join(userData, 'locations.json'))
+  importer = new Importer({ file: path.join(userData, 'imports.json') })
   tags = new Tags(path.join(userData, 'tags.json'), { writeFiles: store.get('tagsInFiles') !== false, sidecars: !!store.get('xmpSidecars') })
   tags.on('changed', (snapshot) => send('tags:changed', snapshot))
   tags.on('writing', (file) => ownFiles([file]))
@@ -417,6 +427,11 @@ const settingsPayload = () => ({
   carryDates: store.get('carryDates') !== false,
   tagsInFiles: store.get('tagsInFiles') !== false,
   xmpSidecars: !!store.get('xmpSidecars'),
+  importDestination: store.get('importDestination'),
+  importFolderPattern: store.get('importFolderPattern'),
+  importSkipKnown: store.get('importSkipKnown') !== false,
+  importConvertHeic: !!store.get('importConvertHeic'),
+  importHeicOriginals: store.get('importHeicOriginals') || 'aside',
   blurThreshold: store.get('blurThreshold'),
   largeFileMB: store.get('largeFileMB'),
   organizeRoot: store.get('organizeRoot'),
@@ -1059,6 +1074,103 @@ ipcMain.handle('edit:date', async (_e, id, ms) => {
 // ---------- duplicates & search ----------
 
 ipcMain.handle('dupes:dismiss', (_e, ids) => dupes.dismiss(idList(ids)))
+// ---------- import (phones, cameras, cards, folders) ----------
+
+// Only sources Lumen listed (or the user picked) can be scanned: the UI never passes a path.
+const importSources = new Map()
+let importAbort = null
+const importHashOf = (it) => {
+  const r = dupes.records.get(it.id)
+  return r && r.m === it.mtime && r.z === it.size ? r.x : undefined
+}
+const importOptions = (deleteAfter) => ({
+  destination: store.get('importDestination') || store.get('folders')[0] || app.getPath('pictures'),
+  folderPattern: store.get('importFolderPattern'),
+  skipImported: store.get('importSkipKnown') !== false,
+  convertHeic: !!store.get('importConvertHeic'),
+  heicOriginals: store.get('importHeicOriginals') || 'aside',
+  deleteAfter: !!deleteAfter,
+})
+
+ipcMain.handle('import:sources', async () => {
+  try {
+    const sources = await importer.listSources({ exclude: store.get('folders') })
+    for (const s of sources) importSources.set(s.id, s)
+    return { sources, error: null }
+  } catch (err) {
+    return { sources: [], error: String(err?.message ?? err) }
+  }
+})
+ipcMain.handle('import:pick-folder', async () => {
+  const res = await dialog.showOpenDialog(win, { title: 'Import from a folder', properties: ['openDirectory'] })
+  if (res.canceled || !res.filePaths[0]) return null
+  const source = importer.folderSource(res.filePaths[0])
+  importSources.set(source.id, source)
+  return source
+})
+ipcMain.handle('import:scan', async (_e, sourceId) => {
+  const source = importSources.get(sourceId)
+  if (!source) throw new Error('That device or folder is no longer available.')
+  importAbort = new AbortController()
+  try {
+    return await importer.scan(source, {
+      items: library.list,
+      hashOf: importHashOf,
+      skipExtensions: skippedExtensions(store.get('skippedTypes')),
+      minBytes: store.get('minFileKB') * 1024,
+      signal: importAbort.signal,
+      onProgress: (p) => send('import:scan-progress', p),
+    })
+  } finally {
+    importAbort = null
+    send('import:scan-progress', null)
+  }
+})
+ipcMain.handle('import:plan', (_e, scanId, deleteAfter) => importer.plan(scanId, importOptions(deleteAfter)))
+ipcMain.handle('import:cancel', () => importAbort?.abort())
+ipcMain.handle('import:forget', (_e, sourceId) => (typeof sourceId === 'string' ? importer.forget(sourceId) : 0))
+ipcMain.handle('import:pick-destination', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Where should imported photos go?',
+    defaultPath: importOptions().destination,
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  if (res.canceled || !res.filePaths[0]) return null
+  store.set({ importDestination: res.filePaths[0] })
+  send('settings:changed', settingsPayload())
+  return res.filePaths[0]
+})
+ipcMain.handle('import:run', async (_e, scanId, deleteAfter) => {
+  importAbort = new AbortController()
+  const signal = importAbort.signal
+  try {
+    const res = await withScansHeld(() =>
+      importer.run(scanId, {
+        ...importOptions(deleteAfter),
+        items: library.list,
+        hashOf: importHashOf,
+        quality: store.get('jpegQuality'),
+        originalsDir: originalsDir(),
+        heicSource: (it) => thumbs.source(it),
+        trash: (p) => shell.trashItem(p),
+        signal,
+        onProgress: (p) => send('import:progress', p),
+        // new files from an import aren't "new duplicates" (held folder events replay after it)
+        onFile: (p) => alerts?.ignore([p], 10 * 60_000),
+      }),
+    )
+    const entry = res.entry ? history.add(res.entry) : null
+    const dest = res.destination
+    const inLibrary = store.get('folders').some((f) => keyOf(dest) === keyOf(f) || keyOf(dest).startsWith(keyOf(f) + path.sep))
+    if (res.imported && dest && !inLibrary) await addFolders([dest])
+    const { files, entry: _entry, ...rest } = res
+    return { ...rest, entryId: entry?.id ?? null }
+  } finally {
+    importAbort = null
+    send('import:progress', null)
+  }
+})
+
 // ---------- ratings & tags ----------
 
 ipcMain.handle('tags:rate', (_e, ids, rating) => tags.setRating(itemsFor(idList(ids)), Number(rating)))
@@ -1141,6 +1253,11 @@ ipcMain.handle('settings:set', (_e, patch) => {
   if (typeof patch.moveOriginals === 'boolean') allowed.moveOriginals = patch.moveOriginals
   if (Number.isFinite(patch.jpegQuality)) allowed.jpegQuality = Math.min(100, Math.max(70, Math.round(patch.jpegQuality)))
   if (patch.organizeRoot === null) allowed.organizeRoot = null
+  if (organize.FOLDER_PATTERNS.some((p) => p.value === patch.importFolderPattern)) allowed.importFolderPattern = patch.importFolderPattern
+  if (typeof patch.importSkipKnown === 'boolean') allowed.importSkipKnown = patch.importSkipKnown
+  if (typeof patch.importConvertHeic === 'boolean') allowed.importConvertHeic = patch.importConvertHeic
+  if (['aside', 'next', 'none'].includes(patch.importHeicOriginals)) allowed.importHeicOriginals = patch.importHeicOriginals
+  if (patch.importDestination === null) allowed.importDestination = null
   if (typeof patch.tagsInFiles === 'boolean') allowed.tagsInFiles = patch.tagsInFiles
   if (typeof patch.xmpSidecars === 'boolean') allowed.xmpSidecars = patch.xmpSidecars
   if (typeof patch.watchFolders === 'boolean') allowed.watchFolders = patch.watchFolders
@@ -1261,6 +1378,8 @@ ipcMain.handle('history:restore', async (_e, id) => {
     const done = await edits.restoreBackups(entry.files)
     restored = done.length + userLocations.revert(entry.files)
     if (done.length) await refreshEdited(done.map((f) => f.from))
+  } else if (entry.kind === 'imported') {
+    restored = await importer.undo(entry, (p) => shell.trashItem(p))
   } else if (['moved', 'renamed', 'converted', 'dates'].includes(entry.kind)) {
     await withScansHeld(async () => {
       if (entry.kind === 'moved' || entry.kind === 'renamed') {
@@ -1451,7 +1570,7 @@ app.whenReady().then(async () => {
   })
   Menu.setApplicationMenu(null)
   startServices()
-  handleProtocol({ library, thumbs })
+  handleProtocol({ library, thumbs, importItem: (id) => importer.thumbItem(id) })
   // Started with Windows to keep watching: stay in the notification area until opened.
   const startHidden = launchArgs.tray && !launchArgs.folder && !!store.get('watchFolders')
   // Otherwise show the window right away; the saved library, faces, albums… load meanwhile (~0.5 s).
@@ -1502,6 +1621,7 @@ app.on('before-quit', () => {
   smart?.dispose()
   dupes?.dispose()
   tags?.saveNow()
+  importer?.dispose()
   alerts?.dispose()
   background?.dispose()
   albums?.saveNow()

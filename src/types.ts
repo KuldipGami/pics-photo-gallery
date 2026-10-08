@@ -65,6 +65,12 @@ export interface Settings {
   /** Ratings & tags: written into JPEG files (XMP) and, optionally, .xmp sidecars for other files. */
   tagsInFiles: boolean
   xmpSidecars: boolean
+  /** Import: null = the first library folder. */
+  importDestination: string | null
+  importFolderPattern: string
+  importSkipKnown: boolean
+  importConvertHeic: boolean
+  importHeicOriginals: 'aside' | 'next' | 'none'
   /** Organize: where dated folders go (null = the first library folder). */
   organizeRoot: string | null
   folderPattern: string
@@ -193,8 +199,10 @@ export interface HistoryFile {
 export interface HistoryEntry {
   id: string
   time: number
-  kind: 'moved' | 'recycled' | 'copied' | 'renamed' | 'dates' | 'edited' | 'converted'
+  kind: 'moved' | 'recycled' | 'copied' | 'renamed' | 'dates' | 'edited' | 'converted' | 'imported'
   destination?: string
+  /** Imported: where from. */
+  source?: { id: string; name: string; kind: string }
   note?: string
   files: HistoryFile[]
   dateChanges?: { path: string; oldMtime: number; restored?: boolean }[]
@@ -348,6 +356,7 @@ export type View =
   | { kind: 'album'; id: string }
   | { kind: 'similar'; id: string }
   | { kind: 'map' }
+  | { kind: 'import' }
   | { kind: 'map-items'; ids: string[]; label: string }
   | { kind: 'memories' }
   | { kind: 'trip'; id: string }

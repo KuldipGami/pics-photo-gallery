@@ -1,4 +1,4 @@
-import { CalendarClock, Copy, FileImage, FolderInput, FolderOpen, History as HistoryIcon, PenLine, RefreshCw, RotateCcw, Trash, Wand2 } from 'lucide-react'
+import { CalendarClock, Copy, FileImage, FolderInput, FolderOpen, History as HistoryIcon, Import, PenLine, RefreshCw, RotateCcw, Trash, Wand2 } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { api } from '../api'
 import { baseName, formatBytes, formatCount } from '../lib/format'
@@ -16,6 +16,7 @@ const ICON: Record<HistoryEntry['kind'], ReactNode> = {
   dates: <CalendarClock size={18} />,
   edited: <Wand2 size={18} />,
   converted: <FileImage size={18} />,
+  imported: <Import size={18} />,
 }
 
 export function historyTitle(e: HistoryEntry) {
@@ -35,11 +36,13 @@ export function historyTitle(e: HistoryEntry) {
       return `Edited ${plural(n, 'photo')}`
     case 'converted':
       return `Converted ${plural(n, 'HEIC photo')} to JPG`
+    case 'imported':
+      return `Imported ${plural(new Set(e.files.map((f) => f.from)).size, 'file')}${e.source?.name ? ` from ${e.source.name}` : ''}`
   }
 }
 
 const canRestore = (e: HistoryEntry) =>
-  ['moved', 'renamed', 'dates', 'edited', 'converted'].includes(e.kind) &&
+  ['moved', 'renamed', 'dates', 'edited', 'converted', 'imported'].includes(e.kind) &&
   (e.files.some((f) => !f.restored) || (e.dateChanges ?? []).some((d) => !d.restored))
 
 function detail(e: HistoryEntry) {
@@ -51,6 +54,7 @@ function detail(e: HistoryEntry) {
     case 'dates':
       return 'File dates set from the dates in their names'
     case 'edited':
+    case 'imported':
       return e.note ?? ''
     case 'converted':
       return e.destination ? `Originals moved to ${e.destination}` : 'JPG copies saved next to the originals'

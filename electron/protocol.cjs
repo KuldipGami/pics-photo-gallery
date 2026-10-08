@@ -60,16 +60,17 @@ async function serveFile(item, request) {
  * gallery://media/<id>     original file (range-aware)
  * gallery://thumb/<id>     480px cached thumbnail
  * gallery://preview/<id>   2560px rendition for formats Chromium can't decode (HEIC, TIFF, RAW)
+ * gallery://import/<id>    thumbnail of a file found on a card or folder (Import), by its scan id
  * Only ids present in the library index are served, so the renderer can't read arbitrary files.
  */
-function handleProtocol({ library, thumbs }) {
+function handleProtocol({ library, thumbs, importItem }) {
   protocol.handle(SCHEME, async (request) => {
     const url = new URL(request.url)
-    const item = library.get(url.pathname.slice(1))
+    const item = url.hostname === 'import' ? importItem?.(url.pathname.slice(1)) : library.get(url.pathname.slice(1))
     if (!item) return notFound()
     if (url.hostname === 'media') return serveFile(item, request)
-    if (url.hostname === 'thumb' || url.hostname === 'preview') {
-      const data = await thumbs.get(item, url.hostname).catch(() => null)
+    if (url.hostname === 'thumb' || url.hostname === 'preview' || url.hostname === 'import') {
+      const data = await thumbs.get(item, url.hostname === 'import' ? 'thumb' : url.hostname).catch(() => null)
       if (!data) return notFound()
       const type = data.toString('latin1', 8, 12) === 'WEBP' ? 'image/webp' : 'image/jpeg'
       return new Response(data, {

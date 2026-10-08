@@ -23,6 +23,7 @@ import type {
 import type { OrganizePlan } from './components/OrganizeView'
 import type { LocationAssignment, LocationSuggestions, PlaceHit, PlaceName } from './components/LocationDialog'
 import type { TagsData } from './components/RatingFilter'
+import type { ImportPlan, ImportProgress, ImportResult, ImportScan, ImportScanning, ImportSource } from './components/ImportView'
 
 type Unsubscribe = () => void
 
@@ -61,6 +62,17 @@ export interface LumenApi {
   createSmartAlbum(name: string, query: string): Promise<string | null>
   /** Items that look like this one, most alike first (the item itself first). */
   findSimilar(id: string): Promise<{ ids: string[]; scores: number[] }>
+  /** Connected phones, cameras and cards. */
+  importSources(): Promise<{ sources: ImportSource[]; error: string | null }>
+  importPickFolder(): Promise<ImportSource | null>
+  importScan(sourceId: string): Promise<ImportScan>
+  importPlan(scanId: string, deleteAfter: boolean): Promise<ImportPlan>
+  importRun(scanId: string, deleteAfter: boolean): Promise<ImportResult>
+  importCancel(): Promise<void>
+  importForget(sourceId: string): Promise<number>
+  importPickDestination(): Promise<string | null>
+  onImportScanProgress(cb: (p: ImportScanning | null) => void): Unsubscribe
+  onImportProgress(cb: (p: ImportProgress | null) => void): Unsubscribe
   /** 0–5 stars (0 clears). Resolves to how many changed. */
   rateItems(ids: string[], rating: number): Promise<number>
   editTags(ids: string[], change: { add?: string[]; remove?: string[]; set?: string[] }): Promise<number>
@@ -168,6 +180,11 @@ export interface LumenApi {
       largeFileMB: number
       tagsInFiles: boolean
       xmpSidecars: boolean
+      importDestination: null
+      importFolderPattern: string
+      importSkipKnown: boolean
+      importConvertHeic: boolean
+      importHeicOriginals: 'aside' | 'next' | 'none'
       organizeRoot: null
       folderPattern: string
       organizeCopy: boolean

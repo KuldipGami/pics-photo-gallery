@@ -36,6 +36,18 @@ import { HistoryView, historyTitle } from './components/HistoryView'
 import { MemoriesView, MemoryStrip } from './components/MemoriesView'
 import { MapView, hasPosition, type MapViewState } from './components/MapView'
 import { LocationDialog } from './components/LocationDialog'
+import {
+  importConfirm,
+  importDoneText,
+  ImportView,
+  type ImportOptions,
+  type ImportPlan,
+  type ImportProgress,
+  type ImportResult,
+  type ImportScan,
+  type ImportScanning,
+  type ImportSource,
+} from './components/ImportView'
 import { RatingStars } from './components/RatingStars'
 import { TagEditor } from './components/TagEditor'
 import { filterActive, marksOf, matchesFilter, NO_FILTER, RatingFilter, tagCounts, tagText, type RatingFilterValue } from './components/RatingFilter'
@@ -98,6 +110,7 @@ const TITLES: Record<View['kind'], string> = {
   albums: 'Albums',
   album: '',
   similar: '',
+  import: 'Import',
   map: 'Map',
   'map-items': '',
   cleanup: 'Clean up',
@@ -158,6 +171,15 @@ export default function App() {
   /** Gallery filter by stars / tags, and the "Tags" dialog for a selection. */
   const [ratingFilter, setRatingFilter] = useState<RatingFilterValue>(NO_FILTER)
   const [tagging, setTagging] = useState<string[] | null>(null)
+  // ---------- import ----------
+  const [importSources, setImportSources] = useState<ImportSource[] | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [importScanning, setImportScanning] = useState<ImportScanning | null>(null)
+  const [importScan, setImportScan] = useState<ImportScan | null>(null)
+  const [importPlan, setImportPlan] = useState<ImportPlan | null>(null)
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
+  const [importResult, setImportResult] = useState<ImportResult | null>(null)
+  const [importDeleteAfter, setImportDeleteAfter] = useState(false)
   const mapView = useRef<MapViewState | null>(null)
   const [placeCountry, setPlaceCountry] = useState<string | null>(null)
   const { toasts, push: toast, dismiss: dismissToast } = useToasts()
@@ -605,6 +627,65 @@ export default function App() {
     api.setSettings({ protectedFolders: [...settings.protectedFolders, dir] })
     toast(`Files in “${baseName(dir)}” will always be kept`)
   }
+  // Import: the options, the source list (refreshed every few seconds while the page is open) and the steps.
+  const importOpts: ImportOptions = {
+    destination: settings?.importDestination ?? null,
+    folderPattern: settings?.importFolderPattern ?? 'yyyy\\MM - MMMM',
+    skipImported: settings?.importSkipKnown !== false,
+    convertHeic: !!settings?.importConvertHeic,
+    heicOriginals: settings?.importHeicOriginals ?? 'aside',
+    deleteAfter: importDeleteAfter,
+  }
+  const refreshImportSources = async () => {
+    const res = await api.importSources()
+    setImportSources(res.sources)
+    setImportError(res.error)
+  }
+  useEffect(() => {
+    if (view.kind !== 'import' || importScanning || importProgress) return
+    refreshImportSources()
+    const t = setInterval(() => document.hasFocus() && refreshImportSources(), 5000)
+    return () => clearInterval(t)
+  }, [view.kind, !!importScanning, !!importProgress])
+  // progress events carry the counts; the source is the one the scan was started for
+  useEffect(() => api.onImportScanProgress((p) => setImportScanning((prev) => (p && prev ? { ...prev, ...p, source: prev.source } : prev))), [])
+  useEffect(() => api.onImportProgress(setImportProgress), [])
+  useEffect(() => {
+    if (!importScan) return setImportPlan(null)
+    let live = true
+    api.importPlan(importScan.scanId, importDeleteAfter).then((p) => live && setImportPlan(p))
+    return () => {
+      live = false
+    }
+  }, [importScan, importDeleteAfter, settings?.importDestination, settings?.importFolderPattern, settings?.importSkipKnown, settings?.importConvertHeic, settings?.importHeicOriginals])
+  const startImportScan = async (source: ImportSource) => {
+    setImportResult(null)
+    setImportScanning({ source, phase: 'listing', done: 0, total: 0 })
+    try {
+      setImportScan(await api.importScan(source.id))
+    } catch (err) {
+      toast(String((err as Error)?.message ?? err).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), { error: true })
+    } finally {
+      setImportScanning(null)
+    }
+  }
+  const runImport = () => {
+    if (!importScan || !importPlan) return
+    const go = async () => {
+      try {
+        const res = await api.importRun(importScan.scanId, importDeleteAfter)
+        setImportResult(res)
+        const t = importDoneText(res)
+        toast(t.text, { error: t.error })
+      } catch (err) {
+        toast(String((err as Error)?.message ?? err).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), { error: true })
+      }
+    }
+    const c = importConfirm(importScan, importPlan, importOpts)
+    if (c) setConfirm({ ...c, danger: true, onConfirm: go })
+    else go()
+  }
+
   // Lumen moved or renamed files (Organize, History): selections and ruled groups follow them.
   useEffect(
     () =>
@@ -791,7 +872,7 @@ export default function App() {
     setFocus(null) // "scroll back to the photo you were viewing" is for the page you were on
     setOpeningFolder(null)
 
-    if (['settings', 'folders', 'people', 'person', 'places', 'albums', 'cleanup', 'organize', 'history', 'memories'].includes(next.kind)) setTypeFilter('all')
+    if (['settings', 'folders', 'people', 'person', 'places', 'albums', 'cleanup', 'organize', 'history', 'memories', 'import', 'map'].includes(next.kind)) setTypeFilter('all')
   }
 
   // ---------- albums ----------
@@ -1244,6 +1325,8 @@ export default function App() {
     subtitle = `${formatCount(albums.length)} album${albums.length === 1 ? '' : 's'}`
   } else if (view.kind === 'cleanup') {
     subtitle = 'Duplicates, blurry photos, screenshots and large files · nothing is removed without your confirmation'
+  } else if (view.kind === 'import') {
+    subtitle = 'From a phone, camera, memory card or folder · only what’s new is copied'
   } else if (view.kind === 'map') {
     subtitle = `${formatCount(located)} photos and videos with a place · map © OpenStreetMap`
   } else if (view.kind === 'organize') {
@@ -1773,6 +1856,60 @@ export default function App() {
         onDismiss={(ids) => {
           api.dismissDuplicates(ids)
           toast("Got it — they won't be suggested again")
+        }}
+      />
+    )
+  } else if (view.kind === 'import') {
+    body = (
+      <ImportView
+        sources={importSources}
+        sourcesError={importError}
+        scanning={importScanning}
+        scan={importScan}
+        plan={importPlan}
+        options={importOpts}
+        defaultDestination={settings?.folders[0] ?? ''}
+        destinationOutside={!!settings?.importDestination && !settings.folders.some((f) => isUnder(settings.importDestination!, f))}
+        originalsDir={settings?.originalsDir}
+        progress={importProgress}
+        result={importResult}
+        thumb={(c) => (importScan?.thumbs ? `gallery://import/${c.id}` : null)}
+        onRefresh={refreshImportSources}
+        onPickFolder={async () => {
+          const source = await api.importPickFolder()
+          if (source) startImportScan(source)
+        }}
+        onScan={startImportScan}
+        onCancelScan={() => api.importCancel()}
+        onBack={() => {
+          setImportScan(null)
+          setImportPlan(null)
+          setImportResult(null)
+          refreshImportSources()
+        }}
+        onImport={runImport}
+        onCancel={() => api.importCancel()}
+        onOptions={(patch) => {
+          const { deleteAfter, destination, skipImported, convertHeic, heicOriginals, folderPattern } = patch
+          if (deleteAfter !== undefined) setImportDeleteAfter(deleteAfter)
+          if (destination === null) api.setSettings({ importDestination: null })
+          if (skipImported !== undefined) api.setSettings({ importSkipKnown: skipImported })
+          if (convertHeic !== undefined) api.setSettings({ importConvertHeic: convertHeic })
+          if (heicOriginals !== undefined) api.setSettings({ importHeicOriginals: heicOriginals })
+          if (folderPattern !== undefined) api.setSettings({ importFolderPattern: folderPattern })
+        }}
+        onChangeDestination={() => api.importPickDestination()}
+        onForget={async (source) => {
+          const n = await api.importForget(source.id)
+          toast(n ? `Forgot ${plural(n, 'file')} imported from ${source.name} before` : 'Nothing was remembered for it')
+          refreshImportSources()
+        }}
+        onOpenFolder={(dir) => api.revealFolder(dir)}
+        onUndo={async (entryId) => {
+          const res = await api.restoreHistory(entryId)
+          toast(res.restored ? `Moved ${plural(res.restored, 'imported file')} to the ${BIN}` : 'Nothing could be undone: the files were moved or renamed since.', { error: !res.restored })
+          setImportResult(null)
+          setImportScan(null)
         }}
       />
     )
