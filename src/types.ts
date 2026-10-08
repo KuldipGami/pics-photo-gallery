@@ -320,7 +320,20 @@ export interface ThumbProgress {
 }
 
 /** A photo edit (see electron/editor.cjs). Sliders are −1…1. */
+/** Magic eraser: a brushed stroke, as fractions of the upright photo. */
+export interface EraseStroke {
+  /** Brush diameter, as a fraction of the long side. */
+  size: number
+  /** x,y pairs, fractions of width/height. */
+  points: number[]
+}
+export interface EraseStep {
+  strokes: EraseStroke[]
+}
+
 export interface EditRecipe {
+  /** Magic eraser steps, applied first, on the upright photo. */
+  erase?: EraseStep[]
   /** Clockwise quarter turns. */
   quarter: number
   flip: boolean

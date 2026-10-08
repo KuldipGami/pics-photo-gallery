@@ -43,7 +43,8 @@
           "places.json.gz",
           "siglip/*.onnx",
           "siglip/tokenizer.json",
-          "siglip/calibration.json"
+          "siglip/calibration.json",
+          "lama/lama.onnx"
         ]
       }
     ],

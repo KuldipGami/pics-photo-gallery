@@ -2,11 +2,14 @@ const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const path = require('node:path')
 const sharp = require('sharp')
+const { cleanSteps, makeStep } = require('./eraser.cjs')
 
 /**
  * Photo edits, always saved as a new file next to the original (the original is never changed).
  *
  * An edit is a small recipe applied in this order:
+ *   erase      magic eraser steps, on the upright photo (see eraser.cjs) — first, so what was
+ *              brushed stays on the object whatever is turned or cropped later
  *   quarter    clockwise quarter turns (0–3)
  *   flip       mirror left↔right (after turning, as seen on screen)
  *   straighten small rotation in degrees (−45…45); the empty corners are cropped away
@@ -38,11 +41,12 @@ function cleanRecipe(r = {}) {
     contrast: clamp(r.contrast, -1, 1),
     color: clamp(r.color, -1, 1),
     warmth: clamp(r.warmth, -1, 1),
+    erase: cleanSteps(r.erase),
   }
 }
 
 const isIdentity = (r) =>
-  !r.quarter && !r.flip && !r.straighten && !r.crop && !r.enhance && !r.light && !r.contrast && !r.color && !r.warmth
+  !r.quarter && !r.flip && !r.straighten && !r.crop && !r.enhance && !r.light && !r.contrast && !r.color && !r.warmth && !r.erase.length
 
 /** Largest centred rectangle with the picture's proportions that fits after rotating by `deg`. */
 function inscribed(w, h, deg) {
@@ -54,16 +58,64 @@ function inscribed(w, h, deg) {
 }
 
 /**
- * Runs the recipe. `input` is a file path or an image buffer; `maxSize` shrinks the picture first
- * (for previews). Resolves to a sharp pipeline ready for output.
+ * Where a point of the picture as shown while editing (turned, flipped and straightened, not yet
+ * cropped; fractions of it) is on the upright W0×H0 photo (fractions). `scale` turns a length as a
+ * fraction of the shown picture's long side into a fraction of the photo's long side.
  */
-async function apply(input, recipe, maxSize) {
+function fromView(recipe, W0, H0) {
   const r = cleanRecipe(recipe)
-  // 1. upright (EXIF orientation), optionally smaller, quarter turns
+  const odd = r.quarter % 2 === 1
+  const W1 = odd ? H0 : W0
+  const H1 = odd ? W0 : H0
+  const fit = r.straighten ? inscribed(W1, H1, r.straighten) : { w: W1, h: H1 }
+  const cos = Math.cos(-r.straighten * RAD)
+  const sin = Math.sin(-r.straighten * RAD)
+  const map = (fx, fy) => {
+    // undo the straightening (a clockwise turn about the centre), then the mirror
+    const dx = fx * fit.w - fit.w / 2
+    const dy = fy * fit.h - fit.h / 2
+    let x = dx * cos - dy * sin + W1 / 2
+    let y = dx * sin + dy * cos + H1 / 2
+    if (r.flip) x = W1 - x
+    // undo the quarter turns: a clockwise turn moves (x, y) of a w×h picture to (h − y, x)
+    let w = W1
+    let h = H1
+    for (let q = 0; q < r.quarter; q++) {
+      ;[x, y] = [y, w - x]
+      ;[w, h] = [h, w]
+    }
+    return [x / W0, y / H0]
+  }
+  return { map, scale: Math.max(fit.w, fit.h) / Math.max(W0, H0) }
+}
+
+/** The photo upright (EXIF orientation), optionally shrunk to `maxSize`, as raw pixels. */
+function decode(input, maxSize) {
   let img = sharp(input, { failOn: 'none' }).rotate()
   if (maxSize) img = img.resize(maxSize, maxSize, { fit: 'inside', withoutEnlargement: true })
-  let { data, info } = await img.removeAlpha().raw().toBuffer({ resolveWithObject: true })
+  return img.removeAlpha().raw().toBuffer({ resolveWithObject: true })
+}
+
+/**
+ * Runs the recipe. `input` is a file path or an image buffer; `maxSize` shrinks the picture first
+ * (for previews); `erase(img, steps)` runs the magic eraser steps. Resolves to a sharp pipeline
+ * ready for output.
+ */
+async function apply(input, recipe, maxSize, erase) {
+  const r = cleanRecipe(recipe)
+  let img = await decode(input, maxSize)
+  if (r.erase.length) {
+    if (!erase) throw new Error("The magic eraser isn't available")
+    img = await erase(img, r.erase)
+  }
+  return render(img, r)
+}
+
+/** The rest of the recipe (`r`, cleaned), on the upright photo's raw pixels after erasing. */
+async function render(upright, r) {
+  let { data, info } = upright
   const raw = () => ({ raw: { width: info.width, height: info.height, channels: info.channels } })
+  // 1. quarter turns and mirror
   if (r.quarter || r.flip) {
     let step = sharp(data, raw())
     if (r.quarter) step = step.rotate(r.quarter * 90)
@@ -149,9 +201,10 @@ async function freeName(dir, base, ext) {
 }
 
 class Editor {
-  constructor({ thumbs }) {
+  constructor({ thumbs, eraser }) {
     this.thumbs = thumbs
-    this.cache = null // { id, mtime, source, preview: { data, info } }
+    this.eraser = eraser ?? null // Eraser (eraser.cjs), for the magic eraser
+    this.cache = null // { id, mtime, source, small: { size, buf }, full: Promise<{ data, info }> }
   }
 
   /** The picture to edit (full size), cached for the item being edited. */
@@ -159,8 +212,47 @@ class Editor {
     if (this.cache?.id === item.id && this.cache.mtime === item.mtime) return this.cache.source
     const source = await this.thumbs.source(item)
     if (!source) throw new Error("This photo can't be opened for editing")
-    this.cache = { id: item.id, mtime: item.mtime, source, small: null }
+    this.cache = { id: item.id, mtime: item.mtime, source, small: null, full: null }
     return source
+  }
+
+  /** The photo upright at full size as raw pixels; kept once the magic eraser is used. */
+  async full(item) {
+    await this.source(item)
+    const cache = this.cache
+    if (!cache.full) {
+      cache.full = decode(cache.source)
+      cache.full.catch(() => (cache.full = null))
+    }
+    return cache.full
+  }
+
+  /** Runs magic eraser steps on this photo (results are cached per photo and step). */
+  eraseFor(item) {
+    const eraser = this.eraser
+    if (!eraser) return undefined
+    return (img, steps) => eraser.apply(img, steps, `${item.id}:${item.mtime}`)
+  }
+
+  /**
+   * The magic eraser: fills what `strokes` cover and resolves to the recipe step that does it
+   * ({ step, ms, device, regions }). Strokes are on the picture as shown while editing (the recipe
+   * without its crop): [{ size: brush diameter as a fraction of its long side, points: [x, y, …]
+   * as fractions of its width and height }]. The fill is made at full size, so the preview and the
+   * saved copy reuse it.
+   */
+  async erase(item, recipe, strokes) {
+    if (!this.eraser) throw new Error("The magic eraser isn't available")
+    const r = cleanRecipe(recipe)
+    const full = await this.full(item)
+    const { width: W0, height: H0 } = full.info
+    const view = fromView(r, W0, H0)
+    const step = makeStep(strokes, view.map, view.scale, W0, H0)
+    if (!step) throw new Error('Paint over what you want to remove first')
+    const started = performance.now()
+    await this.eraser.apply(full, [...r.erase, step], `${item.id}:${item.mtime}`)
+    const last = this.eraser.last
+    return { step, ms: Math.round(performance.now() - started), device: last?.device ?? null, regions: last?.regions ?? 0 }
   }
 
   /** A preview of the recipe, about `size` px on its long side (JPEG). */
@@ -175,7 +267,7 @@ class Editor {
         .toBuffer()
       this.cache.small = { size, buf }
     }
-    const out = await apply(this.cache.small.buf, recipe)
+    const out = await apply(this.cache.small.buf, recipe, undefined, this.eraseFor(item))
     const { data, info } = await out.jpeg({ quality: 85 }).toBuffer({ resolveWithObject: true })
     return { data, width: info.width, height: info.height }
   }
@@ -185,7 +277,15 @@ class Editor {
     const r = cleanRecipe(recipe)
     if (isIdentity(r)) throw new Error('Nothing to save — no changes yet')
     const source = await this.source(item)
-    const out = await apply(source, r)
+    let out
+    if (r.erase.length) {
+      // the erased full-size picture is usually still cached from pressing "Erase"
+      const erase = this.eraseFor(item)
+      if (!erase) throw new Error("The magic eraser isn't available")
+      out = await render(await erase(await this.full(item), r.erase), r)
+    } else {
+      out = await apply(source, r)
+    }
     const format = OUTPUT[item.ext] && typeof source === 'string' ? OUTPUT[item.ext] : 'jpeg'
     const ext = format === 'jpeg' ? (OUTPUT[item.ext] === 'jpeg' ? item.ext : 'jpg') : item.ext
     const file = await freeName(item.dir, path.basename(item.name, path.extname(item.name)), ext)
@@ -208,7 +308,8 @@ class Editor {
 
   release() {
     this.cache = null
+    this.eraser?.release()
   }
 }
 
-module.exports = { Editor, cleanRecipe, inscribed }
+module.exports = { Editor, cleanRecipe, inscribed, fromView }

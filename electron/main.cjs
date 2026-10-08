@@ -31,6 +31,7 @@ const { VideoFrames } = require('./video-frames.cjs')
 const { Places } = require('./places.cjs')
 const { SmartIndex } = require('./smart.cjs')
 const { Editor } = require('./editor.cjs')
+const { Eraser } = require('./eraser.cjs')
 const { History } = require('./history.cjs')
 const cleanup = require('./cleanup.cjs')
 const edits = require('./edits.cjs')
@@ -200,6 +201,8 @@ let smart
 let placesData = { places: [], byItem: {} }
 /** @type {Editor} */
 let editor
+/** Magic eraser (LaMa inpainting, on the GPU) used by the editor. */
+let eraser
 /** @type {History} */
 let history
 /** User-set places for files that can't store one (HEIC, PNG, videos). */
@@ -285,7 +288,12 @@ function startServices() {
   })
   tags.on('write-error', ({ name, message }) => send('tags:error', `Couldn't save the rating or tags inside ${name}: ${message} Lumen keeps them anyway.`))
   places = new Places(path.join(MODELS_DIR, 'places.json.gz'))
-  editor = new Editor({ thumbs })
+  eraser = new Eraser({
+    modelsDir: MODELS_DIR,
+    adapterFile: path.join(userData, 'eraser-engine.json'),
+    hintFile: [path.join(userData, 'face-engine.json'), path.join(userData, 'smart-engine.json')],
+  })
+  editor = new Editor({ thumbs, eraser })
 
   let placesTimer = null
   const updatePlaces = () => {
@@ -854,6 +862,16 @@ ipcMain.handle('edit:save', async (_e, id, recipe) => {
   }
 })
 ipcMain.handle('edit:close', () => editor.release())
+ipcMain.handle('edit:erase', async (_e, id, recipe, strokes) => {
+  const [item] = itemsFor(id)
+  if (!item || item.type !== 'image') return { error: 'Only photos can be edited' }
+  try {
+    return await editor.erase(item, recipe, strokes)
+  } catch (err) {
+    return { error: String(err?.message || err) }
+  }
+})
+ipcMain.handle('edit:eraser', (_e, warm) => eraser.status(!!warm))
 
 // ---------- lossless edits (JPEG metadata only; from DupeLens) ----------
 
@@ -1757,6 +1775,7 @@ app.on('before-quit', () => {
   tags?.saveNow()
   importer?.dispose()
   priv?.dispose()
+  eraser?.dispose()
   exports_.cancel()
   alerts?.dispose()
   background?.dispose()

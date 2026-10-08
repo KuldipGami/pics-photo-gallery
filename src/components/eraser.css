@@ -1,0 +1,63 @@
+/* Magic eraser in the photo editor (PhotoEditor.tsx). The editor is always dark. */
+
+.erase-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.5;
+  cursor: none;
+  touch-action: none;
+}
+.erase-layer.working {
+  cursor: progress;
+  animation: erase-pulse 1.1s ease-in-out infinite alternate;
+}
+@keyframes erase-pulse {
+  from {
+    opacity: 0.55;
+  }
+  to {
+    opacity: 0.2;
+  }
+}
+.erase-cursor {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1.5px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.crop-box.passive {
+  border-color: rgba(255, 255, 255, 0.35);
+  cursor: default;
+  pointer-events: none;
+}
+.editor-canvas .erase-before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.erase-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  pointer-events: none;
+}
+.edit-row.erase-actions {
+  margin: 10px 0 0;
+}
+.edit-row.erase-actions .btn.primary {
+  flex: 1;
+}
+.edit-section .btn.enhance:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

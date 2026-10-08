@@ -106,6 +106,8 @@ contextBridge.exposeInMainWorld('lumen', {
   editPreview: (id, recipe, size) => ipcRenderer.invoke('edit:preview', id, recipe, size),
   editSave: (id, recipe) => ipcRenderer.invoke('edit:save', id, recipe),
   editClose: () => ipcRenderer.invoke('edit:close'),
+  editErase: (id, recipe, strokes) => ipcRenderer.invoke('edit:erase', id, recipe, strokes),
+  eraserStatus: (warm) => ipcRenderer.invoke('edit:eraser', warm),
   onSmartProgress: (cb) => on('smart:progress', cb),
   ocrSearch: (q) => ipcRenderer.invoke('ocr:search', q),
   ocrTokenHits: (tokens) => ipcRenderer.invoke('ocr:hits', tokens),

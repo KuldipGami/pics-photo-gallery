@@ -3,6 +3,8 @@ import type {
   DuplicatesData,
   DuplicatesProgress,
   EditRecipe,
+  EraseStep,
+  EraseStroke,
   GpuInfo,
   HistoryEntry,
   KeepRule,
@@ -164,6 +166,10 @@ export interface LumenApi {
   /** Saves an edited copy next to the original. */
   editSave(id: string, recipe: EditRecipe): Promise<{ id: string; name: string } | { error: string }>
   editClose(): Promise<void>
+  /** Fills the brushed area (strokes in preview coordinates); the step goes into recipe.erase. */
+  editErase(id: string, recipe: EditRecipe, strokes: EraseStroke[]): Promise<{ step: EraseStep; ms: number; device: string | null; regions: number } | { error: string }>
+  /** `warm` starts loading the model. */
+  eraserStatus(warm?: boolean): Promise<{ available: boolean; ready: boolean; device: 'gpu' | 'cpu' | null; error?: string }>
   onSmartProgress(cb: (progress: SmartProgress) => void): Unsubscribe
   /** Items whose text (read from the picture) has every word, best first. */
   ocrSearch(query: string): Promise<{ ids: string[]; snippets: string[]; scores: number[] }>
