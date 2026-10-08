@@ -47,6 +47,10 @@
           "siglip/calibration.json",
           "lama/lama.onnx"
         ]
+      },
+      {
+        "from": "resources/licenses",
+        "to": "licenses"
       }
     ],
     "win": {

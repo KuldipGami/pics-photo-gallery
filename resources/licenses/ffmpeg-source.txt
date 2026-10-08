@@ -1,0 +1,70 @@
+FFMPEG IN LUMEN - SOURCE CODE
+================================================================================
+
+Lumen includes ffmpeg.exe, a separate program made by the FFmpeg project. Lumen
+runs it to save edited videos and to make memory movies; it is not part of
+Lumen's own code. FFmpeg is free software under the GNU General Public License,
+version 3 (GPLv3): you may use, study, change and share it under that license.
+It comes WITHOUT ANY WARRANTY.
+
+The program
+  File       resources\app.asar.unpacked\node_modules\ffmpeg-static\ffmpeg.exe
+             (in the folder where Lumen is installed)
+  Version    FFmpeg 6.0, build "6.0-essentials_build-www.gyan.dev": a 64-bit
+             static Windows build by Gyan Doshi, https://www.gyan.dev/ffmpeg/builds/
+  Delivered  by the ffmpeg-static 5.2.0 npm package, binary release b6.0:
+             https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.0
+  Copyright  (c) 2000-2023 the FFmpeg developers
+  License    GNU GPL version 3. The full text is in ffmpeg.exe.LICENSE (next to
+             ffmpeg.exe), in Appendix B of THIRD-PARTY-NOTICES.txt (next to this
+             file) and at https://www.gnu.org/licenses/gpl-3.0.html
+
+Where to get the source code
+
+  1. FFmpeg itself: commit ea3d24bbe3, FFmpeg release 6.0
+       https://github.com/FFmpeg/FFmpeg/commit/ea3d24bbe3
+       https://git.ffmpeg.org/ffmpeg.git (the official repository)
+       https://ffmpeg.org/releases/ffmpeg-6.0.tar.xz
+
+  2. How it was built. The program reports this configuration
+     (run "ffmpeg.exe -version"):
+       --enable-gpl --enable-version3 --enable-static --disable-w32threads
+       --disable-autodetect --enable-fontconfig --enable-iconv --enable-gnutls
+       --enable-libxml2 --enable-gmp --enable-bzlib --enable-lzma --enable-zlib
+       --enable-libsrt --enable-libssh --enable-libzmq --enable-avisynth
+       --enable-sdl2 --enable-libwebp --enable-libx264 --enable-libx265
+       --enable-libxvid --enable-libaom --enable-libopenjpeg --enable-libvpx
+       --enable-mediafoundation --enable-libass --enable-libfreetype
+       --enable-libfribidi --enable-libvidstab --enable-libvmaf --enable-libzimg
+       --enable-amf --enable-cuda-llvm --enable-cuvid --enable-ffnvcodec
+       --enable-nvdec --enable-nvenc --enable-d3d11va --enable-dxva2
+       --enable-libvpl --enable-libgme --enable-libopenmpt
+       --enable-libopencore-amrwb --enable-libmp3lame --enable-libtheora
+       --enable-libvo-amrwbenc --enable-libgsm --enable-libopencore-amrnb
+       --enable-libopus --enable-libspeex --enable-libvorbis --enable-librubberband
+     The complete build information that came with the program (libraries,
+     codecs, formats and filters) is in ffmpeg.exe.README next to ffmpeg.exe.
+
+  3. The libraries built into it. Each one's source is published by its own
+     project:
+       avisynth, bzlib, gmp, gnutls, iconv, libaom, libass, libfontconfig,
+       libfreetype, libfribidi, libgme, libgsm, libmp3lame, libopencore_amrnb,
+       libopencore_amrwb, libopenjpeg, libopenmpt, libopus, librubberband,
+       libspeex, libsrt, libssh, libtheora, libvidstab, libvmaf,
+       libvo_amrwbenc, libvorbis, libvpx, libwebp, libx264, libx265, libxml2,
+       libxvid, libzimg, libzmq, lzma, mediafoundation, sdl2, zlib
+     and, for hardware acceleration: amf, cuda, cuda_llvm, cuvid, d3d11va,
+     dxva2, ffnvcodec, libmfx, libvpl, nvdec, nvenc.
+     Gyan Doshi publishes these builds and their details at
+     https://www.gyan.dev/ffmpeg/builds/
+
+Using your own FFmpeg
+  You may replace ffmpeg.exe with your own build. Or leave it in place and set
+  the environment variable LUMEN_FFMPEG to the full path of another ffmpeg.exe;
+  Lumen then uses that one.
+
+The ffmpeg-static package
+  The small script that finds ffmpeg.exe (index.js in the same folder) comes
+  from ffmpeg-static 5.2.0 by Eugene Ware, Jannis R and contributors, licensed
+  under the GNU GPL version 3 or later. Its source is that file itself and
+  https://github.com/eugeneware/ffmpeg-static

@@ -21,6 +21,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
 import type { GpuInfo, MediaItem, PeopleData, PeopleProgress, Settings, SmartProgress, Theme } from '../types'
+import { AboutCard, NoticesDialog } from './AboutCard'
 import type { ConfirmOptions } from './Overlays'
 
 function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange(): void; disabled?: boolean; label?: string }) {
@@ -64,6 +65,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
   const smartEngine = smartProgress.engine
   const [cache, setCache] = useState<{ bytes: number; files: number } | null>(null)
   const [gpu, setGpu] = useState<GpuInfo | null>(null)
+  const [notices, setNotices] = useState(false)
   useEffect(() => {
     api.cacheInfo().then(setCache)
     api.getGpu().then(setGpu)
@@ -673,15 +675,9 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
           </div>
         </section>
 
-        <p className="about">Lumen {version} · Your photos never leave this computer.</p>
-        <p className="about credits">
-          Faces: InsightFace buffalo_l (non-commercial licence) · Smart search: Google SigLIP (Apache 2.0) · Place names:{' '}
-          <button className="link" onClick={() => api.openUrl('https://www.geonames.org/')}>
-            GeoNames
-          </button>{' '}
-          (CC BY 4.0)
-        </p>
+        <AboutCard version={version} onOpenUrl={(url) => api.openUrl(url)} onShowNotices={() => setNotices(true)} />
       </div>
+      {notices && <NoticesDialog onClose={() => setNotices(false)} />}
     </div>
   )
 }
