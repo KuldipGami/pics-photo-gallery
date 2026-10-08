@@ -1,0 +1,244 @@
+/* Video editor (VideoEditor.tsx): the photo editor's dark shell (.editor, .editor-panel…) with a
+   player, a transport bar and a trim timeline in place of the picture. */
+
+.ve-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: 44px;
+}
+
+.ve-player {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  cursor: pointer;
+}
+.ve-player video {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: block;
+  background: #000;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  transition: transform 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out;
+  user-select: none;
+}
+.ve-player .viewer-error {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.8);
+  cursor: default;
+}
+.ve-badge {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.ve-transport {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px 18px;
+}
+.ve-transport .icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.ve-clock {
+  flex-shrink: 0;
+  min-width: 104px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.9);
+  font-variant-numeric: tabular-nums;
+}
+.ve-clock span {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* the timeline: frame pictures, the part kept between two handles, the playhead */
+.ve-timeline {
+  position: relative;
+  flex: 1;
+  min-width: 120px;
+  height: 52px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+}
+.ve-strip {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 6px;
+}
+.ve-shade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.62);
+  pointer-events: none;
+}
+.ve-shade:first-of-type {
+  border-radius: 6px 0 0 6px;
+}
+.ve-shade + .ve-shade {
+  border-radius: 0 6px 6px 0;
+}
+.ve-keyframe {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 2px dashed rgba(255, 214, 102, 0.9);
+  background: rgba(255, 214, 102, 0.18);
+  pointer-events: none;
+}
+.ve-range {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  border-left-width: 0;
+  border-right-width: 0;
+  pointer-events: none;
+}
+.ve-handle {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 12px;
+  background: var(--accent);
+  cursor: ew-resize;
+  pointer-events: auto;
+}
+.ve-handle.start {
+  left: -12px;
+  border-radius: 6px 0 0 6px;
+}
+.ve-handle.end {
+  right: -12px;
+  border-radius: 0 6px 6px 0;
+}
+.ve-handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 16px;
+  margin: -8px 0 0 -1px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.85);
+}
+.ve-playhead {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+/* panel */
+.ve-times {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.ve-time {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+button.ve-time {
+  cursor: pointer;
+}
+button.ve-time:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+.ve-time span {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+.ve-time b {
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.ve-note {
+  align-self: center;
+  margin-left: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.video-editor .chip:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.video-editor .btn.ghost svg + svg {
+  margin-left: auto;
+}
+
+.ve-progress {
+  position: relative;
+  flex: 1;
+  height: 32px;
+  overflow: hidden;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.ve-progress-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  opacity: 0.55;
+  transition: width 0.25s linear;
+}
+.ve-progress span {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 760px) {
+  .ve-clock span {
+    display: none;
+  }
+  .ve-clock {
+    min-width: 0;
+  }
+}

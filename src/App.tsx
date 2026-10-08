@@ -2,6 +2,8 @@ import {
   Album as AlbumIcon,
   ArrowDownUp,
   ArrowLeft,
+  ChevronDown,
+  Clapperboard,
   Ellipsis,
   Eye,
   EyeOff,
@@ -40,6 +42,7 @@ import { MemoriesView, MemoryStrip } from './components/MemoriesView'
 import { MapView, hasPosition, type MapViewState } from './components/MapView'
 import { LocationDialog } from './components/LocationDialog'
 import { ExportDialog, exportResultText } from './components/ExportDialog'
+import { MovieDialog, type MovieProgress } from './components/MovieDialog'
 import { PinDialog, PrivateBar, PrivateEmpty, PrivateLock, privateConfirm, type PrivateBridge, type PrivateStatus } from './components/PrivateLock'
 import {
   importConfirm,
@@ -181,6 +184,9 @@ export default function App() {
   const [tagging, setTagging] = useState<string[] | null>(null)
   /** "Export…" for these items; the label names the folder (album, trip, place…). */
   const [exporting, setExporting] = useState<{ ids: string[]; label: string } | null>(null)
+  /** "Make a movie" from these items, with a suggested title card. */
+  const [movie, setMovie] = useState<{ ids: string[]; title: string; subtitle: string } | null>(null)
+  const [movieProgress, setMovieProgress] = useState<MovieProgress | null>(null)
   // ---------- private ----------
   const [privStatus, setPrivStatus] = useState<PrivateStatus | null>(null)
   const [privateItems, setPrivateItems] = useState<MediaItem[]>([])
@@ -1278,6 +1284,7 @@ export default function App() {
     return r ?? 0
   }, [selection, byId, tagsData])
   useEffect(() => api.onTagsError((text) => toast(text, { error: true })), [])
+  useEffect(() => api.onMovieProgress(setMovieProgress), [])
   const findSimilar = async (id: string) => {
     const res = await api.findSimilar(id)
     if (res.ids.length <= 1) return toast('Nothing looks like this one yet. Lumen may still be preparing smart search.')
@@ -1309,7 +1316,7 @@ export default function App() {
 
   // ---------- keyboard ----------
   const onKey = useEvent((e: KeyboardEvent) => {
-    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum || compare || tagging || locating || exporting || pinDialog || savingSearch !== null) return
+    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum || compare || tagging || locating || exporting || movie || pinDialog || savingSearch !== null) return
     const key = e.key.toLowerCase()
     const typing = !!(e.target as HTMLElement)?.closest?.('input, textarea')
     if ((e.ctrlKey || e.metaKey) && key === 'f') {
@@ -1556,28 +1563,8 @@ export default function App() {
           onChange={(n) => api.rateItems([...selection], n)}
           label="Rating of the selected items"
         />
-        {view.kind === 'private' ? (
-          <>
-            <button className="btn ghost" title="Show them in the library again" onClick={() => unmakePrivate([...selection])}>
-              <LockKeyholeOpen size={15} /> Remove from Private
-            </button>
-            <button className="btn ghost" title="Move them into a hidden folder so File Explorer doesn't show them" onClick={() => hideInExplorer([...selection])}>
-              <EyeOff size={15} /> Hide in File Explorer
-            </button>
-          </>
-        ) : (
-          <button className="btn ghost" title="Hide them from every view until Private is unlocked" onClick={() => makePrivate([...selection])}>
-            <LockKeyhole size={15} /> Move to Private
-          </button>
-        )}
-        <button className="btn ghost" title="Copies for sharing: smaller, without location, or as one .zip" onClick={() => setExporting({ ids: [...selection], label: exportLabel })}>
-          <Share size={15} /> Export…
-        </button>
         <button className="btn ghost" title="Add or remove tags (T)" onClick={() => setTagging([...selection])}>
           <Tag size={15} /> Tags…
-        </button>
-        <button className="btn ghost" title="Add or change where these were taken" onClick={() => setLocating([...selection])}>
-          <MapPin size={15} /> Location…
         </button>
         <button className="btn ghost" onClick={() => setAlbumPicker([...selection])}>
           <ImagePlus size={15} /> Add to album
@@ -1586,6 +1573,24 @@ export default function App() {
           <Heart size={15} fill={allSelectedFav ? 'currentColor' : 'none'} />
           {allSelectedFav ? 'Unfavorite' : 'Favorite'}
         </button>
+        <PopoverMenu
+          items={[
+            { label: 'Export…', icon: <Share size={15} />, onClick: () => setExporting({ ids: [...selection], label: exportLabel }) },
+            { label: 'Make a movie…', icon: <Clapperboard size={15} />, onClick: () => setMovie({ ids: [...selection], title: exportLabel, subtitle: '' }) },
+            { label: 'Location…', icon: <MapPin size={15} />, onClick: () => setLocating([...selection]) },
+            ...(view.kind === 'private'
+              ? [
+                  { label: 'Remove from Private', icon: <LockKeyholeOpen size={15} />, onClick: () => unmakePrivate([...selection]) },
+                  { label: 'Hide in File Explorer', icon: <EyeOff size={15} />, onClick: () => hideInExplorer([...selection]) },
+                ]
+              : [{ label: 'Move to Private', icon: <LockKeyhole size={15} />, onClick: () => makePrivate([...selection]) }]),
+          ]}
+          trigger={(open, toggle) => (
+            <button className={`btn ghost${open ? ' on' : ''}`} onClick={toggle} title="Export, movie, location, Private">
+              More <ChevronDown size={14} />
+            </button>
+          )}
+        />
         <button className="btn danger" onClick={() => requestDelete([...selection])}>
           <Trash size={15} /> Delete
         </button>
@@ -1659,6 +1664,11 @@ export default function App() {
         {view.kind === 'place' && (
           <button className="icon-btn back" onClick={() => setView({ kind: 'places' })} title="Back to places">
             <ArrowLeft size={20} />
+          </button>
+        )}
+        {currentTrip && !selection.size && (
+          <button className="btn ghost header-movie" title="A short video of this trip, with music" onClick={() => setMovie({ ids: visible.map((it) => it.id), title: currentTrip.title, subtitle: formatTripDates(currentTrip.start, currentTrip.end) })}>
+            <Clapperboard size={15} /> Make a movie
           </button>
         )}
         {view.kind === 'map-items' && (
@@ -1763,6 +1773,7 @@ export default function App() {
         {currentAlbum && (
           <PopoverMenu
             items={[
+              { label: 'Make a movie…', icon: <Clapperboard size={15} />, onClick: () => setMovie({ ids: visible.map((it) => it.id), title: currentAlbum.name, subtitle: '' }) },
               { label: 'Export album…', icon: <Share size={15} />, onClick: () => setExporting({ ids: visible.map((it) => it.id), label: currentAlbum.name }) },
               { label: 'Delete album…', icon: <Trash size={15} />, danger: true, onClick: () => deleteAlbum(currentAlbum.id) },
             ]}
@@ -2314,6 +2325,24 @@ export default function App() {
         />
       )}
       {pinDialog && <PinDialog bridge={privateBridge} hasPin={!!privStatus?.hasPin} onClose={() => setPinDialog(false)} onDone={() => toast('PIN saved')} />}
+      {movie && (
+        <MovieDialog
+          items={movie.ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it)}
+          title={movie.title}
+          subtitle={movie.subtitle}
+          progress={movieProgress}
+          onMake={async (req) => {
+            const r = await api.movieMake(req)
+            if (r && 'error' in r) throw new Error(r.error)
+            return r
+          }}
+          onAbort={() => api.movieCancel()}
+          onPickMusic={api.moviePickMusic}
+          onPlay={(file) => api.movieOpen(file)}
+          onReveal={(file) => api.movieReveal(file)}
+          onClose={() => setMovie(null)}
+        />
+      )}
       {exporting && (
         <ExportDialog
           items={exporting.ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it)}

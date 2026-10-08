@@ -32,6 +32,8 @@ const { Places } = require('./places.cjs')
 const { SmartIndex } = require('./smart.cjs')
 const { Editor } = require('./editor.cjs')
 const { Eraser } = require('./eraser.cjs')
+const videoEdit = require('./video-edit.cjs')
+const { makeMovie } = require('./movie.cjs')
 const { History } = require('./history.cjs')
 const cleanup = require('./cleanup.cjs')
 const edits = require('./edits.cjs')
@@ -872,6 +874,112 @@ ipcMain.handle('edit:erase', async (_e, id, recipe, strokes) => {
   }
 })
 ipcMain.handle('edit:eraser', (_e, warm) => eraser.status(!!warm))
+
+// ---------- video edits & memory movies (ffmpeg) ----------
+
+let videoJob = null
+let movieJob = null
+/** Movies made in this session: the only files movie:open / movie:reveal will touch. */
+const movieFiles = new Set()
+const failure = (err) => (err?.canceled ? { canceled: true } : { error: String(err?.message || err) })
+
+ipcMain.handle('video:info', async (_e, id) => {
+  const [it] = itemsFor(id)
+  if (it?.type !== 'video') return { error: 'Only videos can be edited' }
+  try {
+    return await videoEdit.videoInfo(it.path)
+  } catch (err) {
+    return failure(err)
+  }
+})
+ipcMain.handle('video:save', async (_e, id, recipe) => {
+  const [it] = itemsFor(id)
+  if (it?.type !== 'video') return { error: 'Only videos can be edited' }
+  videoJob?.abort()
+  const job = (videoJob = new AbortController())
+  try {
+    const r = await videoEdit.saveEdit(it, recipe, { signal: job.signal, onProgress: (f) => send('video:progress', f) })
+    ownFiles([r.file])
+    scan()
+    return { id: idOf(r.file), name: path.basename(r.file), mode: r.mode }
+  } catch (err) {
+    return failure(err)
+  } finally {
+    if (videoJob === job) videoJob = null
+    send('video:progress', null)
+  }
+})
+ipcMain.handle('video:cancel', () => videoJob?.abort())
+ipcMain.handle('video:frame', async (_e, id, seconds) => {
+  const [it] = itemsFor(id)
+  if (it?.type !== 'video') return { error: 'Only videos can be edited' }
+  try {
+    const r = await videoEdit.saveFrame(it, Number(seconds) || 0)
+    ownFiles([r.file])
+    scan()
+    return { id: idOf(r.file), name: path.basename(r.file) }
+  } catch (err) {
+    return failure(err)
+  }
+})
+
+ipcMain.handle('movie:pick-music', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Choose music for the movie',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Music', extensions: ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus', 'wma'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  })
+  return r.canceled ? null : (r.filePaths[0] ?? null)
+})
+ipcMain.handle('movie:make', async (_e, req) => {
+  const items = itemsFor(idList(req?.ids))
+  if (!items.length) return { error: 'Choose some photos or videos for the movie' }
+  const name = String(req.title || 'Movie').replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim() || 'Movie'
+  const s = await dialog.showSaveDialog(win, {
+    title: 'Save the movie',
+    defaultPath: path.join(app.getPath('videos'), `${name}.mp4`),
+    filters: [{ name: 'MP4 video', extensions: ['mp4'] }],
+  })
+  if (s.canceled || !s.filePath) return null
+  movieJob?.abort()
+  const job = (movieJob = new AbortController())
+  // keep faces in frame: the middle of the faces found (tuples [id, person, x, y, w, h, dist])
+  const byItem = faces.snapshot().byItem
+  const focusOf = (it) => {
+    const f = byItem[it.id]?.faces
+    if (!f?.length) return undefined
+    return { x: f.reduce((a, t) => a + t[2] + t[4] / 2, 0) / f.length, y: f.reduce((a, t) => a + t[3] + t[5] / 2, 0) / f.length }
+  }
+  try {
+    const r = await makeMovie(
+      {
+        ...req,
+        items: items.map((it) => ({ ...it, focus: focusOf(it) })),
+        getSource: (it) => thumbs.source(it),
+        output: s.filePath,
+        date: Math.max(...items.map((it) => it.date)),
+      },
+      { signal: job.signal, onProgress: (p) => send('movie:progress', p) },
+    )
+    movieFiles.add(r.file)
+    ownFiles([r.file])
+    scan()
+    return r
+  } catch (err) {
+    return err?.canceled ? null : failure(err)
+  } finally {
+    if (movieJob === job) movieJob = null
+    send('movie:progress', null)
+  }
+})
+ipcMain.handle('movie:cancel', () => movieJob?.abort())
+ipcMain.handle('movie:open', (_e, f) => movieFiles.has(f) && shell.openPath(f))
+ipcMain.handle('movie:reveal', (_e, f) => {
+  if (movieFiles.has(f)) shell.showItemInFolder(f)
+})
 
 // ---------- lossless edits (JPEG metadata only; from DupeLens) ----------
 
@@ -1776,6 +1884,8 @@ app.on('before-quit', () => {
   importer?.dispose()
   priv?.dispose()
   eraser?.dispose()
+  videoJob?.abort()
+  movieJob?.abort()
   exports_.cancel()
   alerts?.dispose()
   background?.dispose()

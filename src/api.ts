@@ -27,6 +27,8 @@ import type { OrganizePlan } from './components/OrganizeView'
 import type { LocationAssignment, LocationSuggestions, PlaceHit, PlaceName } from './components/LocationDialog'
 import type { TagsData } from './components/RatingFilter'
 import type { ExportBridge } from './components/ExportDialog'
+import type { VideoInfo, VideoRecipe } from './components/VideoEditor'
+import type { MovieProgress, MovieRequest, MovieResult } from './components/MovieDialog'
 import type { PrivateStatus, UnlockResult } from './components/PrivateLock'
 import type { ImportPlan, ImportProgress, ImportResult, ImportScan, ImportScanning, ImportSource } from './components/ImportView'
 
@@ -168,6 +170,19 @@ export interface LumenApi {
   editClose(): Promise<void>
   /** Fills the brushed area (strokes in preview coordinates); the step goes into recipe.erase. */
   editErase(id: string, recipe: EditRecipe, strokes: EraseStroke[]): Promise<{ step: EraseStep; ms: number; device: string | null; regions: number } | { error: string }>
+  /** Video edits (ffmpeg): facts for the editor, save a trimmed/rotated/muted copy, save a frame. */
+  videoInfo(id: string): Promise<VideoInfo | { error: string }>
+  videoSave(id: string, recipe: VideoRecipe): Promise<{ id: string; name: string; mode: string } | { error: string } | { canceled: true }>
+  videoFrame(id: string, seconds: number): Promise<{ id: string; name: string } | { error: string }>
+  videoCancel(): Promise<void>
+  onVideoProgress(cb: (fraction: number | null) => void): Unsubscribe
+  /** Memory movie: asks where to save it; null = canceled. */
+  movieMake(req: MovieRequest): Promise<MovieResult | { error: string } | null>
+  movieCancel(): Promise<void>
+  moviePickMusic(): Promise<string | null>
+  movieOpen(file: string): Promise<void>
+  movieReveal(file: string): Promise<void>
+  onMovieProgress(cb: (p: MovieProgress | null) => void): Unsubscribe
   /** `warm` starts loading the model. */
   eraserStatus(warm?: boolean): Promise<{ available: boolean; ready: boolean; device: 'gpu' | 'cpu' | null; error?: string }>
   onSmartProgress(cb: (progress: SmartProgress) => void): Unsubscribe

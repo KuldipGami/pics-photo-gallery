@@ -19,6 +19,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { api, mediaUrl, thumbUrl } from '../api'
 import { RatingStars } from './RatingStars'
+import { VideoEditor, type VideoInfo } from './VideoEditor'
 import type { TagCount } from './TagEditor'
 import { useElementSize } from '../hooks'
 import { formatDuration, formatLongDate, formatTime } from '../lib/format'
@@ -245,7 +246,10 @@ export function Viewer({
           break
         case 'e':
         case 'E':
-          if (item.type === 'image' && !mod) setEditing(true)
+          if (!mod) {
+            videoRef.current?.pause()
+            setEditing(true)
+          }
           break
         case 'l':
         case 'L':
@@ -389,11 +393,16 @@ export function Viewer({
               <button className="icon-btn" onClick={() => onAddToAlbum(item)} title="Add to album">
                 <ImagePlus size={18} />
               </button>
-              {item.type === 'image' && (
-                <button className="icon-btn" onClick={() => setEditing(true)} title="Edit (E)">
-                  <SlidersHorizontal size={18} />
-                </button>
-              )}
+              <button
+                className="icon-btn"
+                onClick={() => {
+                  videoRef.current?.pause()
+                  setEditing(true)
+                }}
+                title={item.type === 'video' ? 'Trim, rotate, mute or save a frame (E)' : 'Edit (E)'}
+              >
+                <SlidersHorizontal size={18} />
+              </button>
               {item.type === 'image' && (
                 <button className="icon-btn" onClick={copyImage} title="Copy image (Ctrl+C)">
                   <Copy size={18} />
@@ -445,6 +454,18 @@ export function Viewer({
           />
         )}
       </div>
+      {editing && item.type === 'video' && (
+        <VideoEditorHost
+          key={item.id}
+          item={item}
+          onClose={() => setEditing(false)}
+          onToast={onToast}
+          onSaved={(id, name) => {
+            setEditing(false)
+            onEdited(item, id, name)
+          }}
+        />
+      )}
       {editing && item.type === 'image' && (
         <PhotoEditor
           key={item.id}
@@ -458,6 +479,44 @@ export function Viewer({
         />
       )}
     </div>
+  )
+}
+
+/** The video editor with what it needs from the main process (facts, progress, saving). */
+function VideoEditorHost({ item, onClose, onToast, onSaved }: { item: MediaItem; onClose(): void; onToast(text: string): void; onSaved(id: string, name: string): void }) {
+  const [info, setInfo] = useState<VideoInfo | null>(null)
+  const [progress, setProgress] = useState<number | null>(null)
+  useEffect(() => {
+    let live = true
+    api.videoInfo(item.id).then((r) => {
+      if (!live) return
+      if ('error' in r) onToast(r.error)
+      else setInfo(r)
+    })
+    const off = api.onVideoProgress(setProgress)
+    return () => {
+      live = false
+      off()
+    }
+  }, [item.id])
+  return (
+    <VideoEditor
+      item={item}
+      info={info}
+      progress={progress}
+      onSave={async (recipe) => {
+        const r = await api.videoSave(item.id, recipe)
+        if ('error' in r) onToast(r.error)
+        else if ('id' in r) onSaved(r.id, r.name)
+      }}
+      onSaveFrame={async (seconds) => {
+        const r = await api.videoFrame(item.id, seconds)
+        if ('error' in r) onToast(r.error)
+        else onToast(`Saved the frame as “${r.name}” next to the video`)
+      }}
+      onAbort={() => api.videoCancel()}
+      onClose={onClose}
+    />
   )
 }
 
