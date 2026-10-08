@@ -24,6 +24,7 @@ import type {
 import type { OrganizePlan } from './components/OrganizeView'
 import type { LocationAssignment, LocationSuggestions, PlaceHit, PlaceName } from './components/LocationDialog'
 import type { TagsData } from './components/RatingFilter'
+import type { ExportBridge } from './components/ExportDialog'
 import type { ImportPlan, ImportProgress, ImportResult, ImportScan, ImportScanning, ImportSource } from './components/ImportView'
 
 type Unsubscribe = () => void
@@ -64,6 +65,12 @@ export interface LumenApi {
   createSmartAlbum(name: string, query: string): Promise<string | null>
   /** Items that look like this one, most alike first (the item itself first). */
   findSimilar(id: string): Promise<{ ids: string[]; scores: number[] }>
+  exportDefaults: ExportBridge['defaults']
+  exportPick: ExportBridge['pick']
+  exportStart: ExportBridge['start']
+  exportCancel: ExportBridge['cancel']
+  exportReveal: ExportBridge['reveal']
+  onExportProgress: ExportBridge['onProgress']
   /** Connected phones, cameras and cards. */
   importSources(): Promise<{ sources: ImportSource[]; error: string | null }>
   importPickFolder(): Promise<ImportSource | null>

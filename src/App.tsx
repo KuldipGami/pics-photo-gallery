@@ -20,6 +20,7 @@ import {
   Merge,
   Plus,
   Search,
+  Share,
   Sparkles,
   Tag,
   Trash,
@@ -36,6 +37,7 @@ import { HistoryView, historyTitle } from './components/HistoryView'
 import { MemoriesView, MemoryStrip } from './components/MemoriesView'
 import { MapView, hasPosition, type MapViewState } from './components/MapView'
 import { LocationDialog } from './components/LocationDialog'
+import { ExportDialog, exportResultText } from './components/ExportDialog'
 import {
   importConfirm,
   importDoneText,
@@ -173,6 +175,8 @@ export default function App() {
   /** Gallery filter by stars / tags, and the "Tags" dialog for a selection. */
   const [ratingFilter, setRatingFilter] = useState<RatingFilterValue>(NO_FILTER)
   const [tagging, setTagging] = useState<string[] | null>(null)
+  /** "Export…" for these items; the label names the folder (album, trip, place…). */
+  const [exporting, setExporting] = useState<{ ids: string[]; label: string } | null>(null)
   // ---------- import ----------
   const [importSources, setImportSources] = useState<ImportSource[] | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
@@ -1181,6 +1185,7 @@ export default function App() {
     return ranked.length > 1 ? `${name} and ${ranked.length - 1} more place${ranked.length > 2 ? 's' : ''}` : name
   }
   const located = useMemo(() => shownItems.filter(hasPosition).length, [shownItems])
+  const exportLabel = currentAlbum?.name ?? currentTrip?.title ?? currentPlace?.name ?? (currentPerson ? nameOf(currentPerson) : '')
   const allTags = useMemo(() => tagCounts(shownItems, tagsData), [shownItems, tagsData])
   const viewTags = useMemo(() => tagCounts(baseList, tagsData), [baseList, tagsData])
   /** The selection's rating, or null when the selected items differ. */
@@ -1203,7 +1208,7 @@ export default function App() {
     setQuery('')
     navigate({ kind: 'similar', id })
   }
-  const onMenuAction = useEvent(({ action, id, ids }: { action: 'open' | 'delete' | 'album' | 'similar' | 'location'; id: string; ids: string[] }) => {
+  const onMenuAction = useEvent(({ action, id, ids }: { action: 'open' | 'delete' | 'album' | 'similar' | 'location' | 'export'; id: string; ids: string[] }) => {
     if (action === 'open') {
       const index = visible.findIndex((it) => it.id === id)
       if (index >= 0) openViewer(index)
@@ -1213,6 +1218,8 @@ export default function App() {
       findSimilar(id)
     } else if (action === 'location') {
       setLocating(ids)
+    } else if (action === 'export') {
+      setExporting({ ids, label: exportLabel })
     } else if (action === 'delete') {
       requestDelete(ids)
     }
@@ -1221,7 +1228,7 @@ export default function App() {
 
   // ---------- keyboard ----------
   const onKey = useEvent((e: KeyboardEvent) => {
-    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum || compare || tagging || locating || savingSearch !== null) return
+    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum || compare || tagging || locating || exporting || savingSearch !== null) return
     const key = e.key.toLowerCase()
     const typing = !!(e.target as HTMLElement)?.closest?.('input, textarea')
     if ((e.ctrlKey || e.metaKey) && key === 'f') {
@@ -1468,6 +1475,9 @@ export default function App() {
           onChange={(n) => api.rateItems([...selection], n)}
           label="Rating of the selected items"
         />
+        <button className="btn ghost" title="Copies for sharing: smaller, without location, or as one .zip" onClick={() => setExporting({ ids: [...selection], label: exportLabel })}>
+          <Share size={15} /> Export…
+        </button>
         <button className="btn ghost" title="Add or remove tags (T)" onClick={() => setTagging([...selection])}>
           <Tag size={15} /> Tags…
         </button>
@@ -1658,6 +1668,7 @@ export default function App() {
         {currentAlbum && (
           <PopoverMenu
             items={[
+              { label: 'Export album…', icon: <Share size={15} />, onClick: () => setExporting({ ids: visible.map((it) => it.id), label: currentAlbum.name }) },
               { label: 'Delete album…', icon: <Trash size={15} />, danger: true, onClick: () => deleteAlbum(currentAlbum.id) },
             ]}
             trigger={(open, toggle) => (
@@ -2191,6 +2202,25 @@ export default function App() {
           onRate={(item, n) => api.rateItems([item.id], n)}
           onAddTags={(item, list) => api.editTags([item.id], { add: list })}
           onRemoveTag={(item, tag) => api.editTags([item.id], { remove: [tag] })}
+        />
+      )}
+      {exporting && (
+        <ExportDialog
+          items={exporting.ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it)}
+          label={exporting.label}
+          bridge={{
+            defaults: api.exportDefaults,
+            pick: api.exportPick,
+            start: api.exportStart,
+            cancel: api.exportCancel,
+            onProgress: api.onExportProgress,
+            reveal: api.exportReveal,
+          }}
+          onClose={() => setExporting(null)}
+          onDone={(res) => {
+            const t = exportResultText(res)
+            if (t) toast(t, { error: !res.ok && !res.canceled })
+          }}
         />
       )}
       {tagging && (

@@ -41,6 +41,7 @@ const locSuggest = require('./location-suggest.cjs')
 const { Tags } = require('./tags.cjs')
 const { Importer } = require('./importer.cjs')
 const { OcrIndex } = require('./ocr.cjs')
+const exporter = require('./exporter.cjs')
 const bgx = require('./background.cjs')
 const { WatchAlerts } = require('./watch-alerts.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
@@ -145,6 +146,7 @@ const store = new Store(path.join(userData, 'settings.json'), {
   carryDates: true,
   tagsInFiles: true,
   xmpSidecars: false,
+  exportOptions: null,
   // Import
   importDestination: null,
   importFolderPattern: organize.DEFAULTS.folderPattern,
@@ -501,7 +503,12 @@ const moveDestination = () => store.get('moveDestination') || defaultMoveDestina
 /** Folders never scanned: removed duplicates, HEIC originals kept aside after converting. */
 function excludedFolders() {
   const first = store.get('folders')[0]
-  return [moveDestination(), ...(first ? [path.join(first, 'HEIC originals')] : [])]
+  return [
+    moveDestination(),
+    ...(first ? [path.join(first, 'HEIC originals')] : []),
+    // exports land in Pictures (a library folder by default): they'd all show up as duplicates
+    path.join(app.getPath('pictures'), 'Lumen exports'),
+  ]
 }
 
 function configureDupes() {
@@ -1097,6 +1104,21 @@ ipcMain.handle('edit:date', async (_e, id, ms) => {
 // ---------- duplicates & search ----------
 
 ipcMain.handle('dupes:dismiss', (_e, ids) => dupes.dismiss(idList(ids)))
+// ---------- export & share ----------
+
+const exports_ = exporter.registerIpc({
+  ipcMain,
+  dialog,
+  shell,
+  app,
+  store,
+  getWindow: () => win,
+  itemsFor,
+  getSource: (it) => thumbs.source(it),
+  send,
+  onWritten: (files) => ownFiles(Array.isArray(files) ? files : [files]),
+})
+
 // ---------- import (phones, cameras, cards, folders) ----------
 
 // Only sources Lumen listed (or the user picked) can be scanned: the UI never passes a path.
@@ -1520,6 +1542,7 @@ ipcMain.handle('items:menu', (event, id, ids) => {
       click: () => setFavorites(targets, !allFav),
     },
     { label: multi ? `Add ${targets.length} to album…` : 'Add to album…', click: action('album') },
+    { label: multi ? `Export ${targets.length}…` : 'Export…', click: action('export') },
     { label: multi ? `Set location of ${targets.length}…` : item.meta?.lat !== undefined ? 'Change location…' : 'Add location…', click: action('location') },
     ...(multi
       ? []
@@ -1657,6 +1680,7 @@ app.on('before-quit', () => {
   dupes?.dispose()
   tags?.saveNow()
   importer?.dispose()
+  exports_.cancel()
   alerts?.dispose()
   background?.dispose()
   albums?.saveNow()

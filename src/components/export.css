@@ -1,0 +1,341 @@
+/* Export & share dialog (ExportDialog.tsx). Colours come from the tokens in styles.css (light + dark). */
+
+.modal.exp-modal {
+  width: 600px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+.exp-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.exp-title h3 {
+  margin: 0;
+}
+.exp-title-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ---------- quick choices ---------- */
+
+.exp-presets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.exp-preset {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.exp-preset:hover {
+  border-color: var(--border-strong);
+}
+.exp-preset.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.exp-preset-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.exp-preset-hint {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-2);
+}
+
+/* ---------- options ---------- */
+
+.exp-form {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: start;
+  gap: 14px 14px;
+}
+.exp-label {
+  padding-top: 6px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.exp-seg {
+  flex-wrap: wrap;
+}
+.exp-seg button {
+  gap: 6px;
+}
+.exp-px {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.exp-seg button.active .exp-px {
+  color: var(--text-2);
+}
+.exp-quality {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-top: 10px;
+}
+.exp-quality input[type='range'] {
+  width: 200px;
+  max-width: 100%;
+  accent-color: var(--accent);
+}
+.exp-hint {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.exp-hint.block {
+  display: block;
+  margin-top: 1px;
+}
+.exp-form > div > .exp-hint {
+  margin-top: 6px;
+}
+.exp-switches {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 4px;
+}
+.exp-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.exp-switch .switch {
+  margin-top: 1px;
+}
+.exp-switch .switch:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.exp-select,
+.exp-input {
+  height: 30px;
+  max-width: 100%;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: 13px var(--font);
+}
+.exp-select {
+  width: 280px;
+}
+.exp-input {
+  display: block;
+  width: 280px;
+  margin-top: 8px;
+  background: var(--input);
+  user-select: text;
+}
+.exp-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+.exp-dest {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 10px;
+  padding: 6px 10px 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--hover);
+  color: var(--accent);
+}
+.exp-dest-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl; /* long paths: keep the end (the folder's own name) visible */
+  text-align: left;
+  user-select: text;
+}
+.exp-dest .link {
+  flex-shrink: 0;
+  font-size: 12.5px;
+}
+.exp-dest .link:disabled {
+  opacity: 0.5;
+  text-decoration: none;
+  cursor: default;
+}
+
+/* ---------- notes & footer ---------- */
+
+.exp-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 16px 0 0;
+  padding: 10px 14px 10px 28px;
+  border-radius: 9px;
+  background: var(--hover);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+.exp-actions {
+  align-items: center;
+}
+.exp-estimate {
+  margin-right: auto;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.exp-modal .btn:disabled {
+  opacity: 0.5;
+  filter: none;
+  cursor: default;
+}
+
+/* ---------- running ---------- */
+
+.exp-running {
+  padding-top: 4px;
+}
+.exp-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--hover);
+}
+.exp-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.2s ease-out;
+}
+.exp-running-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text);
+}
+.exp-running-text .spin {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.exp-running-file {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.exp-running-bytes {
+  flex-shrink: 0;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.modal p.exp-note,
+.exp-note {
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+/* ---------- done ---------- */
+
+.exp-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.exp-result svg {
+  flex-shrink: 0;
+}
+.exp-result.ok {
+  background: color-mix(in srgb, #34c759 14%, transparent);
+}
+.exp-result.ok svg {
+  color: #2ea44f;
+}
+.exp-result.partial {
+  background: color-mix(in srgb, #f3b744 18%, transparent);
+}
+.exp-result.partial svg {
+  color: #c4870f;
+}
+.exp-result.bad {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+.exp-result.bad svg {
+  color: var(--danger);
+}
+.exp-errors {
+  margin-top: 12px;
+  font-size: 12.5px;
+}
+.exp-errors ul {
+  max-height: 160px;
+  margin: 8px 0 0;
+  padding: 8px 12px 8px 26px;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: var(--hover);
+  color: var(--text-2);
+  user-select: text;
+}
+
+/* ---------- narrow windows ---------- */
+
+@media (max-width: 680px) {
+  .exp-presets {
+    grid-template-columns: 1fr;
+  }
+  .exp-form {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+  .exp-label {
+    padding-top: 8px;
+  }
+  .exp-select,
+  .exp-input {
+    width: 100%;
+  }
+}
