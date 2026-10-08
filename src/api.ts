@@ -21,6 +21,7 @@ import type {
   WatchAlert,
 } from './types'
 import type { OrganizePlan } from './components/OrganizeView'
+import type { LocationAssignment, LocationSuggestions, PlaceHit, PlaceName } from './components/LocationDialog'
 
 type Unsubscribe = () => void
 
@@ -58,6 +59,12 @@ export interface LumenApi {
   createSmartAlbum(name: string, query: string): Promise<string | null>
   /** Items that look like this one, most alike first (the item itself first). */
   findSimilar(id: string): Promise<{ ids: string[]; scores: number[] }>
+  /** Where these were probably taken, from photos taken within `hours` of them. */
+  suggestLocations(ids: string[], hours: number): Promise<LocationSuggestions>
+  searchPlaces(query: string): Promise<PlaceHit[]>
+  describePlace(lat: number, lon: number): Promise<PlaceName | null>
+  /** JPEGs get the place in their EXIF (undo from History); other files keep it in Lumen. */
+  setLocations(assignments: LocationAssignment[], label: string): Promise<{ done: number; kept: { name: string; reason: string }[]; errors: string[] }>
   renameAlbum(id: string, name: string): Promise<void>
   deleteAlbum(id: string): Promise<void>
   /** Resolves to how many were new to the album. */

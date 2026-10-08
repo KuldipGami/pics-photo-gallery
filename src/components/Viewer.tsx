@@ -45,6 +45,7 @@ interface Props {
   liveOf(itemId: string): MediaItem | undefined
   /** An edited copy was saved (it appears in the library a moment later). */
   onEdited(original: MediaItem, id: string, name: string): void
+  onLocate?(item: MediaItem): void
 }
 
 const SLIDE_MS = 4000
@@ -81,6 +82,7 @@ export function Viewer({
   onOpenPlace,
   liveOf,
   onEdited,
+  onLocate,
 }: Props) {
   const item = items[index]
   const [editing, setEditing] = useState(false)
@@ -399,6 +401,7 @@ export function Viewer({
             onHighlight={setHighlight}
             onClose={() => setShowInfo(false)}
             onToast={onToast}
+            onLocate={onLocate}
           />
         )}
       </div>

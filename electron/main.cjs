@@ -7,7 +7,7 @@ process.env.UV_THREADPOOL_SIZE ??= String(Math.max(4, Math.min(20, cores)))
 
 const path = require('node:path')
 const fs = require('node:fs')
-const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, nativeImage, Menu, clipboard } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, nativeImage, Menu, clipboard, session } = require('electron')
 
 if (process.env.LUMEN_USER_DATA) app.setPath('userData', path.resolve(process.env.LUMEN_USER_DATA))
 
@@ -36,6 +36,8 @@ const cleanup = require('./cleanup.cjs')
 const edits = require('./edits.cjs')
 const { isJpeg } = require('./jpeg-exif.cjs')
 const organize = require('./organize.cjs')
+const { Locations, assignLocations, historyNote } = require('./locations.cjs')
+const locSuggest = require('./location-suggest.cjs')
 const bgx = require('./background.cjs')
 const { WatchAlerts } = require('./watch-alerts.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
@@ -185,6 +187,8 @@ let placesData = { places: [], byItem: {} }
 let editor
 /** @type {History} */
 let history
+/** User-set places for files that can't store one (HEIC, PNG, videos). */
+let userLocations
 /** @type {WatchAlerts} */
 let alerts
 /** @type {import('./background.cjs').Background} */
@@ -230,6 +234,7 @@ function startServices() {
   history = new History(path.join(userData, 'history.json'))
   history.on('changed', () => send('history:changed', history.list()))
   albums = new Albums(path.join(userData, 'albums.json'))
+  userLocations = new Locations(path.join(userData, 'locations.json'))
   places = new Places(path.join(MODELS_DIR, 'places.json.gz'))
   editor = new Editor({ thumbs })
 
@@ -237,12 +242,16 @@ function startServices() {
   const updatePlaces = () => {
     clearTimeout(placesTimer)
     placesTimer = setTimeout(() => {
-      placesData = places.group(library.list)
+      placesData = places.group(listed())
       send('places:changed', placesData)
     }, 400)
   }
+  userLocations.on('changed', () => {
+    send('library:changed', { items: listed() })
+    updatePlaces()
+  })
   library.on('changed', () => {
-    send('library:changed', { items: library.list })
+    send('library:changed', { items: listed() })
     thumbs.warmUp(library.list)
     updatePlaces()
   })
@@ -619,8 +628,11 @@ ipcMain.handle('app:state', async () => {
   return appState()
 })
 
+/** The library as the UI sees it: with the places the user set for files that can't hold one. */
+const listed = () => userLocations.apply(library.list)
+
 const appState = () => ({
-  items: library.list,
+  items: listed(),
   status: library.status(),
   settings: settingsPayload(),
   people: faces.snapshot(),
@@ -834,6 +846,7 @@ async function relocate(pairs) {
   library.save()
   faces.remapIds(ids)
   albums.remapPaths(paths)
+  userLocations.remap(pairs)
   dupes.saveSoon(2000)
   smart.saveSoon(2000)
   videoFrames.saveSoon(2000)
@@ -1019,6 +1032,34 @@ ipcMain.handle('edit:date', async (_e, id, ms) => {
 // ---------- duplicates & search ----------
 
 ipcMain.handle('dupes:dismiss', (_e, ids) => dupes.dismiss(idList(ids)))
+// ---------- locations ----------
+
+ipcMain.handle('locations:suggest', (_e, ids, hours) =>
+  locSuggest.suggestLocations(itemsFor(idList(ids)), listed(), { window: Math.min(Math.max(Number(hours) || 3, 0.25), 72) * 3_600_000, places }),
+)
+ipcMain.handle('locations:search', (_e, q) => (typeof q === 'string' ? locSuggest.searchPlaces(places, q.slice(0, 100)) : []))
+ipcMain.handle('locations:describe', (_e, lat, lon) => locSuggest.describe(places, Number(lat), Number(lon)))
+ipcMain.handle('locations:set', async (_e, assignments, label) => {
+  const targets = (Array.isArray(assignments) ? assignments : [])
+    .map((a) => ({ item: library.get(a?.id), lat: Number(a?.lat), lon: Number(a?.lon) }))
+    .filter((t) => t.item)
+  if (!targets.length) return { done: 0, kept: [], errors: [] }
+  ownFiles(targets.map((t) => t.item.path))
+  const res = await assignLocations(targets, { store: userLocations, backupsDir: backupsDir() })
+  if (res.files.length) history.add({ kind: 'edited', note: historyNote(targets, typeof label === 'string' ? label.slice(0, 120) : ''), files: res.files })
+  // Only the place changed, not the picture: keep previews, faces and search vectors; just update the entry
+  // (with the new size, so the next scan doesn't read it again).
+  for (const w of res.written) {
+    const it = library.get(w.id)
+    if (it) Object.assign(it, { size: w.size ?? it.size, meta: { ...it.meta, lat: w.lat, lon: w.lon } })
+  }
+  if (res.written.length) {
+    library.emit('changed')
+    library.save()
+  }
+  return { done: res.written.length + res.stored.length, kept: res.kept, errors: res.errors }
+})
+
 ipcMain.handle('smart:similar', (_e, id) => (typeof id === 'string' ? smart.similar(id) : { ids: [], scores: [] }))
 ipcMain.handle('smart:search', (_e, query) => (typeof query === 'string' ? smart.search(query.slice(0, 200)) : { ids: [], scores: [] }))
 
@@ -1179,8 +1220,8 @@ ipcMain.handle('history:restore', async (_e, id) => {
   let restored = 0
   if (entry.kind === 'edited') {
     const done = await edits.restoreBackups(entry.files)
-    restored = done.length
-    if (restored) await refreshEdited(done.map((f) => f.from))
+    restored = done.length + userLocations.revert(entry.files)
+    if (done.length) await refreshEdited(done.map((f) => f.from))
   } else if (['moved', 'renamed', 'converted', 'dates'].includes(entry.kind)) {
     await withScansHeld(async () => {
       if (entry.kind === 'moved' || entry.kind === 'renamed') {
@@ -1288,6 +1329,7 @@ ipcMain.handle('items:menu', (event, id, ids) => {
       click: () => setFavorites(targets, !allFav),
     },
     { label: multi ? `Add ${targets.length} to album…` : 'Add to album…', click: action('album') },
+    { label: multi ? `Set location of ${targets.length}…` : item.meta?.lat !== undefined ? 'Change location…' : 'Add location…', click: action('location') },
     ...(multi
       ? []
       : [
@@ -1365,6 +1407,9 @@ app.whenReady().then(async () => {
     fs.writeFileSync(INSTANCE_FILE, JSON.stringify({ version: VERSION, pid: process.pid }))
   } catch {}
   if (process.platform === 'win32') app.setAppUserModelId('app.lumen.gallery')
+  session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ['https://tile.openstreetmap.org/*'] }, (details, done) => {
+    done({ requestHeaders: { ...details.requestHeaders, 'User-Agent': `Lumen/${VERSION} (Windows photo gallery)` } })
+  })
   Menu.setApplicationMenu(null)
   startServices()
   handleProtocol({ library, thumbs })
@@ -1379,8 +1424,8 @@ app.whenReady().then(async () => {
     },
     () => {},
   )
-  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), history.load()])
-  placesData = places.group(library.list)
+  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), history.load(), userLocations.load()])
+  placesData = places.group(listed())
   if (launchArgs.folder) await openFolder(launchArgs.folder)
   if (launchArgs.autoscan) showDuplicates()
   markServicesReady()

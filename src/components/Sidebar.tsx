@@ -1,4 +1,4 @@
-import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, LoaderCircle, MapPin, Plus, RefreshCw, Settings, Film, FolderTree, Sparkles, Users } from 'lucide-react'
+import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, LoaderCircle, Map as MapIcon, MapPin, Plus, RefreshCw, Settings, Film, FolderTree, Sparkles, Users } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
@@ -63,6 +63,7 @@ export function Sidebar(props: Props) {
           {item('memories', 'Memories', <Sparkles size={18} />, counts.trips)}
           {item('people', 'People', <Users size={18} />, counts.people)}
           {item('places', 'Places', <MapPin size={18} />, counts.places)}
+          {item('map', 'Map', <MapIcon size={18} />)}
           {item('recent', 'Recently added', <Clock size={18} />)}
         </div>
         <div className="nav-heading">Library</div>

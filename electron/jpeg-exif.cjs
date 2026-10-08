@@ -1,21 +1,30 @@
 const fsp = require('node:fs/promises')
 
-// Lossless JPEG metadata edits (ported from DupeLens' JpegExif): changes the date taken and the
-// orientation stored in a JPEG without touching the compressed image data (SOS…EOI is copied byte
-// for byte). Existing EXIF values are patched in place. When the EXIF block lacks a field, the block
-// is grown append-only: every existing byte keeps its offset (so GPS, the IFD1 thumbnail and maker
-// notes stay valid), and only the IFD that gains an entry is copied, with that entry, to the end of
-// the block. A file with no EXIF at all (typical for WhatsApp) gets a small new EXIF block after
-// APP0/JFIF.
+// Lossless JPEG metadata edits (ported from DupeLens' JpegExif): changes the date taken, the
+// orientation and the GPS position stored in a JPEG without touching the compressed image data
+// (SOS…EOI is copied byte for byte). Existing EXIF values are patched in place. When the EXIF block
+// lacks a field, the block is grown append-only: every existing byte keeps its offset (so GPS, the
+// IFD1 thumbnail and maker notes stay valid), and only the IFD that gains an entry is copied, with
+// that entry, to the end of the block. A file with no EXIF at all (typical for WhatsApp) gets a
+// small new EXIF block after APP0/JFIF.
 
 const TAG_ORIENTATION = 0x0112
 const TAG_DATETIME = 0x0132
 const TAG_EXIF_POINTER = 0x8769
+const TAG_GPS_POINTER = 0x8825
 const TAG_DATE_ORIGINAL = 0x9003
 const TAG_DATE_DIGITIZED = 0x9004
+// GPS IFD
+const GPS_VERSION = 0x0000
+const GPS_LAT_REF = 0x0001
+const GPS_LAT = 0x0002
+const GPS_LON_REF = 0x0003
+const GPS_LON = 0x0004
+const BYTE = 1
 const ASCII = 2
 const SHORT = 3
 const LONG = 4
+const RATIONAL = 5
 
 const MSG = {
   notJpeg: 'Only JPEG photos can be changed without re-saving.',
@@ -24,6 +33,7 @@ const MSG = {
   noRoom: 'This photo has no room to add the field without re-saving it.',
   badDate: "The date isn't valid.",
   badOrientation: 'The orientation must be a number from 1 to 8.',
+  badLocation: "The location isn't valid.",
   busy: 'The photo is open in another program. Close it and try again.',
 }
 
@@ -53,6 +63,47 @@ function exifDate(taken) {
 
 /** 20 bytes: the 19-character date + NUL. */
 const dateBytes = (text) => Buffer.concat([Buffer.from(text, 'latin1'), Buffer.alloc(1)])
+
+/** { lat, lon } in degrees (WGS 84), or null when missing or out of range. */
+function validGps(gps) {
+  const lat = Number(gps?.lat)
+  const lon = Number(gps?.lon)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null
+  return { lat, lon }
+}
+
+/** 24 bytes: degrees, minutes, seconds as three RATIONALs (d/1, m/1, s·10⁴/10⁴ — about 3 mm). */
+function dmsBytes(value, le) {
+  const total = Math.round(Math.abs(value) * 36_000_000) // in 1/10000 arc seconds
+  const parts = [
+    [Math.floor(total / 36_000_000), 1],
+    [Math.floor((total % 36_000_000) / 600_000), 1],
+    [total % 600_000, 10_000],
+  ]
+  const b = Buffer.alloc(24)
+  parts.forEach(([n, d], i) => {
+    wr32(b, i * 8, n, le)
+    wr32(b, i * 8 + 4, d, le)
+  })
+  return b
+}
+
+/** A GPS reference entry ("N"/"S"/"E"/"W" + NUL), stored inline. */
+function refEntry(tag, letter, le) {
+  const e = entryBytes(tag, ASCII, 2, 0, le)
+  e.write(letter, 8, 'latin1')
+  return e
+}
+
+/** GPSVersionID 2.3.0.0 (four BYTEs, inline). */
+function versionEntry(le) {
+  const e = entryBytes(GPS_VERSION, BYTE, 4, 0, le)
+  e.set([2, 3, 0, 0], 8)
+  return e
+}
+
+const latRef = (gps) => (gps.lat < 0 ? 'S' : 'N')
+const lonRef = (gps) => (gps.lon < 0 ? 'W' : 'E')
 
 /**
  * Walks the JPEG header up to the start of scan. Returns null for a broken file, otherwise
@@ -125,8 +176,9 @@ function ifdBytes(entries, next, le) {
 /**
  * Applies the edit to a copy of the TIFF data from an EXIF block. Returns { tiff } (same length
  * when everything could be patched in place, longer when fields had to be added) or { error }.
+ * `gps`: { lat, lon } | null.
  */
-function editTiff(src, date, orientation) {
+function editTiff(src, date, orientation, gps = null) {
   if (src.length < 8) return { error: MSG.unreadable }
   const order = src.toString('latin1', 0, 2)
   if (order !== 'II' && order !== 'MM') return { error: MSG.unreadable }
@@ -165,8 +217,36 @@ function editTiff(src, date, orientation) {
     digitizedOk = writeAscii(digitizedEntry)
   }
 
+  // GPS: a photo that already has a position gets the new one written over it. The references are
+  // inline values (the 12-byte entry is simply rewritten); latitude/longitude are patched in place
+  // when they are three RATIONALs, otherwise they are redirected to new values further down.
+  const gpsPtr = gps ? find(ifd0, TAG_GPS_POINTER) : null
+  const gpsIfd = gpsPtr ? readIfd(t, rd32(t, gpsPtr.at + 8, le), le) : null
+  const gpsEntries = {
+    latRef: find(gpsIfd, GPS_LAT_REF),
+    lat: find(gpsIfd, GPS_LAT),
+    lonRef: find(gpsIfd, GPS_LON_REF),
+    lon: find(gpsIfd, GPS_LON),
+  }
+  const writeDms = (e, value) => {
+    if (!e || e.type !== RATIONAL || e.count !== 3) return false
+    const off = rd32(t, e.at + 8, le)
+    if (off < 8 || off + 24 > t.length) return false
+    dmsBytes(value, le).copy(t, off)
+    return true
+  }
+  let latOk = true
+  let lonOk = true
+  if (gps) {
+    if (gpsEntries.latRef) refEntry(GPS_LAT_REF, latRef(gps), le).copy(t, gpsEntries.latRef.at)
+    if (gpsEntries.lonRef) refEntry(GPS_LON_REF, lonRef(gps), le).copy(t, gpsEntries.lonRef.at)
+    latOk = writeDms(gpsEntries.lat, gps.lat)
+    lonOk = writeDms(gpsEntries.lon, gps.lon)
+  }
+  const gpsDone = !gps || (latOk && lonOk && !!gpsEntries.latRef && !!gpsEntries.lonRef)
+
   const orientationDone = orientation == null || !!orientEntry
-  if (orientationDone && originalOk) return { tiff: t } // everything fitted
+  if (orientationDone && originalOk && gpsDone) return { tiff: t } // everything fitted
 
   // 2. Append-only growth. Existing bytes never move; new values and the IFDs that gain an entry
   //    are added after them, and the pointers to those IFDs are redirected.
@@ -205,6 +285,26 @@ function editTiff(src, date, orientation) {
     }
   }
 
+  if (!gpsDone) {
+    const dms = (tag, value) => entryBytes(tag, RATIONAL, 3, append(dmsBytes(value, le)), le)
+    // latitude/longitude entries in an unexpected form are pointed at new values, in place
+    if (gpsEntries.lat && !latOk) dms(GPS_LAT, gps.lat).copy(t, gpsEntries.lat.at)
+    if (gpsEntries.lon && !lonOk) dms(GPS_LON, gps.lon).copy(t, gpsEntries.lon.at)
+    const gpsAdded = []
+    if (!gpsIfd) gpsAdded.push(versionEntry(le))
+    if (!gpsEntries.latRef) gpsAdded.push(refEntry(GPS_LAT_REF, latRef(gps), le))
+    if (!gpsEntries.lat) gpsAdded.push(dms(GPS_LAT, gps.lat))
+    if (!gpsEntries.lonRef) gpsAdded.push(refEntry(GPS_LON_REF, lonRef(gps), le))
+    if (!gpsEntries.lon) gpsAdded.push(dms(GPS_LON, gps.lon))
+    if (gpsAdded.length) {
+      const old = (gpsIfd?.entries ?? []).map((e) => t.subarray(e.at, e.at + 12))
+      const newGps = append(ifdBytes([...old, ...gpsAdded], gpsIfd?.next ?? 0, le))
+      const pointer = entryBytes(TAG_GPS_POINTER, LONG, 1, newGps, le)
+      if (gpsPtr) pointer.copy(t, gpsPtr.at)
+      else ifd0Added.push(pointer)
+    }
+  }
+
   if (ifd0Added.length) {
     const old = ifd0.entries.map((e) => t.subarray(e.at, e.at + 12))
     wr32(t, 4, append(ifdBytes([...old, ...ifd0Added], ifd0.next, le)), le)
@@ -212,26 +312,44 @@ function editTiff(src, date, orientation) {
   return { tiff: Buffer.concat([t, ...parts]) }
 }
 
-/** A minimal little-endian EXIF APP1 segment with orientation and (optionally) the date taken. */
-function buildExifSegment(date, orientation) {
+/**
+ * A minimal little-endian EXIF APP1 segment with orientation and (optionally) the date taken and a
+ * GPS position. Layout: header · IFD0 · Exif IFD · GPS IFD · three date strings · GPS rationals.
+ */
+function buildExifSegment(date, orientation, gps = null) {
   const le = true
   const hasDate = date != null
-  const ifd0Count = hasDate ? 3 : 1
+  const ifd0Count = 1 + (hasDate ? 2 : 0) + (gps ? 1 : 0)
   const exifOffset = 8 + 2 + ifd0Count * 12 + 4
-  const dataOffset = exifOffset + (hasDate ? 2 + 2 * 12 + 4 : 0) // three 20-byte date strings follow
+  const gpsOffset = exifOffset + (hasDate ? 2 + 2 * 12 + 4 : 0)
+  const dataOffset = gpsOffset + (gps ? 2 + 5 * 12 + 4 : 0) // three 20-byte date strings follow
+  const gpsData = dataOffset + (hasDate ? 60 : 0) // then latitude and longitude, 24 bytes each
   const ifd0 = [entryBytes(TAG_ORIENTATION, SHORT, 1, orientation, le)]
   if (hasDate) {
     ifd0.push(entryBytes(TAG_DATETIME, ASCII, 20, dataOffset, le))
     ifd0.push(entryBytes(TAG_EXIF_POINTER, LONG, 1, exifOffset, le))
   }
+  if (gps) ifd0.push(entryBytes(TAG_GPS_POINTER, LONG, 1, gpsOffset, le))
   const parts = [Buffer.from([0x49, 0x49, 42, 0, 8, 0, 0, 0]), ifdBytes(ifd0, 0, le)]
   if (hasDate) {
     const exif = [
       entryBytes(TAG_DATE_ORIGINAL, ASCII, 20, dataOffset + 20, le),
       entryBytes(TAG_DATE_DIGITIZED, ASCII, 20, dataOffset + 40, le),
     ]
-    parts.push(ifdBytes(exif, 0, le), dateBytes(date), dateBytes(date), dateBytes(date))
+    parts.push(ifdBytes(exif, 0, le))
   }
+  if (gps) {
+    const entries = [
+      versionEntry(le),
+      refEntry(GPS_LAT_REF, latRef(gps), le),
+      entryBytes(GPS_LAT, RATIONAL, 3, gpsData, le),
+      refEntry(GPS_LON_REF, lonRef(gps), le),
+      entryBytes(GPS_LON, RATIONAL, 3, gpsData + 24, le),
+    ]
+    parts.push(ifdBytes(entries, 0, le))
+  }
+  if (hasDate) parts.push(dateBytes(date), dateBytes(date), dateBytes(date))
+  if (gps) parts.push(dmsBytes(gps.lat, le), dmsBytes(gps.lon, le))
   const tiff = Buffer.concat(parts)
   const head = Buffer.from([0xff, 0xe1, 0, 0, 0x45, 0x78, 0x69, 0x66, 0, 0])
   head.writeUInt16BE(8 + tiff.length, 2)
@@ -244,14 +362,16 @@ const mpfBefore = (data, scan, pos) =>
 
 /**
  * The new file contents, or { error }. Pure: works on a buffer, never on disk.
- * `taken`: Date | ms | null, `orientation`: 1..8 | null.
+ * `taken`: Date | ms | null, `orientation`: 1..8 | null, `gps`: { lat, lon } (degrees) | null.
  */
-function applyExif(data, { taken, orientation } = {}) {
+function applyExif(data, { taken, orientation, gps } = {}) {
   if (!Buffer.isBuffer(data) || data.length < 4 || data[0] !== 0xff || data[1] !== 0xd8) return { error: MSG.invalid }
   const date = taken == null ? null : exifDate(taken)
   if (taken != null && date == null) return { error: MSG.badDate }
   if (orientation != null && !(Number.isInteger(orientation) && orientation >= 1 && orientation <= 8))
     return { error: MSG.badOrientation }
+  const position = gps == null ? null : validGps(gps)
+  if (gps != null && !position) return { error: MSG.badLocation }
   const scan = scanJpeg(data)
   if (!scan) return { error: MSG.invalid }
 
@@ -259,11 +379,11 @@ function applyExif(data, { taken, orientation } = {}) {
   if (!scan.exif) {
     // No EXIF: insert a minimal block right after SOI / APP0.
     if (mpfBefore(data, scan, scan.insertAt)) return { error: MSG.noRoom }
-    const block = buildExifSegment(date, orientation ?? 1)
+    const block = buildExifSegment(date, orientation ?? 1, position)
     result = Buffer.concat([data.subarray(0, scan.insertAt), block, data.subarray(scan.insertAt)])
   } else {
     const { seg, tiff, length } = scan.exif
-    const edited = editTiff(data.subarray(tiff, tiff + length), date, orientation)
+    const edited = editTiff(data.subarray(tiff, tiff + length), date, orientation, position)
     if (edited.error) return edited
     if (edited.tiff.length === length) {
       result = Buffer.from(data)
@@ -341,14 +461,14 @@ async function replaceFile(file, bytes) {
 }
 
 /**
- * Changes the date taken and/or orientation of a JPEG losslessly.
+ * Changes the date taken, orientation and/or GPS position ({ lat, lon }) of a JPEG losslessly.
  * Resolves null on success, otherwise a short reason (never rejects).
  */
-async function writeExif(file, { taken, orientation } = {}) {
+async function writeExif(file, { taken, orientation, gps } = {}) {
   if (!isJpeg(file)) return MSG.notJpeg
-  if (taken == null && orientation == null) return null
+  if (taken == null && orientation == null && gps == null) return null
   try {
-    const out = applyExif(await fsp.readFile(file), { taken, orientation })
+    const out = applyExif(await fsp.readFile(file), { taken, orientation, gps })
     if (out.error) return out.error
     await replaceFile(file, out.data)
     return null
@@ -398,4 +518,4 @@ function rotateOrientation(orientation, quarterTurnsCW) {
   return (mirror ? { 0: 2, 90: 7, 180: 4, 270: 5 } : { 0: 1, 90: 6, 180: 3, 270: 8 })[angle]
 }
 
-module.exports = { isJpeg, writeExif, applyExif, readOrientation, rotateOrientation, replaceWithTemp, MSG }
+module.exports = { isJpeg, writeExif, applyExif, readOrientation, rotateOrientation, replaceWithTemp, validGps, MSG }

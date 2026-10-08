@@ -3877,3 +3877,23 @@ html[data-platform='darwin'] .titlebar {
   flex: none;
   color: var(--text-3);
 }
+
+/* ---------- map ---------- */
+.trip-map {
+  margin: 0 28px 12px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.info-row-btn {
+  width: 100%;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.info-row-btn:hover .info-primary {
+  color: var(--accent);
+}

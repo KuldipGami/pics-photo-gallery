@@ -2,9 +2,9 @@ const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const path = require('node:path')
 const crypto = require('node:crypto')
-const { isJpeg, writeExif, readOrientation, rotateOrientation, replaceWithTemp, MSG } = require('./jpeg-exif.cjs')
+const { isJpeg, writeExif, readOrientation, rotateOrientation, replaceWithTemp, validGps, MSG } = require('./jpeg-exif.cjs')
 
-// In-place photo edits (date taken, rotation), ported from DupeLens' EditService. Every edit first
+// In-place photo edits (date taken, rotation, location), ported from DupeLens' EditService. Every edit first
 // copies the original into the backups folder, so History can put the exact original back.
 // History record per file: { from: photo, to: its backup, size, oldMtime, restored? }.
 
@@ -84,6 +84,21 @@ async function rotate(item, quarterTurnsCW, backupsDir) {
 }
 
 /**
+ * Writes a GPS position ({ lat, lon } in degrees) into a JPEG, losslessly; the picture and the
+ * file's modified date stay as they are. Resolves { file, size } (size = the file's new size, so
+ * the library entry can be updated without reading the photo again) or { error }.
+ */
+async function setLocation(item, location, backupsDir) {
+  const gps = validGps(location)
+  if (!gps) return { error: MSG.badLocation }
+  if (!isJpeg(item.ext || item.path)) return { error: MSG.notJpeg }
+  const res = await editWithBackup(item, backupsDir, (p) => writeExif(p, { gps }), { keepTimes: true })
+  if (res.error) return res
+  const st = await fsp.stat(item.path).catch(() => null)
+  return { ...res, size: st?.size ?? null }
+}
+
+/**
  * Puts backed-up originals back over edited files (with their old modified date) and deletes the
  * backups. Marks each history file `restored`; returns the files that were restored.
  */
@@ -129,4 +144,4 @@ async function deleteBackups(entries, backupsDir) {
   return n
 }
 
-module.exports = { editWithBackup, setDateTaken, rotate, restoreBackups, deleteBackups }
+module.exports = { editWithBackup, setDateTaken, rotate, setLocation, restoreBackups, deleteBackups }

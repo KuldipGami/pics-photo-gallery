@@ -1,6 +1,8 @@
 export type MediaType = 'image' | 'video'
 
 export interface MediaMeta {
+  /** The place was set in Lumen (the file can't hold one). */
+  userLocation?: true
   make?: string
   model?: string
   lens?: string
@@ -338,6 +340,8 @@ export type View =
   | { kind: 'albums' }
   | { kind: 'album'; id: string }
   | { kind: 'similar'; id: string }
+  | { kind: 'map' }
+  | { kind: 'map-items'; ids: string[]; label: string }
   | { kind: 'memories' }
   | { kind: 'trip'; id: string }
   | { kind: 'cleanup' }

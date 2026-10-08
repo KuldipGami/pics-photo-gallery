@@ -1,0 +1,421 @@
+/* Map view (MapView.tsx) and the small map in the Add location dialog. */
+
+.lmap-wrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  min-height: 0;
+  container-type: inline-size;
+}
+.lmap-wrap.compact {
+  position: relative;
+  height: var(--lmap-h, 260px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.lmap-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.lmap {
+  position: absolute;
+  inset: 0;
+  background: var(--surface-3);
+  font: 12px/1.4 var(--font);
+  outline: none;
+}
+.lmap .leaflet-tile-pane {
+  transition: filter 0.2s;
+}
+/* At 125 % / 150 % display scaling Chromium leaves hairlines between rows of tiles; an invisible
+   outline makes it draw each tile's edges solid (measured: seams down to the noise level). */
+.lmap .leaflet-tile {
+  outline: 1px solid transparent;
+}
+
+/* Dark mode: OpenStreetMap's tiles, inverted and muted (photos and controls aren't touched). */
+@media (prefers-color-scheme: dark) {
+  .lmap {
+    background: #1d1f24;
+  }
+  .lmap .leaflet-tile-pane {
+    filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.86) saturate(0.55);
+  }
+}
+
+/* ---------- Leaflet controls in Lumen's colours ---------- */
+
+.lmap .leaflet-bar {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+}
+.lmap .leaflet-bar a,
+.lmap .leaflet-bar a:hover {
+  width: 32px;
+  height: 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font: 400 19px/31px var(--font);
+}
+.lmap .leaflet-bar a:hover {
+  background: color-mix(in srgb, var(--surface-2) 88%, var(--text));
+}
+.lmap .leaflet-bar a:last-child {
+  border-bottom: 0;
+}
+.lmap .leaflet-bar a.leaflet-disabled {
+  background: var(--surface-2);
+  color: var(--text-3);
+  opacity: 0.6;
+}
+.lmap .leaflet-control-zoom {
+  margin: 12px 0 0 12px;
+}
+.lmap .leaflet-control-attribution {
+  padding: 1px 6px;
+  border-top-left-radius: 6px;
+  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
+  color: var(--text-2);
+  font-size: 10.5px;
+  backdrop-filter: blur(4px);
+}
+.lmap .leaflet-control-attribution a {
+  color: var(--accent);
+}
+.lmap .leaflet-container a {
+  color: var(--accent);
+}
+
+/* ---------- photo markers ---------- */
+
+.lmap .lmap-marker,
+.lmap .lmap-cluster {
+  background: none;
+  border: 0;
+}
+.lmap-thumb {
+  position: relative;
+  box-sizing: border-box;
+  isolation: isolate;
+  border: 2.5px solid #fff;
+  border-radius: 10px;
+  background: #c9ccd3;
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.35);
+  transition: transform 0.12s ease-out;
+}
+.lmap-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 7.5px;
+  object-fit: cover;
+  -webkit-user-drag: none;
+}
+/* a cluster: a little stack of photos */
+.lmap-cluster .lmap-thumb::before {
+  content: '';
+  position: absolute;
+  inset: -2.5px;
+  z-index: -1;
+  border: 2.5px solid #fff;
+  border-radius: 10px;
+  background: #b9bdc6;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.3);
+  transform: rotate(7deg) translate(3px, 1px);
+}
+.leaflet-marker-icon:hover .lmap-thumb {
+  transform: scale(1.07);
+}
+.lmap-count {
+  position: absolute;
+  top: -9px;
+  right: -10px;
+  min-width: 23px;
+  height: 23px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  border: 2px solid #fff;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font: 600 11.5px/19px var(--font);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+.lmap-video {
+  position: absolute;
+  left: 5px;
+  bottom: 5px;
+  width: 0;
+  height: 0;
+  border-left: 8px solid #fff;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7));
+}
+@media (prefers-color-scheme: dark) {
+  .lmap-thumb,
+  .lmap-cluster .lmap-thumb::before,
+  .lmap-count {
+    border-color: #e8e9ec;
+  }
+  .lmap-thumb {
+    background: #3a3c43;
+  }
+  .lmap-cluster .lmap-thumb::before {
+    background: #4a4d55;
+  }
+}
+
+/* ---------- tools, loading, empty ---------- */
+
+.lmap-tools {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1000;
+  display: flex;
+  gap: 6px;
+}
+.lmap-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  min-width: 34px;
+  justify-content: center;
+  padding: 0 9px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+}
+.lmap-tool:hover {
+  background: color-mix(in srgb, var(--surface-2) 88%, var(--text));
+}
+.lmap-tool.on {
+  color: var(--accent);
+}
+.lmap-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1000;
+  height: 3px;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+.lmap-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 900;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  pointer-events: none;
+}
+.lmap-empty > div {
+  max-width: 340px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  box-shadow: var(--shadow);
+  text-align: center;
+  pointer-events: auto;
+}
+.lmap-empty h3 {
+  margin: 8px 0 4px;
+  font: 600 15px var(--font-display);
+}
+.lmap-empty p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.lmap-empty svg {
+  color: var(--text-3);
+}
+.lmap-wrap.compact .lmap-empty > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 18px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.lmap-wrap.compact .lmap-empty h3 {
+  margin: 0;
+  font: 500 13px var(--font);
+}
+
+/* ---------- cluster card (popup) ---------- */
+
+.lmap .lmap-popup .leaflet-popup-content-wrapper {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+.lmap .lmap-popup .leaflet-popup-content {
+  width: auto !important;
+  margin: 0;
+  font: 13px/1.4 var(--font);
+}
+.lmap .lmap-popup .leaflet-popup-tip {
+  background: var(--surface-2);
+  box-shadow: none;
+  border: 1px solid var(--border);
+}
+.lmap-card {
+  width: 292px;
+  padding: 12px 12px 12px 14px;
+  box-sizing: border-box;
+  user-select: none;
+}
+.lmap-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.lmap-card-titles {
+  flex: 1;
+  min-width: 0;
+}
+.lmap-card-title {
+  font: 600 14.5px/1.3 var(--font-display);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lmap-card-sub {
+  margin-top: 1px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.lmap-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+.lmap-cell {
+  position: relative;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: var(--surface-3);
+  overflow: hidden;
+  cursor: pointer;
+}
+.lmap-cell img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.15s;
+}
+.lmap-cell:hover img {
+  transform: scale(1.05);
+}
+.lmap-cell .lmap-more {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font: 600 15px var(--font-display);
+}
+.lmap-cell .lmap-video {
+  left: 6px;
+  bottom: 6px;
+}
+.lmap-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 10px;
+}
+.lmap-card-actions .btn {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+/* ---------- "In this area" panel ---------- */
+
+.lmap-panel {
+  display: flex;
+  flex-direction: column;
+  width: 296px;
+  flex-shrink: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+.lmap-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 14px 10px 16px;
+}
+.lmap-panel-head h3 {
+  margin: 0;
+  font: 600 15px var(--font-display);
+}
+.lmap-panel-head span {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.lmap-panel-head .btn {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+.lmap-panel-scroll {
+  flex: 1;
+  min-height: 0;
+  padding: 0 14px 14px 16px;
+  overflow-y: auto;
+}
+.lmap-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+}
+.lmap-panel-grid .lmap-cell {
+  border-radius: 4px;
+}
+.lmap-panel-more {
+  padding: 12px 0 2px;
+  text-align: center;
+  font-size: 12.5px;
+}
+.lmap-panel-empty {
+  padding: 24px 18px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+/* a narrow window: the map gets all the room */
+@container (max-width: 620px) {
+  .lmap-panel {
+    display: none;
+  }
+}

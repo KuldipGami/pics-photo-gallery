@@ -30,6 +30,8 @@ interface Props {
   onHighlight(box: FaceBox | null): void
   onClose(): void
   onToast(text: string): void
+  /** Add or change where it was taken. */
+  onLocate?(item: MediaItem): void
 }
 
 const JPEG = new Set(['jpg', 'jpeg', 'jpe', 'jfif'])
@@ -53,7 +55,7 @@ function parseDate(text: string): number | null {
   return date.getMonth() === +mo - 1 && date.getDate() === +d ? date.getTime() : null
 }
 
-export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson, onAssignFace, onRemoveFace, onHighlight, onClose, onToast }: Props) {
+export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson, onAssignFace, onRemoveFace, onHighlight, onClose, onToast, onLocate }: Props) {
   const m = item.meta ?? {}
   const jpeg = item.type === 'image' && JPEG.has(item.ext)
   const [dateText, setDateText] = useState(() => editText(item.taken ?? item.date))
@@ -190,8 +192,22 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
             >
               {m.lat.toFixed(5)}, {m.lon.toFixed(5)} <ExternalLink size={12} />
             </button>
+            {onLocate && (
+              <button className="info-secondary info-map" onClick={() => onLocate(item)} title={m.userLocation ? 'Set in Lumen' : undefined}>
+                Change location…
+              </button>
+            )}
           </div>
         </div>
+      )}
+      {(m.lat === undefined || m.lon === undefined) && onLocate && (
+        <button className="info-row info-row-btn" onClick={() => onLocate(item)}>
+          <MapPin size={18} />
+          <div>
+            <div className="info-primary">Add location…</div>
+            <div className="info-secondary">From photos taken around the same time, or pick a place</div>
+          </div>
+        </button>
       )}
 
       {item.type === 'image' && (

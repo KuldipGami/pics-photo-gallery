@@ -33,6 +33,8 @@ import { CleanupView, type CleanupTab } from './components/CleanupView'
 import { CompareView, type CompareSource } from './components/CompareView'
 import { HistoryView, historyTitle } from './components/HistoryView'
 import { MemoriesView, MemoryStrip } from './components/MemoriesView'
+import { MapView, hasPosition, type MapViewState } from './components/MapView'
+import { LocationDialog } from './components/LocationDialog'
 import {
   findSideways,
   organizeConfirm,
@@ -76,7 +78,7 @@ interface PickerOptions {
 
 const ZOOM_STEPS = [80, 100, 124, 150, 180, 220, 270, 330]
 const BIN = api.env.platform === 'win32' ? 'Recycle Bin' : 'Trash'
-const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip', 'similar']
+const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip', 'similar', 'map-items']
 
 const TITLES: Record<View['kind'], string> = {
   photos: 'Photos',
@@ -92,6 +94,8 @@ const TITLES: Record<View['kind'], string> = {
   albums: 'Albums',
   album: '',
   similar: '',
+  map: 'Map',
+  'map-items': '',
   cleanup: 'Clean up',
   organize: 'Organize',
   history: 'History',
@@ -144,6 +148,9 @@ export default function App() {
   const [albumPicker, setAlbumPicker] = useState<string[] | null>(null)
   const [newAlbum, setNewAlbum] = useState(false)
   const [savingSearch, setSavingSearch] = useState<string | null>(null)
+  /** "Add location" for these items. */
+  const [locating, setLocating] = useState<string[] | null>(null)
+  const mapView = useRef<MapViewState | null>(null)
   const [placeCountry, setPlaceCountry] = useState<string | null>(null)
   const { toasts, push: toast, dismiss: dismissToast } = useToasts()
   // ---------- clean up (DupeLens) ----------
@@ -319,6 +326,9 @@ export default function App() {
     else if (view.kind === 'album' && !currentAlbum?.query) {
       const members = new Set(currentAlbum?.items ?? [])
       list = list.filter((it) => members.has(it.id))
+    } else if (view.kind === 'map-items') {
+      const ids = new Set(view.ids)
+      list = list.filter((it) => ids.has(it.id))
     } else if (view.kind === 'similar') {
       list = similar && similar.id === view.id ? similar.ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it) : []
     } else if (view.kind === 'trip') {
@@ -1054,6 +1064,20 @@ export default function App() {
     return () => offs.forEach((off) => off())
   }, [])
 
+  /** A group's main place ("Paris, France" and N more), for map selections. */
+  const placeLabel = (ids: string[]) => {
+    const count = new Map<string, number>()
+    for (const id of ids) {
+      const p = places.byItem[id]
+      if (p) count.set(p, (count.get(p) ?? 0) + 1)
+    }
+    const ranked = [...count.entries()].sort((a, b) => b[1] - a[1])
+    const top = ranked[0] && placeById.get(ranked[0][0])
+    if (!top) return null
+    const name = [top.name, top.country].filter(Boolean).join(', ')
+    return ranked.length > 1 ? `${name} and ${ranked.length - 1} more place${ranked.length > 2 ? 's' : ''}` : name
+  }
+  const located = useMemo(() => shownItems.filter(hasPosition).length, [shownItems])
   const findSimilar = async (id: string) => {
     const res = await api.findSimilar(id)
     if (res.ids.length <= 1) return toast('Nothing looks like this one yet. Lumen may still be preparing smart search.')
@@ -1061,7 +1085,7 @@ export default function App() {
     setQuery('')
     navigate({ kind: 'similar', id })
   }
-  const onMenuAction = useEvent(({ action, id, ids }: { action: 'open' | 'delete' | 'album' | 'similar'; id: string; ids: string[] }) => {
+  const onMenuAction = useEvent(({ action, id, ids }: { action: 'open' | 'delete' | 'album' | 'similar' | 'location'; id: string; ids: string[] }) => {
     if (action === 'open') {
       const index = visible.findIndex((it) => it.id === id)
       if (index >= 0) openViewer(index)
@@ -1069,6 +1093,8 @@ export default function App() {
       setAlbumPicker(ids)
     } else if (action === 'similar') {
       findSimilar(id)
+    } else if (action === 'location') {
+      setLocating(ids)
     } else if (action === 'delete') {
       requestDelete(ids)
     }
@@ -1160,6 +1186,8 @@ export default function App() {
       ? baseName(view.dir)
       : view.kind === 'similar'
         ? `Like “${byId.get(view.id)?.name ?? 'this photo'}”`
+        : view.kind === 'map-items'
+          ? view.label
         : currentPlace
           ? currentPlace.name
           : currentTrip
@@ -1184,6 +1212,8 @@ export default function App() {
     subtitle = `${formatCount(albums.length)} album${albums.length === 1 ? '' : 's'}`
   } else if (view.kind === 'cleanup') {
     subtitle = 'Duplicates, blurry photos, screenshots and large files · nothing is removed without your confirmation'
+  } else if (view.kind === 'map') {
+    subtitle = `${formatCount(located)} photos and videos with a place · map © OpenStreetMap`
   } else if (view.kind === 'organize') {
     subtitle = 'Fix dates, sort into dated folders, rename and convert · nothing changes without your confirmation'
   } else if (view.kind === 'history') {
@@ -1306,6 +1336,9 @@ export default function App() {
             )}
           </>
         )}
+        <button className="btn ghost" title="Add or change where these were taken" onClick={() => setLocating([...selection])}>
+          <MapPin size={15} /> Location…
+        </button>
         <button className="btn ghost" onClick={() => setAlbumPicker([...selection])}>
           <ImagePlus size={15} /> Add to album
         </button>
@@ -1385,6 +1418,11 @@ export default function App() {
         )}
         {view.kind === 'place' && (
           <button className="icon-btn back" onClick={() => setView({ kind: 'places' })} title="Back to places">
+            <ArrowLeft size={20} />
+          </button>
+        )}
+        {view.kind === 'map-items' && (
+          <button className="icon-btn back" onClick={() => setView({ kind: 'map' })} title="Back to the map">
             <ArrowLeft size={20} />
           </button>
         )}
@@ -1696,6 +1734,19 @@ export default function App() {
         }}
       />
     )
+  } else if (view.kind === 'map') {
+    body = (
+      <MapView
+        items={shownItems}
+        initialView={mapView.current}
+        onViewChange={(v) => (mapView.current = v)}
+        labelFor={placeLabel}
+        onOpen={(ids, label) => navigate({ kind: 'map-items', ids, label })}
+        onOpenItem={(id, ids) => setViewer({ ids, index: Math.max(0, ids.indexOf(id)) })}
+        onOpenUrl={api.openUrl}
+        emptyText="No photo has a location yet. Phones add one when location is on for the camera; you can add one with right-click → Add location…"
+      />
+    )
   } else if (view.kind === 'organize') {
     body = (
       <OrganizeView
@@ -1893,6 +1944,20 @@ export default function App() {
             }}
           />
         )}
+        {currentTrip && visible.some(hasPosition) && (
+          <div className="trip-map">
+            <MapView
+              compact
+              height={220}
+              items={visible}
+              fitKey={currentTrip.id}
+              labelFor={placeLabel}
+              onOpen={(ids, label) => navigate({ kind: 'map-items', ids, label })}
+              onOpenItem={(id, ids) => setViewer({ ids, index: Math.max(0, ids.indexOf(id)) })}
+              onOpenUrl={api.openUrl}
+            />
+          </div>
+        )}
         <div className="content-body">{body}</div>
       </main>
 
@@ -1927,6 +1992,24 @@ export default function App() {
             setQuery('')
             navigate({ kind: 'place', id })
           }}
+          onLocate={(item) => setLocating([item.id])}
+        />
+      )}
+      {locating && (
+        <LocationDialog
+          items={locating.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it)}
+          byId={byId}
+          suggest={(hours) => api.suggestLocations(locating, hours)}
+          search={api.searchPlaces}
+          describe={api.describePlace}
+          onSave={async (assignments, label) => {
+            setLocating(null)
+            const res = await api.setLocations(assignments, label)
+            if (res.errors.length) toast(`Couldn't set the place of ${plural(res.errors.length, 'file')}: ${res.errors[0]}`, { error: true })
+            else if (res.done) toast(`Location set${label ? ` to ${label}` : ''} for ${plural(res.done, 'item')}. Undo it from History if needed.`)
+          }}
+          onCancel={() => setLocating(null)}
+          onOpenUrl={api.openUrl}
         />
       )}
       {albumPicker && (

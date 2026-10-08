@@ -8,7 +8,7 @@ const csp: Plugin = {
   transformIndexHtml: (html) =>
     html.replace(
       '<head>',
-      `<head>\n    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' gallery: data: blob:; media-src 'self' gallery: blob:; connect-src 'self' gallery:; font-src 'self' data:" />`,
+      `<head>\n    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' gallery: data: blob: https://tile.openstreetmap.org; media-src 'self' gallery: blob:; connect-src 'self' gallery:; font-src 'self' data:" />`,
     ),
 }
 
