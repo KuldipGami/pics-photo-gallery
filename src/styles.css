@@ -3068,7 +3068,8 @@ html[data-platform='darwin'] .titlebar {
   gap: 6px;
 }
 .clean-actions .btn:disabled,
-.clean-toolbar .btn:disabled {
+.clean-toolbar .btn:disabled,
+.clean-group-head .btn:disabled {
   opacity: 0.45;
   cursor: default;
 }

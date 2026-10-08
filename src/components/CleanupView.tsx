@@ -406,6 +406,7 @@ export function CleanupView(props: Props) {
             onCompare={(focus) => props.onCompare(visibleGroups, gi, focus)}
             onProtectFolder={props.onProtectFolder}
             onDismiss={() => props.onDismiss(g.ids)}
+            onRecycle={props.onRecycle}
             where={where}
           />
         ))}
@@ -728,6 +729,7 @@ function GroupCard({
   onCompare,
   onProtectFolder,
   onDismiss,
+  onRecycle,
   where,
 }: {
   group: DupGroup
@@ -741,11 +743,14 @@ function GroupCard({
   onCompare(focus?: string): void
   onProtectFolder(dir: string): void
   onDismiss(): void
+  /** Recycle Bin for these files (asks first). */
+  onRecycle(ids: string[]): void
   /** A file's folder, shown short. */
   where(dir: string): string
 }) {
   const live = g.ids.map((id, i) => [id, i] as const).filter(([id]) => byId.has(id))
-  const nMarked = live.filter(([id]) => marks.has(id)).length
+  const markedIds = live.filter(([id]) => marks.has(id)).map(([id]) => id)
+  const nMarked = markedIds.length
   const bytes = live.reduce((s, [id]) => (marks.has(id) ? s + byId.get(id)!.size : s), 0)
   const all = nMarked === live.length
   return (
@@ -774,6 +779,21 @@ function GroupCard({
         </button>
         <button className="btn ghost" onClick={() => onCompare()}>
           <Columns2 size={15} /> Compare
+        </button>
+        {/* Just this group's selected copies; never every copy of it */}
+        <button
+          className="btn danger"
+          disabled={!nMarked || all}
+          onClick={() => onRecycle(markedIds)}
+          title={
+            all
+              ? 'Every copy is selected: unselect the one to keep first'
+              : nMarked
+                ? `Move the ${nMarked === 1 ? 'selected copy' : `${formatCount(nMarked)} selected copies`} of this group to the Recycle Bin`
+                : 'Select the copies to remove first (or use Auto-select)'
+          }
+        >
+          <Trash size={15} /> {nMarked && !all ? `Recycle ${formatCount(nMarked)}` : 'Recycle'}
         </button>
       </div>
       <div className="clean-tiles">
