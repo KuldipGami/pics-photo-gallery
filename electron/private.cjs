@@ -7,6 +7,7 @@ const { spawn } = require('node:child_process')
 const { EventEmitter } = require('node:events')
 const { keyOf } = require('./library.cjs')
 const { uniquePath, moveFile } = require('./cleanup.cjs')
+const { writeAtomic, writeAtomicSync, readJson } = require('./safe-file.cjs')
 
 /**
  * Private: photos and videos marked private disappear from every view and only show on the
@@ -38,20 +39,31 @@ const scrypt = (pin, salt) =>
   )
 
 const trimSep = (p) => p.replace(/[\\/]+$/, '')
+/**
+ * A library folder as a directory to join paths onto: no trailing separator, except a drive root
+ * keeps its own ("D:\", not "D:", which Windows reads as "the current folder on drive D").
+ */
+const rootDir = (r) => {
+  const t = trimSep(r)
+  if (!t) return r
+  return /^[a-z]:$/i.test(t) ? t + path.sep : t
+}
 
 class PrivateFolder extends EventEmitter {
   /**
    * @param {string} file private.json
-   * @param {{ roots?: () => string[], dataDir?: string, hello?: HelloBridge, now?: () => number }} [opts]
+   * @param {{ roots?: () => string[], dataDir?: string, hello?: HelloBridge, now?: () => number, count?: () => number }} [opts]
    *   roots: the library folders (each gets its own hidden "Lumen Private" folder when used).
    *   dataDir: where the Windows Hello helper script (private-agent.ps1) is written: pass userData
    *   (default: the folder of `file`).
+   *   count: how many library items are private now (default: how many files are marked).
    */
-  constructor(file, { roots = () => [], dataDir = path.dirname(file), hello, now = Date.now } = {}) {
+  constructor(file, { roots = () => [], dataDir = path.dirname(file), hello, now = Date.now, count } = {}) {
     super()
     this.file = file
     this.roots = roots
     this.now = now
+    this.countItems = count ?? (() => this.hashes.size)
     this.hello = hello ?? new HelloBridge({ dir: dataDir })
     this.salt = crypto.randomBytes(16).toString('hex')
     this.hashes = new Set()
@@ -59,21 +71,32 @@ class PrivateFolder extends EventEmitter {
     this.failed = 0
     this.blockedUntil = 0
     this.unlocked = false
+    /** Windows Hello has unlocked Private before: then it's the key, and a first PIN can't be set while locked. */
+    this.helloUsed = false
     this.memo = new Map() // keyOf(path) → hash
     this.itemKeys = new WeakMap() // library item → { path, key, hash }
     this.timer = null
+    // PIN attempts run one at a time, so attempts made together can't all skip the lockout.
+    this.pinTurn = Promise.resolve()
+    // private.json exists but couldn't be read: never saved over this session (it holds the PIN).
+    this.readOnly = false
   }
 
   async load() {
-    try {
-      const data = JSON.parse(await fsp.readFile(this.file, 'utf8'))
-      if (data.version !== 1) return
-      if (typeof data.salt === 'string') this.salt = data.salt
-      if (Array.isArray(data.items)) this.hashes = new Set(data.items.filter((h) => typeof h === 'string'))
-      if (data.pin && typeof data.pin.salt === 'string' && typeof data.pin.hash === 'string') this.pin = data.pin
-      this.failed = Number(data.failed) || 0
-      this.blockedUntil = Number(data.blockedUntil) || 0
-    } catch {}
+    const res = await readJson(this.file)
+    if (res.corrupt) console.error(`private.json was damaged; kept as ${res.keptAs ?? '(could not move it)'}`)
+    if (res.error) {
+      this.readOnly = true
+      console.error("Couldn't read private.json; it won't be saved this session", res.error)
+    }
+    const data = res.data
+    if (!data || data.version !== 1) return
+    if (typeof data.salt === 'string') this.salt = data.salt
+    if (Array.isArray(data.items)) this.hashes = new Set(data.items.filter((h) => typeof h === 'string'))
+    if (data.pin && typeof data.pin.salt === 'string' && typeof data.pin.hash === 'string') this.pin = data.pin
+    this.failed = Number(data.failed) || 0
+    this.blockedUntil = Number(data.blockedUntil) || 0
+    this.helloUsed = data.helloUsed === true
   }
 
   saveSoon() {
@@ -83,12 +106,11 @@ class PrivateFolder extends EventEmitter {
 
   saveNow() {
     clearTimeout(this.timer)
+    this.timer = null
+    if (this.readOnly) return
     try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true })
-      const tmp = `${this.file}.tmp`
-      const data = { version: 1, salt: this.salt, items: [...this.hashes], pin: this.pin, failed: this.failed, blockedUntil: this.blockedUntil }
-      fs.writeFileSync(tmp, JSON.stringify(data))
-      fs.renameSync(tmp, this.file)
+      const data = { version: 1, salt: this.salt, items: [...this.hashes], pin: this.pin, failed: this.failed, blockedUntil: this.blockedUntil, helloUsed: this.helloUsed }
+      writeAtomicSync(this.file, JSON.stringify(data))
     } catch (err) {
       console.error('Failed to save private.json', err)
     }
@@ -113,16 +135,21 @@ class PrivateFolder extends EventEmitter {
 
   /** "<library folder>\lumen private\" keys of every library folder. */
   vaultKeys() {
-    return this.roots().map((r) => keyOf(path.join(trimSep(r), VAULT)) + path.sep)
+    return this.roots().map((r) => keyOf(path.join(rootDir(r), VAULT)) + path.sep)
   }
 
-  /** The library folder a path is in (the longest match), or null. */
+  /** The library folder a path is in (the longest match), or null. A drive root comes back as "D:\". */
   rootOf(p) {
-    const key = keyOf(p)
+    const key = keyOf(trimSep(p))
     let best = null
+    let bestKey = ''
     for (const r of this.roots()) {
       const rk = keyOf(trimSep(r))
-      if ((key.startsWith(rk + path.sep) || key === rk) && (!best || rk.length > keyOf(trimSep(best)).length)) best = trimSep(r)
+      if (!rk) continue
+      if ((key.startsWith(rk + path.sep) || key === rk) && (!best || rk.length > bestKey.length)) {
+        best = rootDir(r)
+        bestKey = rk
+      }
     }
     return best
   }
@@ -205,10 +232,31 @@ class PrivateFolder extends EventEmitter {
 
   // ── lock ─────────────────────────────────────────────────────────────────
 
-  /** What the lock screen needs. `hello` is undefined until checked (call checkHello()). */
+  /** How many items are private (0 when that can't be told). */
+  count() {
+    try {
+      return Math.max(0, Number(this.countItems()) || 0)
+    } catch {
+      return this.hashes.size
+    }
+  }
+
+  /**
+   * What the lock screen needs. `hello` is undefined until checked (call checkHello()); `count` is
+   * how many items are private.
+   */
   status() {
     const wait = Math.max(0, this.blockedUntil - this.now())
-    return { unlocked: this.unlocked, hello: this.helloState, hasPin: !!this.pin, waitMs: wait }
+    return { unlocked: this.unlocked, hello: this.helloState, hasPin: !!this.pin, waitMs: wait, count: this.count(), canSetup: this.canSetup() }
+  }
+
+  /**
+   * Can a first PIN be chosen while locked? Yes when nothing is private yet, or when Windows Hello
+   * has never unlocked Private (no key was ever set up, so there's nothing to get round). Once Hello
+   * is the key, a glitch in the Hello check must not let anyone set a PIN and walk in.
+   */
+  canSetup() {
+    return !this.pin && (this.count() === 0 || !this.helloUsed)
   }
 
   lock() {
@@ -249,6 +297,7 @@ class PrivateFolder extends EventEmitter {
       const { result } = await this.hello.verify(hwnd, message)
       const reason = RESULT[result] ?? 'error'
       if (reason === 'verified') {
+        this.helloUsed = true
         this.unlock()
         return { ok: true }
       }
@@ -258,8 +307,17 @@ class PrivateFolder extends EventEmitter {
     }
   }
 
-  /** Resolves to { ok } or { ok: false, error, waitMs? }. Wrong PINs make you wait (30 s, doubling up to 5 min). */
-  async unlockWithPin(pin) {
+  /**
+   * Resolves to { ok } or { ok: false, error, waitMs? }. Wrong PINs make you wait (30 s, doubling up
+   * to 5 min). Attempts take turns: each one checks the wait only after the one before it counted.
+   */
+  unlockWithPin(pin) {
+    const attempt = this.pinTurn.then(() => this.tryPin(pin))
+    this.pinTurn = attempt.catch(() => {})
+    return attempt
+  }
+
+  async tryPin(pin) {
     if (!this.pin) return { ok: false, error: 'No PIN has been set.' }
     const wait = this.blockedUntil - this.now()
     if (wait > 0) return { ok: false, error: `Too many wrong PINs. Try again in ${Math.ceil(wait / 1000)} seconds.`, waitMs: wait }
@@ -282,9 +340,10 @@ class PrivateFolder extends EventEmitter {
     return { ok: false, error: `Wrong PIN. ${left} ${left === 1 ? 'try' : 'tries'} left before a short wait.` }
   }
 
-  /** Sets (or changes) the Lumen PIN. Allowed when none is set yet, or while unlocked. */
+  /** Sets (or changes) the Lumen PIN. Allowed while unlocked, or for a first PIN when canSetup(). */
   async setPin(pin) {
     if (this.pin && !this.unlocked) return { ok: false, error: 'Unlock Private first.' }
+    if (!this.pin && !this.unlocked && !this.canSetup()) return { ok: false, error: 'Unlock Private first.' }
     const s = String(pin ?? '')
     if (s.length < PIN_MIN || s.length > PIN_MAX) return { ok: false, error: `Use ${PIN_MIN} to ${PIN_MAX} characters.` }
     if (/^(\d)\1+$/.test(s) || '0123456789012'.includes(s) || '9876543210987'.includes(s)) return { ok: false, error: 'That PIN is too easy to guess.' }
@@ -576,9 +635,7 @@ class HelloBridge {
     const source = '\ufeff' + HELLO_PS.replace(/\r?\n/g, '\r\n')
     const current = await fsp.readFile(this.script, 'utf8').catch(() => null)
     if (current === source) return
-    await fsp.mkdir(path.dirname(this.script), { recursive: true })
-    await fsp.writeFile(`${this.script}.tmp`, source, 'utf8')
-    await fsp.rename(`${this.script}.tmp`, this.script)
+    await writeAtomic(this.script, source)
   }
 
   /** Starts PowerShell (if needed). Resolves to the availability number (-1 = unknown). */
@@ -598,6 +655,9 @@ class HelloBridge {
       const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-MTA', '-ExecutionPolicy', 'Bypass', '-File', this.script]
       const proc = spawn(this.powershell, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
       this.proc = proc
+      // Writing to a helper that just exited fails on the pipe (EPIPE): without a listener that
+      // would be an uncaught exception. Its jobs are rejected by 'exit' below.
+      proc.stdin.on('error', () => {})
       let buffer = ''
       let started = false
       proc.stdout.setEncoding('utf8')
@@ -635,11 +695,13 @@ class HelloBridge {
       })
       proc.on('exit', () => {
         if (!started) reject(new Error('Windows Hello helper exited'))
-        for (const job of this.pending.values()) {
+        // (only this process's jobs: a newer helper may already be answering others)
+        for (const [id, job] of [...this.pending]) {
+          if (job.proc !== proc) continue
           clearTimeout(job.timer)
+          this.pending.delete(id)
           job.reject(new Error('Windows Hello helper exited'))
         }
-        this.pending.clear()
         if (this.proc === proc) {
           this.proc = null
           this.ready = null
@@ -660,13 +722,18 @@ class HelloBridge {
     await this.start()
     this.touch()
     const id = this.nextId++
+    const proc = this.proc
     return new Promise((resolve, reject) => {
+      if (!proc || proc.exitCode !== null || !proc.stdin.writable) {
+        reject(new Error('Windows Hello helper exited'))
+        return
+      }
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new Error('No answer from Windows Hello'))
       }, timeoutMs)
-      this.pending.set(id, { resolve, reject, timer })
-      this.proc.stdin.write(JSON.stringify({ id, op, ...extra }) + '\n')
+      this.pending.set(id, { resolve, reject, timer, proc })
+      proc.stdin.write(JSON.stringify({ id, op, ...extra }) + '\n')
     })
   }
 
@@ -691,6 +758,9 @@ class HelloBridge {
     clearTimeout(this.idleTimer)
     const proc = this.proc
     if (!proc) return
+    // forgotten now, so the next request starts a new helper instead of writing to this one
+    this.proc = null
+    this.ready = null
     try {
       proc.stdin.write('{"op":"exit"}\n')
       proc.stdin.end()
@@ -711,7 +781,8 @@ class HelloBridge {
 
 /**
  * Registers the Private IPC handlers (see the integration notes):
- *   private:status ()            → { unlocked, hello, hasPin, waitMs }   (also checks Windows Hello once)
+ *   private:status ()            → { unlocked, hello, hasPin, waitMs, count }   (also checks Windows Hello once)
+ *   private:recheck-hello ()     → the same, after checking Windows Hello again (e.g. after a glitch)
  *   private:unlock-hello ()      → { ok, reason? }
  *   private:unlock-pin (pin)     → { ok, error?, waitMs? }
  *   private:set-pin (pin)        → { ok, error? }
@@ -727,6 +798,10 @@ function registerIpc({ ipcMain, priv, getWindow, privateItems, send }) {
   priv.on('status', (s) => send('private:status', s))
   ipcMain.handle('private:status', async () => {
     if (priv.helloState === undefined) await priv.checkHello()
+    return priv.status()
+  })
+  ipcMain.handle('private:recheck-hello', async () => {
+    await priv.checkHello()
     return priv.status()
   })
   ipcMain.handle('private:unlock-hello', async () => {

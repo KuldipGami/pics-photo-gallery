@@ -252,25 +252,67 @@ function blankXmpLocation(buf, start, end) {
   return true
 }
 
-/** Blanks IPTC location datasets (city, sub-location, state, country) in an IIM block, in place. */
-function blankIptcLocation(buf, start, end) {
+// IPTC place datasets (record 2): content location code / name, city, sub-location, state, country code / name.
+const IPTC_PLACE = new Set([26, 27, 90, 92, 95, 100, 101])
+
+/** Blanks the place datasets of one IIM block (`start`…`end` of `buf`) in place, record by record. */
+function blankIim(buf, start, end) {
   let changed = false
-  for (let p = start; p + 5 <= end; ) {
-    if (buf[p] !== 0x1c) {
-      p++
+  for (let p = start; p < end; ) {
+    if (buf[p] === 0) {
+      p++ // padding
       continue
     }
+    if (buf[p] !== 0x1c || p + 5 > end) break // not IIM (any more): leave the rest alone
     const record = buf[p + 1]
     const dataset = buf[p + 2]
-    const len = buf.readUInt16BE(p + 3)
-    if (len & 0x8000) break // extended length: not used for these fields
-    const data = p + 5
+    let len = buf.readUInt16BE(p + 3)
+    let head = 5
+    if (len & 0x8000) {
+      // extended length: the next (len & 0x7fff) bytes hold it
+      const n = len & 0x7fff
+      if (n > 4 || p + 5 + n > end) break
+      len = 0
+      for (let i = 0; i < n; i++) len = len * 256 + buf[p + 5 + i]
+      head += n
+    }
+    const data = p + head
     if (data + len > end) break
-    if (record === 2 && [90, 92, 95, 100, 101].includes(dataset)) {
+    if (record === 2 && IPTC_PLACE.has(dataset)) {
       buf.fill(0x20, data, data + len)
       changed = true
     }
     p = data + len
+  }
+  return changed
+}
+
+/**
+ * Blanks IPTC place fields in a Photoshop APP13 body (`start`…`end` of `buf`), in place: walks
+ * its image resources ("8BIM" blocks) to the IPTC one(s) and then the IIM records in them, so a
+ * 0x1C byte elsewhere (a resource header, a thumbnail) is never taken for a record.
+ */
+function blankIptcLocation(buf, start, end) {
+  const HEADER = 'Photoshop 3.0\0'
+  if (end - start < HEADER.length || buf.toString('latin1', start, start + HEADER.length) !== HEADER) {
+    // older layouts ("Adobe_Photoshop2.5:") hold the IIM records straight after their header
+    const first = buf.indexOf(0x1c, start)
+    return first >= 0 && first < end ? blankIim(buf, first, end) : false
+  }
+  let changed = false
+  let p = start + HEADER.length
+  while (p + 12 <= end) {
+    const sig = buf.toString('latin1', p, p + 4)
+    if (!/^(8BIM|MeSa|PHUT|AgHg|DCSR)$/.test(sig)) break
+    const id = buf.readUInt16BE(p + 4)
+    const nameSize = (1 + buf[p + 6] + 1) & ~1 // Pascal string, padded to an even length
+    const sizeAt = p + 6 + nameSize
+    if (sizeAt + 4 > end) break
+    const size = buf.readUInt32BE(sizeAt)
+    const data = sizeAt + 4
+    if (data + size > end) break
+    if (sig === '8BIM' && id === 0x0404 && blankIim(buf, data, data + size)) changed = true
+    p = data + size + (size % 2)
   }
   return changed
 }
@@ -658,22 +700,66 @@ function scrubIlst(d, ilst, keys, all) {
   return changed
 }
 
+/** The first child box of `b` (a box in `d`) of this type, or undefined. */
+const childOf = (d, b, type, from = b.pos + b.header) => childBoxes(d, from, b.pos + b.size).find((c) => c.type === type)
+
+/**
+ * Tracks of a movie box (`d` = the whole moov box) whose samples can hold a position: timed
+ * metadata (GoPro 'gpmd', Google / Insta360 'camm', DJI, Sony and other 'meta' tracks; Apple's
+ * 'mebx' only when it lists location keys) and subtitle / text tracks (DJI drones write their
+ * GPS there). Their data lives among the video's samples, so it can't be blanked like the header
+ * atoms; such a video is reported as keeping details. Returns how many there are.
+ */
+function locationTracks(d) {
+  const top = childBoxes(d, 0, d.length)[0]
+  if (top?.type !== 'moov') return 0
+  let n = 0
+  for (const trak of childBoxes(d, top.pos + top.header, top.pos + top.size)) {
+    if (trak.type !== 'trak') continue
+    const mdia = childOf(d, trak, 'mdia')
+    const hdlr = mdia && childOf(d, mdia, 'hdlr')
+    if (!hdlr || hdlr.size < hdlr.header + 12) continue
+    const handler = d.toString('latin1', hdlr.pos + hdlr.header + 8, hdlr.pos + hdlr.header + 12)
+    const minf = childOf(d, mdia, 'minf')
+    const stbl = minf && childOf(d, minf, 'stbl')
+    const stsd = stbl && childOf(d, stbl, 'stsd')
+    const format = stsd && stsd.size >= stsd.header + 16 ? d.toString('latin1', stsd.pos + stsd.header + 12, stsd.pos + stsd.header + 16) : ''
+    const described = stsd ? d.toString('latin1', stsd.pos, stsd.pos + stsd.size) : ''
+    if (handler === 'meta' || handler === 'camm') {
+      if (format !== 'mebx' || /location|gps|iso6709/i.test(described)) n++
+    } else if (handler === 'sbtl' || handler === 'subt' || handler === 'text') n++
+  }
+  return n
+}
+
 /**
  * Byte patches that blank a video's metadata in a copy (the original is only read):
  * [{ offset, data }] (same length as what they replace), or [] when there's nothing to change or
  * the file isn't an MP4 / MOV. `all`: also dates, camera and every other tag.
  */
 async function videoPatches(file, { all = false } = {}) {
+  return (await videoScan(file, { all })).patches
+}
+
+/**
+ * videoPatches plus what can't be removed: { patches, tracks (see locationTracks), unread (the
+ * movie box couldn't be read, so nothing in it was blanked) }.
+ */
+async function videoScan(file, { all = false } = {}) {
   const fh = await fsp.open(file, 'r')
   try {
     const { size: fileSize } = await fh.stat()
     const patches = []
+    let tracks = 0
+    let unread = true
     for (let pos = 0, guard = 0; pos < fileSize && guard < 64; guard++) {
       const box = await boxAt(fh, pos, fileSize)
       if (!box) break
       if (box.type === 'moov' && box.size <= 512 * 1024 * 1024) {
         const d = Buffer.alloc(box.size)
         await fh.read(d, 0, box.size, box.start)
+        unread = false
+        tracks += locationTracks(d)
         if (scrubMoov(d, { all })) patches.push({ offset: box.start, data: d })
       } else if (box.type === 'uuid' && box.size <= 16 * 1024 * 1024) {
         const d = Buffer.alloc(box.size)
@@ -692,7 +778,7 @@ async function videoPatches(file, { all = false } = {}) {
       }
       pos = box.start + box.size
     }
-    return patches
+    return { patches, tracks, unread }
   } finally {
     await fh.close()
   }
@@ -740,11 +826,18 @@ async function prepare(item, name, o, getSource) {
     const st = await fsp.stat(item.path)
     let patches = []
     let kept = false
+    let keptTrack = false
     if (changing) {
-      if (BMFF_VIDEO.has(item.ext)) patches = await videoPatches(item.path, { all: how.all }).catch(() => [])
-      else kept = true
+      if (BMFF_VIDEO.has(item.ext)) {
+        // never claim details were removed when they weren't: an unreadable movie box, or a GPS
+        // track among the samples (GoPro, DJI…), counts as kept
+        const scan = await videoScan(item.path, { all: how.all }).catch(() => ({ patches: [], tracks: 0, unread: true }))
+        patches = scan.patches
+        keptTrack = scan.tracks > 0
+        kept = scan.unread || keptTrack
+      } else kept = true
     }
-    return { kind: 'file', path: item.path, size: st.size, patches, mtime, keptVideoDetails: kept }
+    return { kind: 'file', path: item.path, size: st.size, patches, mtime, keptVideoDetails: kept, keptVideoTrack: keptTrack }
   }
 
   const ext = item.ext
@@ -809,15 +902,31 @@ function encode(img, ext, quality) {
 
 const CHUNK = 1024 * 1024
 
-/** Streams `file` (with patches applied) to `write(chunk)`; checks `signal` between chunks. */
+/** Marks an error as coming from reading the photo being exported (not from the destination). */
+const sourceError = (err) => Object.assign(err instanceof Error ? err : new Error(String(err)), { readingSource: true })
+
+/**
+ * Streams `file` (with patches applied) to `write(chunk)`; checks `signal` between chunks. Errors
+ * reading `file` are marked `readingSource` (that file fails, the export goes on).
+ */
 async function streamFile(file, patches, signal, write) {
-  const fh = await fsp.open(file, 'r')
+  let fh
+  try {
+    fh = await fsp.open(file, 'r')
+  } catch (err) {
+    throw sourceError(err)
+  }
   try {
     let at = 0
     const buf = Buffer.allocUnsafe(CHUNK)
     for (;;) {
       if (signal?.aborted) throw abortError()
-      const { bytesRead } = await fh.read(buf, 0, CHUNK, at)
+      let bytesRead
+      try {
+        ;({ bytesRead } = await fh.read(buf, 0, CHUNK, at))
+      } catch (err) {
+        throw sourceError(err)
+      }
       if (!bytesRead) break
       const chunk = Buffer.from(buf.subarray(0, bytesRead))
       if (patches.length) patchChunk(chunk, at, patches)
@@ -826,7 +935,7 @@ async function streamFile(file, patches, signal, write) {
     }
     return at
   } finally {
-    await fh.close()
+    await fh.close().catch(() => {})
   }
 }
 
@@ -954,6 +1063,21 @@ class ZipWriter {
 
   async add(name, prepared, { signal, onBytes }) {
     const entryName = this.uniqueName(name)
+    const offset = this.pos
+    try {
+      await this.writeEntry(entryName, prepared, { signal, onBytes })
+      return entryName
+    } catch (err) {
+      // This entry failed: what was written of it is cut off, so the next one starts at its place
+      // (no stray local header or half a file is left in the zip).
+      this.pos = offset
+      this.names.delete(entryName.toLowerCase())
+      await this.fh?.truncate(offset).catch(() => {})
+      throw err
+    }
+  }
+
+  async writeEntry(entryName, prepared, { signal, onBytes }) {
     const nameBytes = Buffer.from(entryName, 'utf8')
     const size = prepared.kind === 'buffer' ? prepared.data.length : prepared.size
     const zip64 = this.forceZip64 || size >= U32
@@ -1011,7 +1135,6 @@ class ZipWriter {
     c.writeUInt32LE(crc >>> 0, 0)
     await this.fh.write(c, 0, 4, offset + 14)
     this.entries.push({ nameBytes, size, crc: crc >>> 0, time, date, unix, offset, zip64 })
-    return entryName
   }
 
   async close() {
@@ -1090,6 +1213,7 @@ class ZipWriter {
       end.writeUInt16LE(count, 10)
     }
     await this.write(end)
+    await this.fh.truncate(this.pos) // nothing may follow the end record (readers look for it at the end)
     await this.fh.close()
     this.fh = null
     const target = uniquePath(this.file)
@@ -1112,7 +1236,9 @@ const LOOKAHEAD = 4
 /**
  * Exports `items` (library items) with `options`. Resolves to an ExportResult:
  *   { ok, canceled, kind: 'folder' | 'zip', destination, count, total, bytes, failed,
- *     errors: ["name: reason"], converted, keptVideoDetails, ms }
+ *     errors: ["name: reason"], converted, keptVideoDetails, keptVideoTracks, ms }
+ * (keptVideoDetails: videos whose details couldn't all be removed; keptVideoTracks: those of them
+ * with a GPS / telemetry track — GoPro, DJI… — that stays in the copy.)
  * `getSource(item)` → full-size path or JPEG buffer for HEIC / RAW (thumbs.source).
  * `onProgress({ done, total, bytes, current, fraction })` is called often (throttle when forwarding).
  * `signal` (AbortSignal) cancels: a .zip is deleted, a folder keeps the files already finished.
@@ -1124,7 +1250,7 @@ async function runExport(items, options, { getSource, signal, onProgress, onFile
   const kind = o.destination
   const target = kind === 'zip' ? o.zipPath : o.folder
   const plan = planNames(items, o, { label })
-  const result = { ok: false, canceled: false, kind, destination: target ?? '', count: 0, total: plan.length, bytes: 0, failed: 0, errors: [], converted: 0, keptVideoDetails: 0, ms: 0 }
+  const result = { ok: false, canceled: false, kind, destination: target ?? '', count: 0, total: plan.length, bytes: 0, failed: 0, errors: [], converted: 0, keptVideoDetails: 0, keptVideoTracks: 0, ms: 0 }
   if (!target || !plan.length) {
     result.errors.push(!target ? 'Choose where to save the export first.' : 'Nothing to export.')
     return result
@@ -1195,14 +1321,16 @@ async function runExport(items, options, { getSource, signal, onProgress, onFile
       } catch (err) {
         if (err?.name === 'AbortError') throw err
         // Disk full or the destination went away: stop rather than fail every file the same way.
-        if (['ENOSPC', 'EROFS', 'EACCES', 'EPERM', 'ENOENT', 'EIO'].includes(err?.code)) throw err
+        // (The same codes while reading the photo itself only fail that photo.)
+        if (!err?.readingSource && ['ENOSPC', 'EROFS', 'EACCES', 'EPERM', 'ENOENT', 'EIO'].includes(err?.code)) throw err
         result.failed++
-        result.errors.push(`${item.name}: ${err?.message ?? err}`)
+        result.errors.push(`${item.name}: ${err?.readingSource ? unreadable(err) : (err?.message ?? err)}`)
         continue
       }
       result.count++
       if (p.converted) result.converted++
       if (p.keptVideoDetails) result.keptVideoDetails++
+      if (p.keptVideoTrack) result.keptVideoTracks++
     }
     current = ''
     currentSize = 0
@@ -1221,6 +1349,14 @@ async function runExport(items, options, { getSource, signal, onProgress, onFile
   }
   result.ms = Date.now() - started
   return result
+}
+
+/** Why a photo couldn't be read for exporting, in plain words. */
+function unreadable(err) {
+  if (err?.code === 'ENOENT') return 'the file is no longer there'
+  if (err?.code === 'EPERM' || err?.code === 'EACCES' || err?.code === 'EBUSY') return "the file couldn't be read (another program may have it open)"
+  if (err?.code === 'EIO') return "the drive couldn't read the file"
+  return `the file couldn't be read: ${err?.message ?? err}`
 }
 
 function friendlyError(err) {

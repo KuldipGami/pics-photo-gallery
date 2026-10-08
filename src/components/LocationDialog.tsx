@@ -144,7 +144,10 @@ export function LocationDialog({ items, byId, suggest, search, describe, onSave,
   const current = single && hasPosition(single) ? { lat: single.meta!.lat!, lon: single.meta!.lon! } : null
   const located = items.filter(hasPosition).length
   const jpegs = items.filter((it) => JPEG.has(it.ext.toLowerCase())).length
-  const ids = useMemo(() => new Set(items.map((it) => it.id)), [items])
+  // Keyed on the ids themselves: `items` is a new array on every render of the window (up to every
+  // half second while Lumen works in the background), and a new set would move the map back each time.
+  const idKey = items.map((it) => it.id).join('\n')
+  const ids = useMemo(() => new Set(idKey ? idKey.split('\n') : []), [idKey])
 
   // ---------- suggestions ----------
   const suggestSeq = useRef(0)
@@ -243,6 +246,8 @@ export function LocationDialog({ items, byId, suggest, search, describe, onSave,
   const pickPointRef = useRef(pickPoint)
   pickPointRef.current = pickPoint
   const fittedRef = useRef(false)
+  /** The choice and suggestions the map was last moved for (it only moves again when they change). */
+  const movedFor = useRef<{ sugg: LocationSuggestions | null; choice: Choice | null } | null>(null)
 
   useEffect(() => {
     const map = createBaseMap(mapEl.current!, { onOpenUrl })
@@ -283,6 +288,8 @@ export function LocationDialog({ items, byId, suggest, search, describe, onSave,
     const overlay = overlayRef.current
     const pin = pinRef.current
     if (!map || !overlay || !pin) return
+    const move = !movedFor.current || movedFor.current.sugg !== sugg || movedFor.current.choice !== choice
+    movedFor.current = { sugg, choice }
     overlay.clearLayers()
     const points: L.LatLngExpression[] = []
     if (choice?.kind === 'matched' && sugg) {
@@ -307,7 +314,7 @@ export function LocationDialog({ items, byId, suggest, search, describe, onSave,
     if (choice?.kind === 'point') {
       pin.setLatLng([choice.lat, choice.lon])
       if (!map.hasLayer(pin)) pin.addTo(map)
-      if (choice.zoom) {
+      if (choice.zoom && move) {
         // a searched town: its own zoom; a suggestion: closer if the map isn't already
         const zoom = choice.key.startsWith('hit:') ? choice.zoom : Math.max(choice.zoom, Math.min(map.getZoom(), 16))
         map.setView([choice.lat, choice.lon], zoom, { animate: fittedRef.current })
@@ -315,7 +322,7 @@ export function LocationDialog({ items, byId, suggest, search, describe, onSave,
       fittedRef.current = true
     } else {
       if (!current && map.hasLayer(pin)) pin.remove()
-      if (points.length) {
+      if (points.length && move) {
         map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 13, animate: fittedRef.current })
         fittedRef.current = true
       }

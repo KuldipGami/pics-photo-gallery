@@ -4,6 +4,7 @@ const path = require('node:path')
 const { EventEmitter } = require('node:events')
 const { Worker } = require('node:worker_threads')
 const sig = require('./signature.cjs')
+const { writeAtomic, writeAtomicSync, serial, keepAside } = require('./safe-file.cjs')
 
 // Frame fingerprints of every video, for duplicate detection (ported from DupeLens'
 // VideoAnalyzer / MediaScanner.VideosMatch):
@@ -114,6 +115,25 @@ function decode(buf) {
     records.set(id, r)
   }
   return records
+}
+
+/**
+ * Reads a binary file, waiting a moment while antivirus or the search indexer holds it.
+ * { buf } | { missing: true } | { error } (still unreadable: don't save over it this session).
+ */
+async function readBinary(file) {
+  let last = null
+  for (const ms of [0, 50, 100, 200, 400, 800, 1500]) {
+    if (ms) await new Promise((resolve) => setTimeout(resolve, ms))
+    try {
+      return { buf: await fsp.readFile(file) }
+    } catch (err) {
+      if (err?.code === 'ENOENT') return { missing: true }
+      last = err
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(err?.code)) break
+    }
+  }
+  return { error: last }
 }
 
 // ---------- matching ----------
@@ -303,7 +323,8 @@ function findVideoPairs(videos, maxDist) {
 
 /**
  * findVideoPairs on a worker thread, so a big library never blocks the main process. The worker
- * runs this file's own source (and signature.cjs) with `eval`, which also works inside app.asar.
+ * runs this file's own source (and signature.cjs) with `eval`, which also works inside app.asar
+ * (saving isn't done there, so safe-file.cjs is left out: relative paths don't resolve in it).
  */
 function findVideoPairsAsync(videos, maxDist) {
   let source
@@ -317,7 +338,7 @@ const load = (src, req) => {
   return module.exports
 }
 const sig = load(${load('signature.cjs')}, require)
-const vf = load(${load('video-frames.cjs')}, (name) => (name === './signature.cjs' ? sig : require(name)))
+const vf = load(${load('video-frames.cjs')}, (name) => (name === './signature.cjs' ? sig : name === './safe-file.cjs' ? {} : require(name)))
 parentPort.once('message', ({ videos, maxDist }) => parentPort.postMessage(vf.findVideoPairs(videos, maxDist)))`
   } catch {
     return Promise.resolve(findVideoPairs(videos, maxDist))
@@ -369,15 +390,45 @@ class VideoFrames extends EventEmitter {
     this.timers = {}
     this.fresh = 0 // analysed since the last 'changed'
     this.unanswered = new Map() // id -> times the worker gave no answer (this session)
+    this.dirty = false // changes not on disk yet
+    this.blocked = false // the file couldn't be read: don't save over it this session
+    this.writer = serial(async () => {
+      const data = encode(this.records)
+      this.writing = true
+      try {
+        await writeAtomic(this.file, data)
+      } finally {
+        this.writing = false
+        if (this.flushed) {
+          // saveNow() wrote newer data while this one was on its way: put that back on top
+          this.flushed = false
+          try {
+            writeAtomicSync(this.file, encode(this.records))
+          } catch {}
+        }
+      }
+    })
   }
 
   async load() {
-    try {
-      this.records = decode(await fsp.readFile(this.file))
-    } catch {}
+    const r = await readBinary(this.file)
+    if (r.missing) return
+    if (r.error) {
+      this.blocked = true
+      console.error('[video-frames] video-frames.bin could not be read; not saving over it this session', r.error)
+      return
+    }
+    if (r.buf.length && r.buf.toString('latin1', 0, 4) !== MAGIC) {
+      const keptAs = keepAside(this.file)
+      console.error(`[video-frames] video-frames.bin was damaged (kept as ${keptAs}); reading the videos again`)
+      return
+    }
+    // (a file cut short keeps every video before the cut)
+    this.records = decode(r.buf)
   }
 
   saveSoon(ms = SAVE_MS) {
+    this.dirty = true
     if (this.timers.save || this.disposed) return
     this.timers.save = setTimeout(() => this.save(), ms)
   }
@@ -385,22 +436,27 @@ class VideoFrames extends EventEmitter {
   async save() {
     clearTimeout(this.timers.save)
     this.timers.save = null
+    if (this.blocked) return
+    this.dirty = false
     try {
-      const tmp = `${this.file}.tmp`
-      await fsp.writeFile(tmp, encode(this.records))
-      await fsp.rename(tmp, this.file)
+      await this.writer()
     } catch (err) {
       console.error('Failed to save video fingerprints', err)
+      this.saveSoon(60_000) // still owed: again later, and at quit
     }
   }
 
   saveNow() {
-    if (!this.timers.save) return
+    if (this.blocked || (!this.dirty && !this.writing)) return
     clearTimeout(this.timers.save)
     this.timers.save = null
     try {
-      fs.writeFileSync(this.file, encode(this.records))
-    } catch {}
+      writeAtomicSync(this.file, encode(this.records))
+      this.dirty = false
+    } catch (err) {
+      console.error('Failed to save video fingerprints', err)
+    }
+    if (this.writing) this.flushed = true
   }
 
   /** The analysis of `item`, if it's current: { d, w, h, s, x, f } (s/x null when it failed). */

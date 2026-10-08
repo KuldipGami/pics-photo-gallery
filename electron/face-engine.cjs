@@ -10,6 +10,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const ort = require('onnxruntime-node')
 const sharp = require('sharp')
+const { writeAtomicSync } = require('./safe-file.cjs')
 
 sharp.cache(false)
 ort.env.logLevel = 'error'
@@ -31,6 +32,8 @@ const ARC_TEMPLATE = [
 let det = null
 let rec = null
 let detOutputs = null
+let models = null // the models folder (for switching to the CPU)
+let onCpu = false
 
 const port = process.parentPort
 
@@ -49,25 +52,30 @@ async function timeDetector(session) {
   return (performance.now() - t) / 4
 }
 
-/** Picks the fastest DirectML adapter (falls back to the CPU). */
-async function init({ modelsDir, cacheFile }) {
+/**
+ * Picks the fastest DirectML adapter (falls back to the CPU). `cpu`: straight to the CPU (the GPU
+ * stalled earlier this session); `skipCache`: time every adapter again (the remembered one is gone).
+ */
+async function init({ modelsDir, cacheFile, cpu = false, skipCache = false }) {
   for (const f of ['det_10g.onnx', 'w600k_r50.onnx']) {
     if (!fs.existsSync(path.join(modelsDir, f))) throw new Error(`Face model missing: ${f}`)
   }
+  models = modelsDir
   let cached = null
   try {
-    cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'))
+    if (!skipCache) cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'))
   } catch {}
 
   const candidates = []
-  if (process.platform === 'win32') {
+  if (process.platform === 'win32' && !cpu) {
     const ids = Number.isInteger(cached?.adapter) ? [cached.adapter] : [0, 1, 2, 3]
     for (const deviceId of ids) {
       try {
         const s = await createSessions(modelsDir, [{ name: 'dml', deviceId }])
         candidates.push({ ...s, label: `gpu${deviceId}`, adapter: deviceId, ms: ids.length > 1 ? await timeDetector(s.d) : 0 })
       } catch {
-        if (ids.length === 1) return init({ modelsDir, cacheFile: null }) // cached adapter gone: re-pick
+        // cached adapter gone: pick again (and remember the new choice)
+        if (ids.length === 1) return init({ modelsDir, cacheFile, skipCache: true })
         break // no more adapters
       }
     }
@@ -80,18 +88,40 @@ async function init({ modelsDir, cacheFile }) {
   const best = candidates[0]
   det = best.d
   rec = best.r
+  onCpu = best.adapter === null
   for (const c of candidates.slice(1)) {
     c.d.release?.()
     c.r.release?.()
   }
   if (cacheFile && best.adapter !== null) {
     try {
-      fs.writeFileSync(cacheFile, JSON.stringify({ adapter: best.adapter }))
+      writeAtomicSync(cacheFile, JSON.stringify({ adapter: best.adapter }))
     } catch {}
   }
   // outputs come as 3 score maps, 3 box maps, 3 landmark maps (strides 8, 16, 32)
   detOutputs = det.outputNames
   return { device: best.adapter === null ? 'cpu' : 'gpu', adapter: best.adapter, timings: candidates.map((c) => [c.label, Math.round(c.ms * 10) / 10]) }
+}
+
+/**
+ * Runs the detector or the recogniser. If the GPU fails mid-session (a driver reset, the adapter
+ * removed), both models move to the CPU and the run is tried there once (as the eraser does).
+ */
+async function infer(which, feeds) {
+  try {
+    return await (which === 'det' ? det : rec).run(feeds)
+  } catch (err) {
+    if (onCpu) throw err
+    const old = [det, rec]
+    const s = await createSessions(models, ['cpu'])
+    det = s.d
+    rec = s.r
+    detOutputs = det.outputNames
+    onCpu = true
+    for (const o of old) o.release?.()
+    port.postMessage({ type: 'device', device: 'cpu', adapter: null, reason: String(err?.message || err) })
+    return (which === 'det' ? det : rec).run(feeds)
+  }
 }
 
 // ---------- detection ----------
@@ -129,7 +159,7 @@ async function detect(img) {
       input[2 * plane + d] = (img.small[s + 2] - 127.5) / 128
     }
   }
-  const out = await det.run({ [det.inputNames[0]]: new ort.Tensor('float32', input, [1, 3, DET_SIZE, DET_SIZE]) })
+  const out = await infer('det', { [det.inputNames[0]]: new ort.Tensor('float32', input, [1, 3, DET_SIZE, DET_SIZE]) })
   const found = []
   STRIDES.forEach((stride, i) => {
     const scores = out[detOutputs[i]].data
@@ -220,7 +250,7 @@ function alignedTensor(img, points) {
 
 async function embed(img, points) {
   const input = new ort.Tensor('float32', alignedTensor(img, points), [1, 3, ARC_SIZE, ARC_SIZE])
-  const out = await rec.run({ [rec.inputNames[0]]: input })
+  const out = await infer('rec', { [rec.inputNames[0]]: input })
   const v = Float32Array.from(out[rec.outputNames[0]].data)
   let norm = 0
   for (const x of v) norm += x * x
@@ -259,14 +289,15 @@ port.on('message', ({ data: msg }) => {
     // Decoding starts right away (overlapping the previous photo's inference); GPU work runs one
     // photo at a time.
     const decoded = decode(Buffer.from(msg.jpeg)).catch((err) => ({ error: err }))
+    // stage: 'decode' (this picture can't be read) or 'run' (the models failed, even on the CPU)
     chain = chain.then(async () => {
+      const img = await decoded
+      if (img.error) return port.postMessage({ type: 'result', seq: msg.seq, ok: false, stage: 'decode', error: String(img.error?.message || img.error) })
       try {
-        const img = await decoded
-        if (img.error) throw img.error
         const res = await analyze(img)
         port.postMessage({ type: 'result', seq: msg.seq, ok: true, ...res })
       } catch (err) {
-        port.postMessage({ type: 'result', seq: msg.seq, ok: false, error: String(err?.message || err) })
+        port.postMessage({ type: 'result', seq: msg.seq, ok: false, stage: 'run', error: String(err?.message || err) })
       }
     })
   }

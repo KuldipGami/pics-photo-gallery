@@ -25,6 +25,7 @@ import {
   folderPairPercent,
   folderPairSummary,
   isUnder,
+  isLastCopy,
   isWhatsApp,
   KEEP_RULES,
   kindText,
@@ -250,8 +251,14 @@ export function CleanupView(props: Props) {
       }
       return next
     })
+  // files still in the library: a group's best copy may be gone (deleted or moved since)
+  const present = (id: string) => byId.has(id)
   const toggle = (id: string) => {
     if (isProtected(id)) return props.onToast('Files in protected folders are always kept')
+    // never the last copy left unselected in its group (like the Select menu)
+    const g = groupOf.get(id)
+    if (!marks.has(id) && g && isLastCopy(g, id, marks, present))
+      return props.onToast('Every other copy is selected already, so this one is kept. Unselect another copy first to keep that one instead.')
     mark([id], !marks.has(id))
   }
   const applyRule = (gs: DupGroup[], r: KeepRule = rule) =>
@@ -259,7 +266,7 @@ export function CleanupView(props: Props) {
       const next = new Set(prev)
       for (const g of gs) {
         for (const id of g.ids) next.delete(id)
-        for (const id of ruleMarks(g, r, isProtected)) next.add(id)
+        for (const id of ruleMarks(g, r, isProtected, present)) next.add(id)
       }
       return next
     })
@@ -276,8 +283,9 @@ export function CleanupView(props: Props) {
     let added = 0
     const next = new Set(marks)
     for (const g of groups) {
-      let kept = g.ids.filter((id) => !next.has(id)).length
-      for (const i of [...rank(g, rule, isProtected)].reverse()) {
+      // copies left: only those still in the library count
+      let kept = g.ids.filter((id) => present(id) && !next.has(id)).length
+      for (const i of [...rank(g, rule, isProtected, present)].reverse()) {
         const id = g.ids[i]
         const it = byId.get(id)
         if (!it || isProtected(id) || next.has(id) || !test(it, g, i)) continue
@@ -533,7 +541,7 @@ export function CleanupView(props: Props) {
         added++
       }
       // never every copy: keep the rule's pick if everything got selected
-      if (g.ids.every((id) => next.has(id) || !byId.has(id))) next.delete(g.ids[rank(g, rule, isProtected)[0]])
+      if (g.ids.every((id) => next.has(id) || !byId.has(id))) next.delete(g.ids[rank(g, rule, isProtected, present)[0]])
     }
     props.setMarks(() => next)
     props.onToast(added ? `Selected ${formatCount(added)} files in “${baseName(dir)}” that also exist in “${baseName(other)}”` : 'Nothing new to select in that folder')

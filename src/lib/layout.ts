@@ -52,12 +52,14 @@ const monthKey = (ts: number) => {
 /**
  * Lays out a date-grouped square grid. Items must already be sorted by `field`.
  * Every row has a fixed, known height so the grid can be virtualised cheaply.
+ * `grouped: false` is for lists in another order (Find similar: most alike first): no date headers.
  */
 export function buildLayout(
   items: MediaItem[],
   field: 'date' | 'added',
   width: number,
   target: number,
+  grouped = true,
 ): GridLayout {
   const cols = Math.max(2, Math.floor((width + GRID_GAP) / (target + GRID_GAP)))
   const cell = Math.max(40, (width - GRID_GAP * (cols - 1)) / cols)
@@ -66,8 +68,16 @@ export function buildLayout(
   const rows: Row[] = []
   const headers: HeaderRow[] = []
   let y = PAD_TOP
-  let i = 0
 
+  if (!grouped) {
+    for (let s = 0; s < items.length; s += cols) {
+      rows.push({ kind: 'items', key: `r${s}`, top: y, height: cell, start: s, end: Math.min(s + cols, items.length) })
+      y += cell + GRID_GAP
+    }
+    return { rows, headers, total: y + PAD_BOTTOM, cols, cell, mode }
+  }
+
+  let i = 0
   while (i < items.length) {
     const key = keyFn(items[i][field])
     let end = i + 1

@@ -8,6 +8,7 @@ const { Worker } = require('node:worker_threads')
 const sharp = require('sharp')
 const exifr = require('exifr')
 const sig = require('./signature.cjs')
+const { writeAtomic, writeAtomicSync, serial, readJson } = require('./safe-file.cjs')
 const { findVideoPairsAsync, sameLength, alignOffset, DENSE_INTERVAL } = require('./video-frames.cjs')
 
 // Duplicate detection, ported from DupeLens:
@@ -31,6 +32,7 @@ const WORKER_SRC = fs.readFileSync(path.join(__dirname, 'dupes-pairs.cjs'), 'utf
 const THREADS = Math.max(2, Math.min(8, (os.availableParallelism?.() ?? os.cpus().length) - 2))
 
 const COPY_NAME = /(-WA\d+|\bcopy\b|\(\d+\)|^Screenshot|WhatsApp)/i
+const CONFIGURE_MS = 400 // the sensitivity slider: regroup once it has rested this long
 
 /** Same size and content hash: whole-file SHA-1 for photos; size + head, tail and 32 samples for big files. */
 async function contentHash(file, size) {
@@ -122,9 +124,10 @@ function pairsKey(photos, flat, crops, maxDist, findCrops) {
   return h.digest('base64')
 }
 
-// The last photo pairs are kept on disk too (duplicates-pairs.bin: 'LDP1', key length, key, pairs as
-// int32), so a launch with no new photos doesn't compare them all again on every core for seconds.
-const PAIRS_MAGIC = 'LDP1'
+// The last photo pairs are kept on disk too (duplicates-pairs.bin: 'LDP2', key length, key, number
+// of values, pairs as int32), so a launch with no new photos doesn't compare them all again on
+// every core for seconds. (LDP1 had no count: a file mixed from two saves could pass for whole.)
+const PAIRS_MAGIC = 'LDP2'
 
 async function readPairs(file, key) {
   try {
@@ -132,8 +135,10 @@ async function readPairs(file, key) {
     if (buf.toString('latin1', 0, 4) !== PAIRS_MAGIC) return null
     const len = buf.readUInt32LE(4)
     if (buf.toString('utf8', 8, 8 + len) !== key) return null
-    const start = 8 + len
-    const pairs = new Int32Array((buf.length - start) >> 2)
+    const count = buf.readUInt32LE(8 + len)
+    const start = 12 + len
+    if (count % 2 || buf.length !== start + count * 4) return null // incomplete: compare again
+    const pairs = new Int32Array(count)
     for (let i = 0; i < pairs.length; i++) pairs[i] = buf.readInt32LE(start + i * 4)
     return [pairs]
   } catch {
@@ -144,16 +149,14 @@ async function readPairs(file, key) {
 async function writePairs(file, key, parts) {
   const k = Buffer.from(key, 'utf8')
   const total = parts.reduce((n, p) => n + p.length, 0)
-  const buf = Buffer.alloc(8 + k.length + total * 4)
+  const buf = Buffer.alloc(12 + k.length + total * 4)
   buf.write(PAIRS_MAGIC, 0, 'latin1')
   buf.writeUInt32LE(k.length, 4)
   k.copy(buf, 8)
-  let at = 8 + k.length
+  buf.writeUInt32LE(total, 8 + k.length)
+  let at = 12 + k.length
   for (const p of parts) for (const v of p) at = buf.writeInt32LE(v, at)
-  try {
-    await fsp.writeFile(`${file}.tmp`, buf)
-    await fsp.rename(`${file}.tmp`, file)
-  } catch {}
+  await writeAtomic(file, buf).catch(() => {}) // only a cache: next time it's worked out again
 }
 
 /** All pairs of fingerprints within `maxDist`, on several worker threads (null for a part whose worker failed). */
@@ -220,16 +223,37 @@ class Duplicates extends EventEmitter {
     this.running = false
     this.again = false
     this.timers = {}
+    this.dirty = false // changes not on disk yet
+    this.blocked = false // duplicates.json couldn't be read: don't save over it this session
+    this.regrouping = null // the regroup in progress (one at a time)
+    this.asked = 0 // regroups asked for…
+    this.formed = 0 // …and the newest one whose result is shown
+    this.writer = serial(async () => {
+      const text = this.serialize()
+      this.writing = true
+      try {
+        await writeAtomic(this.file, text)
+      } finally {
+        this.writing = false
+        this.rewriteIfFlushed()
+      }
+    })
   }
 
   async load() {
     await this.videoFrames?.load()
-    try {
-      const data = JSON.parse(await fsp.readFile(this.file, 'utf8'))
-      this.dismissed = new Set(data.dismissed ?? [])
-      if (data.version !== VERSION) return
-      for (const [id, r] of Object.entries(data.items)) this.records.set(id, r)
-    } catch {}
+    const r = await readJson(this.file)
+    if (r.error) {
+      this.blocked = true
+      console.error('[duplicates] duplicates.json could not be read; not saving over it this session', r.error)
+      return
+    }
+    if (r.corrupt) console.error(`[duplicates] duplicates.json was damaged (kept as ${r.keptAs}); checking again`)
+    const data = r.data
+    if (!data || typeof data !== 'object') return
+    this.dismissed = new Set(Array.isArray(data.dismissed) ? data.dismissed.filter((k) => typeof k === 'string') : [])
+    if (data.version !== VERSION || !data.items || typeof data.items !== 'object') return
+    for (const [id, rec] of Object.entries(data.items)) if (rec && typeof rec === 'object') this.records.set(id, rec)
   }
 
   serialize() {
@@ -237,29 +261,67 @@ class Duplicates extends EventEmitter {
   }
 
   saveSoon(ms = 10_000) {
-    if (this.timers.save) return
+    this.dirty = true
+    if (this.timers.save || this.disposed) return
     this.timers.save = setTimeout(() => this.save(), ms)
   }
 
   async save() {
     clearTimeout(this.timers.save)
     this.timers.save = null
+    if (this.blocked) return
+    this.dirty = false
     try {
-      const tmp = `${this.file}.tmp`
-      await fsp.writeFile(tmp, this.serialize())
-      await fsp.rename(tmp, this.file)
+      await this.writer()
     } catch (err) {
       console.error('Failed to save duplicates cache', err)
+      this.saveSoon(60_000) // still owed: again later, and at quit
     }
   }
 
   saveNow() {
-    if (!this.timers.save) return
+    if (this.blocked || (!this.dirty && !this.writing)) return
     clearTimeout(this.timers.save)
     this.timers.save = null
     try {
-      fs.writeFileSync(this.file, this.serialize())
+      writeAtomicSync(this.file, this.serialize())
+      this.dirty = false
+    } catch (err) {
+      console.error('Failed to save duplicates cache', err)
+    }
+    // a save still on its way would land after this one, with older data: it writes this again then
+    if (this.writing) this.flushed = true
+  }
+
+  rewriteIfFlushed() {
+    if (!this.flushed) return
+    this.flushed = false
+    try {
+      writeAtomicSync(this.file, this.serialize())
     } catch {}
+  }
+
+  /**
+   * Files Lumen moved or renamed (`ids`: Map old id → new id): their cached facts follow them, and
+   * so do "not duplicates" choices (a dismissed group is known by its members' ids).
+   */
+  remapIds(ids) {
+    let changed = false
+    for (const [oldId, newId] of ids) {
+      if (oldId === newId || !this.records.has(oldId)) continue
+      this.records.set(newId, this.records.get(oldId))
+      this.records.delete(oldId)
+      changed = true
+    }
+    const dismissed = new Set()
+    for (const key of this.dismissed) {
+      const parts = key.split(',')
+      const moved = parts.map((id) => ids.get(id) ?? id)
+      if (moved.some((id, i) => id !== parts[i])) changed = true
+      dismissed.add(moved.sort().join(','))
+    }
+    this.dismissed = dismissed
+    if (changed) this.saveSoon(2000)
   }
 
   /** Match threshold (80–99 %), crop matching and the library folder order (for keep priority). */
@@ -268,7 +330,14 @@ class Duplicates extends EventEmitter {
     next.sensitivity = Math.round(Math.min(99, Math.max(80, Number(next.sensitivity) || 90)))
     const changed = JSON.stringify(next) !== JSON.stringify(this.settings)
     this.settings = next
-    if (changed && this.items.length && !this.running) this.regroup().catch((err) => console.error('[duplicates] regroup failed', err))
+    if (!changed || !this.items.length) return
+    // Dragging the sensitivity slider calls this at every step: regroup once, when it rests.
+    clearTimeout(this.timers.configure)
+    this.timers.configure = setTimeout(() => {
+      if (this.disposed) return
+      if (this.running) this.again = true // the scan in progress goes round once more
+      else this.regroup().catch((err) => console.error('[duplicates] regroup failed', err))
+    }, CONFIGURE_MS)
   }
 
   /** Called whenever the library changes; the scan itself waits until previews are done. */
@@ -385,8 +454,32 @@ class Duplicates extends EventEmitter {
     }, 1000)
   }
 
-  /** Re-forms the groups from cached facts (also after changing the match threshold). */
-  async regroup() {
+  /**
+   * Re-forms the groups from cached facts (also after changing the match threshold). One runs at a
+   * time: asked again meanwhile, it runs once more afterwards, and a result that was already out of
+   * date when it was ready (the threshold moved again, new frames came in) isn't shown.
+   */
+  regroup() {
+    this.asked++
+    if (!this.regrouping) {
+      this.regrouping = (async () => {
+        try {
+          while (this.formed < this.asked && !this.disposed) {
+            const ask = this.asked
+            await this.form(ask)
+            this.formed = ask
+          }
+        } finally {
+          this.regrouping = null
+        }
+      })()
+    }
+    return this.regrouping
+  }
+
+  /** One regroup (see regroup()); `ask` is its number, to tell whether a newer one is wanted. */
+  async form(ask) {
+    const stale = () => this.asked !== ask || this.disposed
     const items = this.items
     const maxDist = sig.maxDistanceFor(this.settings.sensitivity / 100)
     const index = new Map(items.map((it, i) => [it.id, i]))
@@ -436,6 +529,7 @@ class Duplicates extends EventEmitter {
       }
       parts = parts.filter(Boolean)
     }
+    if (stale()) return
     for (const part of parts) {
       for (let k = 0; k < part.length; k += 2) uf.union(index.get(photos[part[k]].id), index.get(photos[part[k + 1]].id))
     }
@@ -458,6 +552,7 @@ class Duplicates extends EventEmitter {
         return { d: f.d, s: f.s, x: f.x }
       })
       const { pairs } = await findVideoPairsAsync(input, maxDist)
+      if (stale()) return
       for (const [a, b] of pairs) uf.union(index.get(analysed[a].id), index.get(analysed[b].id))
     }
     // Not read yet: for now the preview frame stands in (same length only), as before.
@@ -507,6 +602,7 @@ class Duplicates extends EventEmitter {
       const r = this.records.get(it.id)
       if (r) r.d = (await dimensions(it)) ?? null
     })
+    if (stale()) return
 
     const groups = raw
       .map((list) => this.describe(list, words))
@@ -664,6 +760,7 @@ class Duplicates extends EventEmitter {
     this.disposed = true
     clearTimeout(this.timers.sync)
     clearTimeout(this.timers.regroup)
+    clearTimeout(this.timers.configure)
     this.videoFrames?.dispose()
     this.saveNow()
   }

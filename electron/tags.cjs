@@ -1,13 +1,31 @@
-const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const path = require('node:path')
 const { EventEmitter } = require('node:events')
+const { AsyncLocalStorage } = require('node:async_hooks')
 const { idOf, keyOf } = require('./library.cjs')
 const xmp = require('./xmp.cjs')
+const { writeAtomic, writeAtomicSync, serial, readJson } = require('./safe-file.cjs')
 
 const RATING = 1
 const TAGS = 2
 const RETRIES = 3
+
+// Which hold() the running code is inside (a hold started from within one runs as part of it).
+const holding = new AsyncLocalStorage()
+
+/** A saved entry, checked: { path, edited, rating?, tags?, stamp?, dirty? } or null. */
+function cleanEntry(e) {
+  if (!e || typeof e.path !== 'string') return null
+  const entry = { path: e.path, edited: Number(e.edited) || 0 }
+  if (e.rating !== undefined) entry.rating = xmp.cleanRating(e.rating)
+  if (Array.isArray(e.tags)) entry.tags = xmp.cleanTags(e.tags)
+  if (Array.isArray(e.stamp) && e.stamp.length === 2) entry.stamp = e.stamp.map(Number)
+  if (e.dirty) entry.dirty = e.dirty & (RATING | TAGS)
+  return entry
+}
+
+/** An entry as plain JSON (without the writer's bookkeeping). */
+const plainEntry = ({ gen, tries, ...e }) => JSON.parse(JSON.stringify(e))
 
 /**
  * Star ratings and tags set in Lumen (tags.json), keyed by file path like favorites and albums.
@@ -31,26 +49,42 @@ class Tags extends EventEmitter {
     this.timer = null
     this.queue = new Set()
     this.pumping = false
-    this.holds = 0
+    this.holds = 0 // holds running or waiting their turn
+    this.holdTail = Promise.resolve() // the last hold in line
     this.idleWaiters = []
     this.started = false
+    // Saving: every change bumps `changes`; `saved` is the change count last written to tags.json.
+    this.changes = 0
+    this.saved = 0
+    this.saving = null
+    this.loadError = null // tags.json exists but couldn't be read: it is never written over this session
+    this.writeOut = serial(async () => {
+      const upTo = this.changes
+      if (this.loadError || this.saved >= upTo) return
+      await writeAtomic(this.file, this.serialize())
+      this.saved = Math.max(this.saved, upTo)
+    })
   }
 
   async load() {
-    try {
-      const data = JSON.parse(await fsp.readFile(this.file, 'utf8'))
-      if (data.version === 1 && Array.isArray(data.items)) {
-        for (const e of data.items) {
-          if (!e || typeof e.path !== 'string') continue
-          const entry = { path: e.path, edited: Number(e.edited) || 0 }
-          if (e.rating !== undefined) entry.rating = xmp.cleanRating(e.rating)
-          if (Array.isArray(e.tags)) entry.tags = xmp.cleanTags(e.tags)
-          if (Array.isArray(e.stamp) && e.stamp.length === 2) entry.stamp = e.stamp.map(Number)
-          if (e.dirty) entry.dirty = e.dirty & (RATING | TAGS)
-          this.entries.set(keyOf(e.path), entry)
-        }
-      }
-    } catch {}
+    const res = await readJson(this.file)
+    if (res.error) {
+      this.loadError = res.error
+      console.error("tags.json couldn't be read; it won't be saved over this session", res.error)
+      return
+    }
+    if (res.corrupt) console.error('tags.json was damaged and has been kept as', res.keptAs)
+    const data = res.data
+    if (data === undefined) return // first run, or damaged (kept aside): start empty
+    if (data?.version !== 1 || !Array.isArray(data.items)) {
+      this.loadError = new Error('tags.json is in a format this version of Lumen does not know')
+      console.error(this.loadError.message)
+      return
+    }
+    for (const e of data.items) {
+      const entry = cleanEntry(e)
+      if (entry) this.entries.set(keyOf(entry.path), entry)
+    }
   }
 
   serialize() {
@@ -58,6 +92,7 @@ class Tags extends EventEmitter {
   }
 
   saveSoon() {
+    this.changes++
     clearTimeout(this.timer)
     this.timer = setTimeout(() => this.save(), 500)
   }
@@ -66,9 +101,7 @@ class Tags extends EventEmitter {
     clearTimeout(this.timer)
     this.timer = null
     try {
-      const tmp = `${this.file}.tmp`
-      await fsp.writeFile(tmp, this.serialize())
-      await fsp.rename(tmp, this.file)
+      await (this.saving = this.writeOut())
     } catch (err) {
       console.error('Failed to save tags', err)
     }
@@ -76,12 +109,16 @@ class Tags extends EventEmitter {
 
   /** On quit (sync). Pending file writes stay marked and are retried by resume() next time. */
   saveNow() {
-    if (!this.timer) return
     clearTimeout(this.timer)
     this.timer = null
+    if (this.loadError || this.saved >= this.changes) return
+    const upTo = this.changes
     try {
-      fs.writeFileSync(this.file, this.serialize())
-    } catch {}
+      writeAtomicSync(this.file, this.serialize())
+      this.saved = upTo
+    } catch (err) {
+      console.error('Failed to save tags', err)
+    }
   }
 
   changed() {
@@ -95,8 +132,20 @@ class Tags extends EventEmitter {
     if (sidecars !== undefined) this.sidecars = !!sidecars
   }
 
-  /** For the UI: { byItem: { [itemId]: { rating?, tags? } } } — only values set in Lumen. */
-  snapshot() {
+  /**
+   * For the UI: { byItem: { [itemId]: { rating?, tags? } } } — only values set in Lumen.
+   * With `paths` (an array): the entries Lumen holds for those files, as plain JSON, so they can
+   * be put back with restoreEntries() (e.g. when a Clean up move that forgot them is undone).
+   */
+  snapshot(paths) {
+    if (Array.isArray(paths)) {
+      const out = []
+      for (const p of paths) {
+        const e = typeof p === 'string' ? this.entries.get(keyOf(p)) : null
+        if (e) out.push(plainEntry(e))
+      }
+      return out
+    }
     const byItem = {}
     for (const e of this.entries.values()) {
       const v = {}
@@ -215,6 +264,50 @@ class Tags extends EventEmitter {
   }
 
   /**
+   * Puts back entries taken with snapshot(paths), keyed by their path (an entry set since for the
+   * same file is kept when it is newer). Values not yet written into their file are queued again.
+   * Returns how many were put back.
+   */
+  restoreEntries(entries) {
+    let n = 0
+    for (const raw of Array.isArray(entries) ? entries : []) {
+      const e = cleanEntry(raw)
+      if (!e) continue
+      const key = keyOf(e.path)
+      const current = this.entries.get(key)
+      if (current && current.edited > e.edited) continue
+      this.entries.set(key, e)
+      if (e.dirty) this.queueWrite(key)
+      n++
+    }
+    if (n) this.changed()
+    return n
+  }
+
+  /**
+   * Writes Lumen's rating and tags into these files again (e.g. after History put an edited photo's
+   * original back, which doesn't have them). Returns how many files were queued.
+   */
+  rewrite(paths) {
+    let n = 0
+    for (const p of Array.isArray(paths) ? paths : []) {
+      const key = typeof p === 'string' ? keyOf(p) : null
+      const e = key && this.entries.get(key)
+      if (!e) continue
+      const bits = (e.rating !== undefined ? RATING : 0) | (e.tags !== undefined ? TAGS : 0)
+      if (!bits) continue
+      e.dirty = (e.dirty ?? 0) | bits
+      e.gen = (e.gen ?? 0) + 1
+      e.tries = 0
+      delete e.stamp // it described the file before; the next write records the new one
+      this.queueWrite(key)
+      n++
+    }
+    if (n) this.saveSoon()
+    return n
+  }
+
+  /**
    * After a scan: a photo Lumen wrote whose file changed since (Explorer, Lightroom…) goes back
    * to the file's values; one whose library item now shows the same values needs no entry.
    */
@@ -271,23 +364,50 @@ class Tags extends EventEmitter {
 
   /**
    * Runs `fn` while no file is being written (e.g. Lumen moving, rotating or re-dating photos),
-   * then carries on. Resolves to fn's result.
+   * then carries on. Held jobs run one at a time, in the order asked, each after the tag write in
+   * progress (so two quick rotations never read the same old bytes). A hold asked for from inside a
+   * running one runs straight away, as part of it. Resolves to fn's result.
    */
   async hold(fn) {
+    const inside = holding.getStore()
+    if (inside?.tags === this && inside.active) return fn()
     this.holds++
+    const turn = this.holdTail.then(async () => {
+      await this.current?.catch(() => {})
+      const ctx = { tags: this, active: true }
+      try {
+        return await holding.run(ctx, fn)
+      } finally {
+        ctx.active = false
+      }
+    })
+    this.holdTail = turn.catch(() => {})
     try {
-      await this.current
-      return await fn()
+      return await turn
     } finally {
       this.holds--
       this.pump()
+      this.settleIdle()
     }
   }
 
-  /** Resolves once every queued write has been done (e.g. before quitting). */
-  flush() {
-    if ((!this.queue.size && !this.pumping) || !this.started) return Promise.resolve()
-    return new Promise((resolve) => this.idleWaiters.push(resolve))
+  /**
+   * Resolves once nothing is rewriting files any more: every queued tag write done, no held job
+   * running or waiting, and the latest tags.json save finished (e.g. before quitting). Resolves
+   * at once when that's already so. Writes still waiting to retry a busy file stay marked and are
+   * done next time.
+   */
+  async flush() {
+    if (!this.isIdle()) await new Promise((resolve) => this.idleWaiters.push(resolve))
+    await this.saving?.catch(() => {})
+  }
+
+  isIdle() {
+    return !this.holds && !this.pumping && (!this.started || !this.queue.size)
+  }
+
+  settleIdle() {
+    if (this.isIdle()) for (const resolve of this.idleWaiters.splice(0)) resolve()
   }
 
   async pump() {
@@ -303,7 +423,7 @@ class Tags extends EventEmitter {
     } finally {
       this.current = null
       this.pumping = false
-      if (!this.queue.size) for (const resolve of this.idleWaiters.splice(0)) resolve()
+      this.settleIdle()
     }
   }
 

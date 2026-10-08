@@ -119,6 +119,8 @@ const hhmm = (ms) => {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 const value = (v) => (typeof v === 'function' ? v() : v)
+/** Same objects in the same order? (Items aren't renamed in place: a moved file is a new item.) */
+const sameItems = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((it, i) => it === b[i])
 const normFolder = (x) => keyOf(path.resolve(String(x))).replace(/[\\/]+$/, '')
 
 /** DupeLens' alert texts. */
@@ -298,6 +300,10 @@ class WatchAlerts extends EventEmitter {
   /** Known files by path key (rebuilt when the library list is replaced). */
   knownByKey() {
     const items = this.items()
+    const index = this.index
+    // The same items in a new array (private.cjs' split() makes one on every call): comparing them
+    // costs far less than building a 15,000-entry map again.
+    if (index && index.ref !== items && sameItems(index.ref, items)) index.ref = items
     if (this.index?.ref !== items) this.index = { ref: items, map: new Map(items.filter((it) => it?.path).map((it) => [keyOf(it.path), it])) }
     return this.index.map
   }

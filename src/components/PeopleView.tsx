@@ -1,4 +1,4 @@
-import { Check, Eye, LoaderCircle, ScanFace, Sparkles } from 'lucide-react'
+import { Check, Eye, LoaderCircle, ScanFace, Sparkles, TriangleAlert } from 'lucide-react'
 import { formatCount } from '../lib/format'
 import type { MediaItem, PeopleProgress, Person } from '../types'
 import { FaceAvatar } from './FaceAvatar'
@@ -54,7 +54,7 @@ export function PeopleView(props: Props) {
     ) : (
       <EmptyState
         icon={<ScanFace size={44} strokeWidth={1.5} />}
-        title={progress.error ? "Face recognition couldn't start" : 'No people yet'}
+        title={progress.error ? "Face recognition isn't running" : 'No people yet'}
         text={
           progress.error ??
           'People show up here once the same face appears in at least three photos. New photos are analysed automatically.'
@@ -65,6 +65,16 @@ export function PeopleView(props: Props) {
 
   return (
     <div className="people-scroll">
+      {/* face analysis stopped (couldn't start, its data couldn't be read, keeps failing): the people found so far stay */}
+      {progress.error && (
+        <div className="review-banner warn" role="status">
+          <TriangleAlert size={18} />
+          <div>
+            <strong>Face recognition isn't running.</strong>
+            <span> {progress.error}</span>
+          </div>
+        </div>
+      )}
       {progress.upgrading && progress.running && (
         <div className="review-banner">
           <LoaderCircle size={18} className="spin" />

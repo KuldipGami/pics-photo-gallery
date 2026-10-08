@@ -1,7 +1,8 @@
 const fsp = require('node:fs/promises')
 const path = require('node:path')
 const sharp = require('sharp')
-const { run, probe, encoders, encoderArgs, FfmpegError, Canceled, TONEMAP } = require('./ffmpeg.cjs')
+const { run, probe, encoders, encoderArgs, FfmpegError, Canceled, TONEMAP, trackTemp, untrackTemp } = require('./ffmpeg.cjs')
+const { renameRetry } = require('./safe-file.cjs')
 
 /**
  * Video edits, always saved as a new file next to the original (the original is never changed).
@@ -212,7 +213,7 @@ async function saveEdit(item, recipe, { onProgress, signal } = {}) {
   else maps.push('-an')
 
   const finish = async (mode, encoder) => {
-    await fsp.rename(part, file)
+    await renameRetry(part, file) // (antivirus may still be reading the new file)
     // the copy sits next to the original in date order (file date as well as metadata)
     const st = await fsp.stat(item.path).catch(() => null)
     const mtime = st ? st.mtime : new Date(item.mtime || Date.now())
@@ -221,6 +222,7 @@ async function saveEdit(item, recipe, { onProgress, signal } = {}) {
   }
   const progress = (f) => onProgress?.(f)
 
+  trackTemp(part) // deleted at quit if the app closes mid-save
   try {
     if (copy) {
       await run([...input, ...maps, '-c', 'copy', ...meta, '-f', muxer, '-y', part], { duration: outDuration, onProgress: progress, signal })
@@ -288,6 +290,8 @@ async function saveEdit(item, recipe, { onProgress, signal } = {}) {
   } catch (err) {
     await fsp.rm(part, { force: true }).catch(() => {})
     throw err
+  } finally {
+    untrackTemp(part)
   }
 }
 

@@ -271,15 +271,17 @@ async function erase({ width: W, height: H, image, strokes, feather, cached }) {
     spare = m * Math.sin(t)
     return m * Math.cos(t)
   }
+  // (with grain, bright and dark pixels go past 0–255: a Buffer would wrap them to speckles)
+  const byte = (v) => (v <= 0 ? 0 : v >= 255 ? 255 : Math.round(v))
   for (let i = 0; i < n; i++) {
     const d = dist[i]
     if (!(d < feather)) continue
     const a = d <= 0 ? 1 : 1 - d / feather
     const j = i * 3
     const g = grain ? a * gauss() * grain(i % W, (i / W) | 0) : 0
-    data[j] = Math.round(a * fill[j] + (1 - a) * src[j] + g)
-    data[j + 1] = Math.round(a * fill[j + 1] + (1 - a) * src[j + 1] + g)
-    data[j + 2] = Math.round(a * fill[j + 2] + (1 - a) * src[j + 2] + g)
+    data[j] = byte(a * fill[j] + (1 - a) * src[j] + g)
+    data[j + 1] = byte(a * fill[j + 1] + (1 - a) * src[j + 1] + g)
+    data[j + 2] = byte(a * fill[j + 2] + (1 - a) * src[j + 2] + g)
   }
   return { data, out, ms: performance.now() - started, inferMs }
 }

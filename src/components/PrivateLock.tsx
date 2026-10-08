@@ -1,4 +1,4 @@
-import { EyeOff, FolderLock, KeyRound, LoaderCircle, Lock, LockKeyhole, ScanFace, ShieldAlert } from 'lucide-react'
+import { EyeOff, FolderLock, KeyRound, LoaderCircle, Lock, LockKeyhole, RefreshCcw, ScanFace, ShieldAlert } from 'lucide-react'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { formatCount } from '../lib/format'
 import { useDialogKeys } from './PersonDialogs'
@@ -23,6 +23,10 @@ export interface PrivateStatus {
   hasPin: boolean
   /** Too many wrong PINs: wait this long. */
   waitMs: number
+  /** How many items are private. */
+  count: number
+  /** A first PIN can be chosen now (nothing private yet, or Windows Hello was never the key). */
+  canSetup?: boolean
 }
 
 export interface UnlockResult {
@@ -41,6 +45,8 @@ export interface PrivateBridge {
   setPin(pin: string): Promise<{ ok: boolean; error?: string }>
   lock(): Promise<void>
   onStatus(cb: (status: PrivateStatus) => void): () => void
+  /** Asks Windows again whether Windows Hello can be used (after it didn't answer). */
+  recheckHello(): Promise<PrivateStatus>
 }
 
 const HELLO_WHY: Record<HelloState, string> = {
@@ -78,8 +84,21 @@ export interface PrivateLockProps {
   onReset?(): void
 }
 
+type LockMode = 'hello' | 'pin' | 'setup' | 'stuck' | 'forgot'
+
+/**
+ * The screen for a status. Choosing a first PIN is offered unless Windows Hello is the key to
+ * private items: then, when it doesn't answer, the screen says so (Try again) instead of letting
+ * anyone set a new PIN.
+ */
+function screenFor(status: PrivateStatus, current: LockMode): LockMode {
+  if (status.hello === 'available') return current === 'pin' && status.hasPin ? 'pin' : 'hello'
+  if (status.hasPin) return 'pin'
+  return (status.canSetup ?? status.count === 0) ? 'setup' : 'stuck'
+}
+
 export function PrivateLock({ status, bridge, onReset }: PrivateLockProps) {
-  const [mode, setMode] = useState<'hello' | 'pin' | 'setup' | 'forgot'>('hello')
+  const [mode, setMode] = useState<LockMode>('hello')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [waitUntil, setWaitUntil] = useState(0)
@@ -92,8 +111,8 @@ export function PrivateLock({ status, bridge, onReset }: PrivateLockProps) {
   // Pick the right screen once Windows has answered.
   useEffect(() => {
     if (!status || status.hello === undefined) return
-    setMode((m) => (m === 'forgot' ? m : status.hello === 'available' ? (m === 'pin' && status.hasPin ? 'pin' : 'hello') : status.hasPin ? 'pin' : 'setup'))
-  }, [status?.hello, status?.hasPin])
+    setMode((m) => (m === 'forgot' ? m : screenFor(status, m)))
+  }, [status?.hello, status?.hasPin, status?.count, status?.canSetup])
 
   useEffect(() => {
     if (status?.waitMs) setWaitUntil(Date.now() + status.waitMs)
@@ -111,6 +130,14 @@ export function PrivateLock({ status, bridge, onReset }: PrivateLockProps) {
     const r = await bridge.unlockHello().catch(() => ({ ok: false, reason: 'error' }) as UnlockResult)
     setBusy(false)
     if (!r.ok) setError(HELLO_FAIL[r.reason ?? 'error'] ?? HELLO_FAIL.error)
+  }
+  const recheckHello = async () => {
+    setBusy(true)
+    setError('')
+    const s = await bridge.recheckHello().catch(() => null)
+    setBusy(false)
+    if (!s) setError(HELLO_FAIL.error)
+    else if (s.hello !== 'available') setError(`${HELLO_WHY[s.hello ?? 'unsupported']}. Try again in a moment.`)
   }
 
   if (checking) {
@@ -198,14 +225,39 @@ export function PrivateLock({ status, bridge, onReset }: PrivateLockProps) {
           </>
         )}
 
+        {mode === 'stuck' && (
+          <>
+            <p>
+              {HELLO_WHY[hello ?? 'unsupported']}. Your private photos and videos open with Windows Hello, so Private can't be unlocked until it
+              answers again.
+            </p>
+            <button className="btn primary large priv-main" onClick={recheckHello} disabled={busy}>
+              {busy ? <LoaderCircle size={17} className="spin" /> : <RefreshCcw size={17} />}
+              {busy ? 'Asking Windows Hello…' : 'Try again'}
+            </button>
+            {error && <div className="priv-error">{error}</div>}
+            <p className="priv-small">
+              If Windows Hello was turned off or removed, set it up again in Windows Settings → Accounts → Sign-in options, then try again.
+            </p>
+            {onReset && (
+              <button className="link priv-alt" onClick={() => setMode('forgot')}>
+                Can't use Windows Hello any more?
+              </button>
+            )}
+          </>
+        )}
+
         {mode === 'forgot' && (
           <>
             <p>
-              Lumen can't show private items without your PIN. Resetting forgets the PIN and every private mark, so all your private photos and videos
-              show up in your library again (files in the hidden private folder are moved back to where they were).
+              {status.hasPin
+                ? "Lumen can't show private items without your PIN. Resetting forgets the PIN and every private mark,"
+                : "Lumen can't show private items without Windows Hello. Resetting forgets every private mark,"}{' '}
+              so all your private photos and videos show up in your library again (files in the hidden private folder are moved back to where they
+              were).
             </p>
             <div className="priv-row">
-              <button className="btn ghost" onClick={() => setMode('pin')}>
+              <button className="btn ghost" onClick={() => setMode(screenFor(status, 'pin'))}>
                 Back
               </button>
               <button className="btn danger" onClick={onReset}>

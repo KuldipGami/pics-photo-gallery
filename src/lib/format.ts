@@ -35,11 +35,13 @@ export function formatBytes(bytes: number) {
   const units = ['KB', 'MB', 'GB', 'TB']
   let value = bytes / 1024
   let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
+  // the value as it will be shown (rounded), so 1,048,500 bytes is "1.0 MB", not "1024 KB"
+  const shown = (v: number) => (Math.round(v * 10) / 10 >= 100 ? Math.round(v) : Math.round(v * 10) / 10)
+  while (shown(value) >= 1024 && unit < units.length - 1) {
     value /= 1024
     unit++
   }
-  return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`
+  return `${Math.round(value * 10) / 10 >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`
 }
 
 export function formatDuration(seconds?: number) {

@@ -7,6 +7,7 @@ const { EventEmitter } = require('node:events')
 const sharp = require('sharp')
 const exifr = require('exifr')
 const { WorkerPool, heifSize } = require('./workers.cjs')
+const { renameRetry } = require('./safe-file.cjs')
 
 // One libvips thread per image and many images in parallel scales far better for
 // thumbnails than one image using every core. No cache, so files are never held open.
@@ -20,6 +21,31 @@ const ALPHA_EXT = new Set(['png', 'webp', 'gif', 'avif', 'tif', 'tiff'])
 const CORES = os.availableParallelism?.() ?? os.cpus().length
 const CPU_JOBS = Math.max(2, Math.min(16, CORES - 2))
 const RETRY_FAILED_MS = 5 * 60_000
+const SWEEP_AFTER_MS = 10_000
+// temp files are "<name>.<pid>-<n>.tmp" (as safe-file.cjs names them): ours, while being written, carry this
+const OWN_TEMP = `.${process.pid}-`
+
+let tempCount = 0
+/**
+ * Writes a cached file whole or not at all: to a temp file of its own, then renamed into place, so
+ * Lumen crashing mid-write can't leave half a preview behind. Not flushed to disk (unlike Lumen's
+ * own data): it's only a cache, and flushing each of ~30,000 files would slow the first run down;
+ * what a power cut might leave is caught by looksWhole() and made again.
+ */
+async function writeCacheFile(file, data) {
+  const tmp = `${file}${OWN_TEMP}${(tempCount++).toString(36)}.tmp`
+  try {
+    await fsp.writeFile(tmp, data)
+    await renameRetry(tmp, file)
+  } catch (err) {
+    await fsp.rm(tmp, { force: true }).catch(() => {})
+    throw err
+  }
+}
+
+/** Cached files are JPEG or WebP (PNG let through too): anything else (empty, zeros) is a broken one. */
+const looksWhole = (buf) =>
+  buf.length > 4 && ((buf[0] === 0xff && buf[1] === 0xd8) || ['RIFF', '\x89PNG'].includes(buf.toString('latin1', 0, 4)))
 
 /**
  * v1.0 cached thumbnails as `<id>_<version>_<kind>.jpg`; v1.1+ uses `.img` (JPEG or WebP).
@@ -140,7 +166,8 @@ class Thumbnails extends EventEmitter {
     super()
     this.dir = dir
     fs.mkdirSync(dir, { recursive: true })
-    this.cached = new Set(migrateLegacyCache(dir))
+    // (temp files are half-written previews: never cached ones)
+    this.cached = new Set(migrateLegacyCache(dir).filter((name) => !name.endsWith('.tmp')))
     this.jobs = new Map()
     this.failed = new Map() // name -> time of failure
     this.cpu = new Lane(CPU_JOBS, Math.max(1, CPU_JOBS - 2))
@@ -153,6 +180,41 @@ class Thumbnails extends EventEmitter {
     this.frameWorkers = null // video fingerprints (duplicates): its own offscreen worker, made on first use
     this.background = { pending: 0, total: 0 }
     this.progressTimer = null
+    // Empty previews (older versions wrote them in place, so a crash could leave one) and temp files
+    // left by a crash are cleared out a little after start-up: checking ~30,000 file sizes then
+    // would hold it up.
+    this.sweepTimer = setTimeout(() => this.sweep().catch(() => {}), SWEEP_AFTER_MS)
+    this.sweepTimer.unref?.()
+  }
+
+  /** Forgets and deletes empty cached files and other runs' leftover temp files. */
+  async sweep() {
+    for (const name of await fsp.readdir(this.dir).catch(() => [])) {
+      if (this.disposed) return
+      const full = path.join(this.dir, name)
+      if (name.endsWith('.tmp')) {
+        if (!name.includes(OWN_TEMP)) await fsp.rm(full, { force: true }).catch(() => {})
+        continue
+      }
+      if (!this.cached.has(name) || this.jobs.has(name)) continue
+      const st = await fsp.stat(full).catch(() => null)
+      if (st?.size !== 0 || this.jobs.has(name)) continue
+      this.cached.delete(name)
+      await fsp.rm(full, { force: true }).catch(() => {})
+    }
+  }
+
+  /** The cached file's bytes, or null (not cached, or broken / unreadable: then it's made again). */
+  async readCached(name) {
+    if (!this.cached.has(name)) return null
+    const full = path.join(this.dir, name)
+    try {
+      const buf = await fsp.readFile(full)
+      if (looksWhole(buf)) return buf
+      await fsp.rm(full, { force: true }).catch(() => {}) // empty or cut short by a crash
+    } catch {}
+    this.cached.delete(name)
+    return null
   }
 
   name(item, kind) {
@@ -179,13 +241,8 @@ class Thumbnails extends EventEmitter {
   /** Thumbnail bytes (JPEG or WebP) or null. Generates on demand at high priority. */
   async get(item, kind = 'thumb') {
     const name = this.name(item, kind)
-    if (this.cached.has(name)) {
-      try {
-        return await fsp.readFile(path.join(this.dir, name))
-      } catch {
-        this.cached.delete(name)
-      }
-    }
+    const cached = await this.readCached(name)
+    if (cached) return cached
     if (this.isFailed(name)) return null
     return this.schedule(item, kind, 'high')
   }
@@ -193,13 +250,8 @@ class Thumbnails extends EventEmitter {
   /** Thumbnail bytes for background analysis: the cached copy, else generated at background priority. */
   async ensure(item) {
     const name = this.name(item, 'thumb')
-    if (this.cached.has(name)) {
-      try {
-        return await fsp.readFile(path.join(this.dir, name))
-      } catch {
-        this.cached.delete(name)
-      }
-    }
+    const cached = await this.readCached(name)
+    if (cached) return cached
     if (this.isFailed(name)) return null
     return this.schedule(item, 'thumb', 'low')
   }
@@ -282,7 +334,8 @@ class Thumbnails extends EventEmitter {
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
     if (kind === 'analysis') return buf
     try {
-      await fsp.writeFile(path.join(this.dir, name), buf)
+      // whole or not at all: a crash mid-write must not leave a broken preview behind for good
+      await writeCacheFile(path.join(this.dir, name), buf)
       this.cached.add(name)
     } catch {}
     return buf
@@ -352,6 +405,7 @@ class Thumbnails extends EventEmitter {
       const prefix = name.slice(0, name.lastIndexOf('_') + 1)
       if (name.endsWith('.img') && keep.has(prefix)) continue
       if (this.jobs.has(name)) continue
+      if (name.endsWith('.tmp') && name.includes(OWN_TEMP)) continue // being written right now
       this.cached.delete(name)
       await fsp.rm(path.join(this.dir, name), { force: true }).catch(() => {})
     }
@@ -381,6 +435,7 @@ class Thumbnails extends EventEmitter {
   /** The app is quitting: drop queued work and close the worker windows for good. */
   dispose() {
     this.disposed = true
+    clearTimeout(this.sweepTimer)
     for (const lane of [this.cpu, this.gpu, this.shell]) {
       lane.high = []
       lane.low = []

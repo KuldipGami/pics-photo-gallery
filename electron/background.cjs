@@ -128,14 +128,22 @@ function startWithWindows(on, { app, execPath } = {}) {
   app.setLoginItemSettings({ openAtLogin: !!on, path: o.path, args: o.args })
 }
 
+/**
+ * Whether Lumen will really start when the user signs in. openAtLogin stays true when Lumen was
+ * turned off in Task Manager → Startup apps (or Settings → Apps → Startup), so an entry only counts
+ * while Windows has it enabled.
+ */
 function isStartWithWindows({ app, execPath } = {}) {
   app ??= electron().app
   const o = loginItemOptions(app, execPath)
   const s = app.getLoginItemSettings({ path: o.path, args: o.args })
-  if (s?.openAtLogin) return true
-  // (openAtLogin only looks at the entry named after the AppUserModelId)
+  // (openAtLogin only looks at the entry named after the AppUserModelId; launchItems lists them all)
   const same = (a, b) => path.resolve(String(a)).toLowerCase() === path.resolve(String(b)).toLowerCase()
-  return !!s?.launchItems?.some((item) => item.scope === 'user' && same(item.path, o.path) && item.args?.includes('--tray'))
+  const ours = (Array.isArray(s?.launchItems) ? s.launchItems : []).filter(
+    (item) => item.scope === 'user' && same(item.path, o.path) && item.args?.includes('--tray'),
+  )
+  if (ours.length) return ours.some((item) => item.enabled !== false)
+  return !!s?.openAtLogin && s.executableWillLaunchAtLogin !== false
 }
 
 // ---------- "Scan with Lumen" in Explorer ----------

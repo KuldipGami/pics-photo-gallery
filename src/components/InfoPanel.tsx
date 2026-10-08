@@ -8,6 +8,7 @@ import { baseName, formatBytes, formatDuration, formatExposure, formatLongDate, 
 import { fileNameDate } from '../lib/insights'
 import type { FaceBox, MediaItem, Place } from '../types'
 import { FaceAvatar } from './FaceAvatar'
+import { hasPosition } from './MapView'
 import { PopoverMenu } from './PopoverMenu'
 
 /** A face in the current photo — recognised (personId) or not (null). */
@@ -51,17 +52,26 @@ const editText = (ms: number) => {
   const d = new Date(ms)
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
 }
-/** DupeLens' accepted date formats: yyyy-MM-dd[ HH:mm[:ss]], yyyy:MM:dd HH:mm:ss, dd-MM-yyyy[ HH:mm]. */
-function parseDate(text: string): number | null {
+/**
+ * DupeLens' accepted date formats: yyyy-MM-dd[ HH:mm[:ss]] (also with : / or . between), and
+ * dd-MM-yyyy or MM-dd-yyyy (- or /) when it can only be one of them (a part over 12). "08/06/2021"
+ * could be either, so it's 'ambiguous' rather than guessed: a wrong guess would be written into the photo.
+ */
+export function parseDate(text: string): number | null | 'ambiguous' {
   const t = text.trim()
-  let m = t.match(/^(\d{4})[-:](\d{1,2})[-:](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/)
+  const time = String.raw`(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?`
+  let m = t.match(new RegExp(String.raw`^(\d{4})[-:/.](\d{1,2})[-:/.](\d{1,2})${time}$`))
   let y, mo, d, h, mi, s
   if (m) [, y, mo, d, h = '0', mi = '0', s = '0'] = m
-  else if ((m = t.match(/^(\d{1,2})-(\d{1,2})-(\d{4})(?: (\d{1,2}):(\d{2}))?$/))) [, d, mo, y, h = '0', mi = '0'] = m
-  else {
-    const any = Date.parse(t)
-    return Number.isFinite(any) ? any : null
-  }
+  else if ((m = t.match(new RegExp(String.raw`^(\d{1,2})([-/])(\d{1,2})\2(\d{4})${time}$`)))) {
+    const [, a, , b] = m
+    ;[, , , , y, h = '0', mi = '0', s = '0'] = m
+    if (+a > 12 && +b <= 12) [d, mo] = [a, b]
+    else if (+b > 12 && +a <= 12) [mo, d] = [a, b]
+    else if (+a === +b) [d, mo] = [a, b]
+    else return +a > 12 && +b > 12 ? null : 'ambiguous'
+  } else return null
+  if (+h > 23 || +mi > 59 || +(s ?? 0) > 59) return null
   const date = new Date(+y, +mo - 1, +d, +h, +mi, +(s ?? 0))
   return date.getMonth() === +mo - 1 && date.getDate() === +d ? date.getTime() : null
 }
@@ -78,6 +88,8 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
     }
   }, [item.id, textVersion])
   const m = item.meta ?? {}
+  // the same test as the map: no position, out of range or the (0, 0) a broken GPS writes
+  const located = hasPosition(item)
   const jpeg = item.type === 'image' && JPEG.has(item.ext)
   const [dateText, setDateText] = useState(() => editText(item.taken ?? item.date))
   const [dateError, setDateError] = useState('')
@@ -88,6 +100,7 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
   const nameDate = fileNameDate(item.name)
   const saveDate = async () => {
     const ms = parseDate(dateText)
+    if (ms === 'ambiguous') return setDateError('Day or month first? Write it as year-month-day, like 2021-06-08 13:11:51')
     if (ms === null) return setDateError('Use a date like 2021-06-08 13:11:51')
     if (new Date(ms).getFullYear() < 1900 || ms > Date.now() + 86_400_000) return setDateError('That date looks wrong.')
     setDateError('')
@@ -213,7 +226,7 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
         </div>
       )}
 
-      {m.lat !== undefined && m.lon !== undefined && (
+      {located && (
         <div className="info-row">
           <MapPin size={18} />
           <div>
@@ -230,7 +243,7 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
               onClick={() => api.openUrl(`https://www.openstreetmap.org/?mlat=${m.lat}&mlon=${m.lon}#map=15/${m.lat}/${m.lon}`)}
               title="Open in OpenStreetMap (in your browser)"
             >
-              {m.lat.toFixed(5)}, {m.lon.toFixed(5)} <ExternalLink size={12} />
+              {m.lat!.toFixed(5)}, {m.lon!.toFixed(5)} <ExternalLink size={12} />
             </button>
             {onLocate && (
               <button className="info-secondary info-map" onClick={() => onLocate(item)} title={m.userLocation ? 'Set in Lumen' : undefined}>
@@ -240,7 +253,7 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
           </div>
         </div>
       )}
-      {(m.lat === undefined || m.lon === undefined) && onLocate && (
+      {!located && onLocate && (
         <button className="info-row info-row-btn" onClick={() => onLocate(item)}>
           <MapPin size={18} />
           <div>

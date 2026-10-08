@@ -100,23 +100,32 @@ async function heifSize(file) {
 }
 
 let seq = 0
-const pending = new Map() // seq -> { resolve, timer, worker, expire, timeoutMs, onProgress }
+const pending = new Map() // seq -> { resolve, timer, worker, win, contents, since, expire, timeoutMs, onProgress }
+const byContents = new WeakMap() // a worker window's webContents -> its MediaWorker
+
+/** Any answer from a worker window shows its page isn't stuck. */
+const heardFrom = (sender) => {
+  const worker = byContents.get(sender)
+  if (worker) worker.lastReply = Date.now()
+}
 
 ipcMain.on('worker:done', (event, msg) => {
+  heardFrom(event.sender)
   const job = pending.get(msg?.seq)
-  if (!job || job.worker.win?.webContents !== event.sender) return
+  if (!job || job.contents !== event.sender) return
   pending.delete(msg.seq)
   clearTimeout(job.timer)
-  job.worker.inflight--
   job.resolve(msg)
 })
 
 // Long jobs (video fingerprints) report progress; each report restarts their timeout, so the
 // timeout means "no progress for this long" rather than a limit on the whole job.
 ipcMain.on('worker:progress', (event, msg) => {
+  heardFrom(event.sender)
   const job = pending.get(msg?.seq)
-  if (!job || job.worker.win?.webContents !== event.sender) return
+  if (!job || job.contents !== event.sender) return
   clearTimeout(job.timer)
+  job.since = Date.now()
   job.timer = setTimeout(job.expire, job.timeoutMs)
   try {
     job.onProgress?.(msg.fraction)
@@ -132,6 +141,7 @@ class MediaWorker {
     this.ready = null
     this.inflight = 0
     this.closed = false
+    this.lastReply = 0
   }
 
   start() {
@@ -159,6 +169,7 @@ class MediaWorker {
       },
     })
     const win = this.win
+    byContents.set(win.webContents, this)
     // Video fingerprints play videos (fast, muted): nothing from these windows should ever be heard.
     win.webContents.setAudioMuted(true)
     if (this.offscreen) win.webContents.setFrameRate(this.frameRate)
@@ -169,16 +180,29 @@ class MediaWorker {
     return this.ready
   }
 
+  /** `win` is gone (or being closed): its jobs answer null. Jobs already on a newer window go on. */
   reset(win) {
     for (const [key, job] of pending) {
-      if (job.worker !== this) continue
+      if (job.worker !== this || job.win !== win) continue
       pending.delete(key)
       clearTimeout(job.timer)
       job.resolve(null)
     }
-    this.inflight = 0
     if (this.win === win) this.win = null
     if (!win.isDestroyed()) win.destroy()
+  }
+
+  /**
+   * A job timed out and the window hasn't answered anything all that time: its page is stuck, e.g.
+   * in a Windows thumbnail call that never returns (a file on a network share that went away).
+   * It's closed; the next job starts a fresh one.
+   */
+  restart(win) {
+    if (win.isDestroyed() || this.win !== win) return
+    try {
+      win.webContents.forcefullyCrashRenderer() // a stuck page may not close on its own
+    } catch {}
+    this.reset(win)
   }
 
   /**
@@ -188,11 +212,18 @@ class MediaWorker {
    */
   async run(job, timeoutMs = 20_000, { signal, onProgress } = {}) {
     if (signal?.aborted) return null
+    // counted once, given back exactly once however the job ends
     this.inflight++
+    let counted = true
+    const release = () => {
+      if (!counted) return
+      counted = false
+      this.inflight = Math.max(0, this.inflight - 1)
+    }
     try {
       await this.start()
     } catch {
-      this.inflight--
+      release()
       return null
     }
     return new Promise((resolve) => {
@@ -200,25 +231,30 @@ class MediaWorker {
       const win = this.win
       if (!win || win.isDestroyed()) {
         // closed while starting (the app is quitting)
-        this.inflight--
+        release()
         return resolve(null)
       }
       const finish = (msg) => {
-        signal?.removeEventListener('abort', expire)
+        signal?.removeEventListener('abort', cancel)
+        release()
         resolve(msg)
       }
       // Timed out or cancelled: answer null now and tell the worker to stop.
-      const expire = () => {
+      const expire = (timedOut) => {
         const entry = pending.get(id)
         if (!entry) return
         pending.delete(id)
         clearTimeout(entry.timer)
-        this.inflight--
-        if (win && !win.isDestroyed()) win.webContents.send('worker:cancel', id)
+        // (no answer of any kind from the window since this job's clock started: stuck)
+        const stuck = timedOut && Date.now() - Math.max(this.lastReply, entry.since) >= entry.timeoutMs - 100
+        if (!win.isDestroyed()) win.webContents.send('worker:cancel', id)
         finish(null)
+        if (stuck) this.restart(win)
       }
-      pending.set(id, { resolve: finish, timer: setTimeout(expire, timeoutMs), worker: this, expire, timeoutMs, onProgress })
-      signal?.addEventListener('abort', expire)
+      const timeout = () => expire(true)
+      const cancel = () => expire(false)
+      pending.set(id, { resolve: finish, timer: setTimeout(timeout, timeoutMs), worker: this, win, contents: win.webContents, since: Date.now(), expire: timeout, timeoutMs, onProgress })
+      signal?.addEventListener('abort', cancel)
       win.webContents.send('worker:job', { ...job, seq: id })
     })
   }

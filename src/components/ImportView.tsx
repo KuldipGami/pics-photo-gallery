@@ -189,6 +189,8 @@ export interface ImportViewProps {
   /** Where HEIC originals go for 'aside'. */
   originalsDir?: string
   progress: ImportProgress | null
+  /** Import was clicked and the copying hasn't reported yet: the button stays off (no second run). */
+  starting?: boolean
   result: ImportResult | null
   /** Preview URL for a candidate, or null (phones). */
   thumb(item: ImportCandidate): string | null
@@ -428,7 +430,7 @@ function Results(props: ImportViewProps & { scan: ImportScan }) {
   return (
     <>
       <div className="imp-head">
-        <button className="icon-btn" onClick={props.onBack} title="Back to devices">
+        <button className="icon-btn" onClick={props.onBack} disabled={props.starting} title="Back to devices">
           <ArrowLeft size={18} />
         </button>
         <span className={`imp-source-icon small ${source.kind}`}>
@@ -441,7 +443,7 @@ function Results(props: ImportViewProps & { scan: ImportScan }) {
             {scan.range ? ` · new ones from ${rangeText(scan.range)}` : ''}
           </p>
         </div>
-        <button className="btn ghost" onClick={() => props.onScan(source)} title="Look through it again">
+        <button className="btn ghost" onClick={() => props.onScan(source)} disabled={props.starting} title="Look through it again">
           <RefreshCw size={15} /> Look again
         </button>
       </div>
@@ -583,8 +585,9 @@ function Results(props: ImportViewProps & { scan: ImportScan }) {
                 : 'Nothing new to import: everything is already in your library.'
               : `${plural(count, 'file')}, ${formatBytes(bytes)}${counts.videos ? ` · ${plural(counts.videos, 'video')}` : ''}`}
           </span>
-          <button className="btn primary large" disabled={count === 0 || !destination} onClick={props.onImport}>
-            <Import size={17} /> {count === 0 ? 'Nothing to import' : `Import ${plural(count, 'file')}`}
+          <button className="btn primary large" disabled={count === 0 || !destination || props.starting} onClick={props.onImport}>
+            {props.starting ? <LoaderCircle size={17} className="spin" /> : <Import size={17} />}{' '}
+            {props.starting ? 'Starting…' : count === 0 ? 'Nothing to import' : `Import ${plural(count, 'file')}`}
           </button>
         </div>
       </section>

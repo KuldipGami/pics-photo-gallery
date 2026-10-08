@@ -1,4 +1,8 @@
+const fs = require('node:fs')
 const fsp = require('node:fs/promises')
+const path = require('node:path')
+const crypto = require('node:crypto')
+const { writeAtomicSync, readJson, renameRetry } = require('./safe-file.cjs')
 
 // Lossless JPEG metadata edits (ported from DupeLens' JpegExif): changes the date taken, the
 // orientation and the GPS position stored in a JPEG without touching the compressed image data
@@ -35,6 +39,7 @@ const MSG = {
   badOrientation: 'The orientation must be a number from 1 to 8.',
   badLocation: "The location isn't valid.",
   busy: 'The photo is open in another program. Close it and try again.',
+  readOnly: 'The photo is read-only. Turn off "Read-only" in its Properties in File Explorer to change it.',
 }
 
 const JPEG_EXTS = new Set(['jpg', 'jpeg', 'jpe', 'jfif'])
@@ -420,44 +425,234 @@ async function withRetry(fn) {
   }
 }
 
-/**
- * Moves a finished temp file over `file`, waiting briefly if another program has it open. The
- * original is renamed away first and the temp renamed into its name (instead of one rename over
- * it): on NTFS that keeps the photo's "Date created", which a plain replace would reset to now.
- * On failure the original is left (or put back) in place and the temp is deleted.
- */
-async function replaceWithTemp(temp, file) {
-  const old = `${file}.lumen.old`
+// ── swapping a rewritten file in ─────────────────────────────────────────────
+// For a moment during a swap the photo exists only under its "old" name. Every swap in progress is
+// listed in a journal file (setSwapJournal), written before the first rename and updated once the
+// swap is done, so if Lumen is closed or crashes in between, recoverSwaps() at the next start puts
+// the photo back. Each swap uses names of its own, so two writers never share a temp or old file.
+
+let journalFile = null
+const swaps = new Map() // id → { id, file, temp, old }
+
+/** Where the journal of swaps in progress is kept (e.g. <userData>/pending-swaps.json). */
+function setSwapJournal(file) {
+  journalFile = file || null
+}
+
+function saveJournal() {
+  if (!journalFile) return
   try {
+    writeAtomicSync(journalFile, JSON.stringify({ version: 1, swaps: [...swaps.values()] }))
+  } catch (err) {
+    console.error('Failed to save the swap journal', err) // the swap itself still goes ahead
+  }
+}
+
+/** Unique temp and old names for one swap of `file` (temp: the caller's own, when it made one). */
+function track(file, temp) {
+  const id = crypto.randomBytes(6).toString('hex')
+  const entry = { id, file, temp: temp ?? `${file}.lumen-${id}.tmp`, old: `${file}.lumen-${id}.old` }
+  swaps.set(id, entry)
+  saveJournal()
+  return entry
+}
+
+function untrack(entry) {
+  if (swaps.delete(entry.id)) saveJournal()
+}
+
+/** Fails with a clear message for a read-only file (renaming would silently clear the flag). */
+async function assertWritable(file) {
+  const st = await fsp.stat(file)
+  if (!(st.mode & 0o222)) throw Object.assign(new Error(MSG.readOnly), { code: 'READONLY' })
+}
+
+/**
+ * The swap itself (see replaceWithTemp). The journal entry is dropped once nothing is left over;
+ * if the original couldn't even be put back, it stays, so the next start can.
+ */
+async function swapIn(entry) {
+  const { file, temp, old } = entry
+  try {
+    await assertWritable(file)
     await withRetry(() => fsp.rename(file, old))
   } catch (err) {
     await fsp.unlink(temp).catch(() => {})
+    untrack(entry)
     throw err
   }
   try {
     await withRetry(() => fsp.rename(temp, file))
   } catch (err) {
-    await fsp.rename(old, file).catch(() => {}) // put the original back
+    try {
+      await withRetry(() => fsp.rename(old, file)) // put the original back
+    } catch {
+      throw err // the photo is only "<name>.lumen-….old" now: the journal keeps the entry for recoverSwaps()
+    }
     await fsp.unlink(temp).catch(() => {})
+    untrack(entry)
     throw err
   }
-  await withRetry(() => fsp.unlink(old)).catch(() => {})
+  try {
+    await withRetry(() => fsp.unlink(old))
+  } catch (err) {
+    if (err?.code !== 'ENOENT' && existsSync(old)) {
+      // The swap is done; only the old copy is left (antivirus or a viewer still has it open). It
+      // is tried again in a while, and stays listed until then, so recoverSwaps() removes it otherwise.
+      entry.done = true
+      saveJournal()
+      const later = setTimeout(() => fsp.unlink(old).then(() => untrack(entry), () => {}), 10_000)
+      later.unref?.()
+      return
+    }
+  }
+  untrack(entry)
 }
 
-/** Writes bytes to "<path>.lumen.tmp" and swaps it in, so a viewer reading the file doesn't block the edit. */
+/**
+ * Moves a finished temp file over `file`, waiting briefly if another program has it open. The
+ * original is renamed away first and the temp renamed into its name (instead of one rename over
+ * it): on NTFS that keeps the photo's "Date created", which a plain replace would reset to now.
+ * On failure the original is left (or put back) in place and the temp is deleted. A read-only
+ * file isn't touched (error code 'READONLY').
+ */
+async function replaceWithTemp(temp, file) {
+  await swapIn(track(file, temp))
+}
+
+/**
+ * Writes bytes to a temp file next to `file` ("<name>.lumen-<id>.tmp") and swaps it in, so a
+ * viewer reading the file doesn't block the edit.
+ */
 async function replaceFile(file, bytes) {
-  const temp = `${file}.lumen.tmp`
-  const fh = await fsp.open(temp, 'w')
+  await assertWritable(file)
+  const entry = track(file)
+  let fh
   try {
+    fh = await fsp.open(entry.temp, 'wx')
     await fh.writeFile(bytes)
     await fh.sync()
+    await fh.close()
+    fh = null
   } catch (err) {
-    await fh.close().catch(() => {})
-    await fsp.unlink(temp).catch(() => {})
+    await fh?.close().catch(() => {})
+    await fsp.unlink(entry.temp).catch(() => {})
+    untrack(entry)
     throw err
   }
-  await fh.close()
-  await replaceWithTemp(temp, file)
+  await swapIn(entry)
+}
+
+const existsSync = (p) => {
+  try {
+    fs.accessSync(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The compressed picture of a JPEG (start of scan to the end of the file), or null. */
+function imageData(data) {
+  const scan = scanJpeg(data)
+  return scan ? data.subarray(scan.sos) : null
+}
+
+/**
+ * True when both files are JPEGs with byte-identical compressed pictures: the same photo, whatever
+ * Lumen's lossless edits (date, rotation, place, rating, tags) changed in their headers.
+ */
+async function sameImageData(a, b) {
+  try {
+    const [x, y] = await Promise.all([fsp.readFile(a), fsp.readFile(b)])
+    const dx = imageData(x)
+    const dy = imageData(y)
+    return !!dx && !!dy && dx.equals(dy)
+  } catch {
+    return false
+  }
+}
+
+/** "IMG_1.jpg" → "IMG_1 (2).jpg", "IMG_1 (3).jpg"… until the name is free. */
+function freeName(file) {
+  const ext = path.extname(file)
+  const stem = file.slice(0, file.length - ext.length)
+  for (let n = 2; ; n++) {
+    const candidate = `${stem} (${n})${ext}`
+    if (!existsSync(candidate)) return candidate
+  }
+}
+
+/**
+ * At start-up, before anything rewrites files: finishes what the journal says was cut off.
+ * - The photo is missing and its old copy is there → the old copy goes back under its name (the
+ *   edit is dropped; tag writes are still marked in tags.json and are redone).
+ * - The photo is there → leftover temp files are deleted, and an old copy too once it is known to be
+ *   the same picture (otherwise it is kept, renamed "<name> (2).jpg" so it shows in the library).
+ * - A swap that had finished but whose old copy couldn't be deleted (`done`) → that old copy goes.
+ * Entries that couldn't be handled stay in the journal for next time. Never rejects; resolves to
+ * { restored, cleaned, kept: [paths kept under a new name], left }.
+ */
+async function recoverSwaps() {
+  const out = { restored: 0, cleaned: 0, kept: [], left: 0 }
+  if (!journalFile) return out
+  const read = await readJson(journalFile)
+  if (read.error) {
+    console.error('The swap journal could not be read; it is left as it is', read.error)
+    journalFile = null // never written over this session
+    return out
+  }
+  if (read.corrupt) console.error('The swap journal was damaged; kept as', read.keptAs)
+  const listed = Array.isArray(read.data?.swaps) ? read.data.swaps : []
+  for (const s of listed) {
+    if (!s || typeof s.file !== 'string' || typeof s.old !== 'string' || typeof s.temp !== 'string') continue
+    try {
+      if (s.done) {
+        // the photo had its new version; it may have been moved or deleted since, so never put this back
+        if (existsSync(s.old) && (!existsSync(s.file) || (await sameImageData(s.old, s.file)))) {
+          await fsp.unlink(s.old)
+          out.cleaned++
+        } else if (existsSync(s.old)) {
+          const keptAs = freeName(s.file)
+          await renameRetry(s.old, keptAs)
+          out.kept.push(keptAs)
+        }
+        continue
+      }
+      if (!existsSync(s.file)) {
+        if (existsSync(s.old)) {
+          await renameRetry(s.old, s.file)
+          await fsp.unlink(s.temp).catch(() => {})
+          out.restored++
+        } else if (existsSync(s.temp)) {
+          await renameRetry(s.temp, s.file) // only the finished new version is left: keep that
+          out.restored++
+        }
+        continue // otherwise the photo was moved or deleted since: nothing to do
+      }
+      if (existsSync(s.temp)) {
+        await fsp.unlink(s.temp)
+        out.cleaned++
+      }
+      if (existsSync(s.old)) {
+        if (await sameImageData(s.old, s.file)) {
+          await fsp.unlink(s.old)
+          out.cleaned++
+        } else {
+          const keptAs = freeName(s.file)
+          await renameRetry(s.old, keptAs)
+          out.kept.push(keptAs)
+        }
+      }
+    } catch (err) {
+      console.error('Could not finish an interrupted photo rewrite', s.file, err)
+      const id = typeof s.id === 'string' ? s.id : crypto.randomBytes(6).toString('hex')
+      swaps.set(id, { id, file: s.file, temp: s.temp, old: s.old, ...(s.done ? { done: true } : {}) }) // try again next time
+      out.left++
+    }
+  }
+  saveJournal()
+  return out
 }
 
 /**
@@ -518,4 +713,17 @@ function rotateOrientation(orientation, quarterTurnsCW) {
   return (mirror ? { 0: 2, 90: 7, 180: 4, 270: 5 } : { 0: 1, 90: 6, 180: 3, 270: 8 })[angle]
 }
 
-module.exports = { isJpeg, writeExif, applyExif, readOrientation, rotateOrientation, replaceWithTemp, validGps, MSG }
+module.exports = {
+  isJpeg,
+  writeExif,
+  applyExif,
+  readOrientation,
+  rotateOrientation,
+  replaceWithTemp,
+  replaceFile,
+  sameImageData,
+  setSwapJournal,
+  recoverSwaps,
+  validGps,
+  MSG,
+}

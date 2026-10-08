@@ -126,36 +126,61 @@ export function findTrips(items: MediaItem[], places: PlacesData): Trip[] {
 }
 
 /**
+ * The trip that an earlier one became: the one sharing the most photos with it. A trip's id comes
+ * from its first located photo, so deleting that photo (or locating an earlier one) gives it a new id.
+ */
+export function matchTrip(old: Trip, trips: Trip[]): Trip | undefined {
+  const ids = new Set(old.items)
+  let best: Trip | undefined
+  let bestCount = 0
+  for (const t of trips) {
+    let n = 0
+    for (const id of t.items) if (ids.has(id)) n++
+    if (n > bestCount) {
+      best = t
+      bestCount = n
+    }
+  }
+  return best
+}
+
+/**
  * "On this day": photos from today's date in earlier years (or from this week, on days with none),
  * one memory per year, newest first.
  */
 export function onThisDay(items: MediaItem[], now = Date.now()): Memory[] {
   const today = new Date(now)
-  const sameDay = (d: Date) => d.getMonth() === today.getMonth() && d.getDate() === today.getDate()
+  const year = today.getFullYear()
+  const todayDay = Date.UTC(year, today.getMonth(), today.getDate())
+  // Each returns how many years ago a photo's date was "today" (0 = not a match).
+  const sameDay = (d: Date) => (d.getMonth() === today.getMonth() && d.getDate() === today.getDate() ? year - d.getFullYear() : 0)
+  // Within 3 days of today's date, also across New Year (Dec 30 on Jan 1). Calendar days in UTC,
+  // so a DST change in between doesn't count.
   const nearDay = (d: Date) => {
-    const shifted = new Date(today.getFullYear(), d.getMonth(), d.getDate())
-    return Math.abs(shifted.getTime() - new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()) <= 3 * DAY
+    for (const y of [year, year - 1, year + 1]) {
+      if (Math.abs(Math.round((Date.UTC(y, d.getMonth(), d.getDate()) - todayDay) / DAY)) <= 3) return y - d.getFullYear()
+    }
+    return 0
   }
   for (const match of [sameDay, nearDay]) {
-    const byYear = new Map<number, MediaItem[]>()
+    const byAgo = new Map<number, MediaItem[]>()
     for (const it of items) {
-      const d = new Date(it.date)
-      if (d.getFullYear() >= today.getFullYear() || !match(d)) continue
-      let list = byYear.get(d.getFullYear())
-      if (!list) byYear.set(d.getFullYear(), (list = []))
+      const ago = match(new Date(it.date))
+      if (ago < 1) continue
+      let list = byAgo.get(ago)
+      if (!list) byAgo.set(ago, (list = []))
       list.push(it)
     }
-    if (!byYear.size) continue
-    return [...byYear.entries()]
-      .sort((a, b) => b[0] - a[0])
-      .map(([year, list]) => {
+    if (!byAgo.size) continue
+    return [...byAgo.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([ago, list]) => {
         list.sort((a, b) => a.date - b.date)
         const photos = list.filter((it) => it.type === 'image')
         const cover = (photos.length ? photos : list)[Math.floor((photos.length ? photos : list).length / 2)]
-        const ago = today.getFullYear() - year
         return {
           label: `${ago} year${ago === 1 ? '' : 's'} ago${match === nearDay ? ' this week' : ''}`,
-          year,
+          year: new Date(list[0].date).getFullYear(),
           date: list[0].date,
           items: list.map((it) => it.id),
           cover: cover.id,

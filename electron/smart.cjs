@@ -3,6 +3,7 @@ const fsp = require('node:fs/promises')
 const path = require('node:path')
 const { EventEmitter } = require('node:events')
 const { utilityProcess } = require('electron')
+const { writeAtomic, writeAtomicSync, serial, keepAside } = require('./safe-file.cjs')
 
 const MODEL = 'siglip-base-patch16-224'
 const DIMS = 768
@@ -17,10 +18,15 @@ const BEST_MARGIN = 0.06 // ...and not far below the best match for this search
 const MAX_RESULTS = 3000
 const SIMILAR_MIN = 0.6 // image-to-image cosine: same kind of scene or subject
 const SIMILAR_MAX = 400
+const MAX_ATTEMPTS = 2 // an item the engine keeps dying or stalling on is left for the next session
+const MAX_FAILURES = 4 // engine crashes / stalls in a row (no good answer between): stop for the session
 
 const prob = (cos) => 1 / (1 + Math.exp(-(SCALE * cos + BIAS)))
 
-/** The SigLIP engine process (smart-engine.cjs). Restarted automatically if it dies. */
+/**
+ * The SigLIP engine process (smart-engine.cjs). Restarted automatically if it dies; killed and
+ * restarted if it stops answering (a stuck GPU), on the CPU once that has happened twice.
+ */
 class SmartEngine {
   constructor({ modelsDir, adapterFile, hintFile }) {
     this.modelsDir = modelsDir
@@ -31,6 +37,9 @@ class SmartEngine {
     this.info = null
     this.seq = 0
     this.pending = new Map()
+    this.hangs = 0 // times it stopped answering this session
+    this.cpu = false
+    this.failures = 0 // crashes, stalls and failed runs since its last good answer
   }
 
   start() {
@@ -43,6 +52,10 @@ class SmartEngine {
     this.child = child
     this.ready = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('The search engine did not start')), 120_000)
+      child.on('exit', () => {
+        clearTimeout(timer)
+        reject(new Error('The search engine stopped while loading')) // no-op once ready
+      })
       child.on('message', (msg) => {
         if (msg.type === 'ready') {
           clearTimeout(timer)
@@ -50,29 +63,59 @@ class SmartEngine {
           this.info = msg
           console.log(`[smart] engine ready on ${msg.device}${msg.adapter ?? ''}`, JSON.stringify(msg.timings))
           resolve(msg)
+        } else if (msg.type === 'device') {
+          // the GPU failed mid-session: it carries on on the CPU
+          console.error(`[smart] engine moved to the ${msg.device}: ${msg.reason}`)
+          if (this.info) this.info = { ...this.info, device: msg.device, adapter: msg.adapter }
         } else if (msg.type === 'result') {
           const job = this.pending.get(msg.seq)
           if (!job) return
           this.pending.delete(msg.seq)
           clearTimeout(job.timer)
+          if (msg.ok) this.failures = 0
           job.resolve(msg)
         }
       })
     })
-    this.ready.catch((err) => console.error(`[smart] engine failed to start: ${err.message}`))
-    child.on('exit', () => {
-      for (const [seq, job] of this.pending) {
-        this.pending.delete(seq)
-        clearTimeout(job.timer)
-        job.resolve(null)
-      }
-      if (this.child === child) this.child = null
+    this.ready.catch((err) => {
+      console.error(`[smart] engine failed to start: ${err.message}`)
+      // not kept for the session: the next start() tries again with a fresh process
+      if (this.child === child) this.stop()
     })
-    child.postMessage({ type: 'init', modelsDir: this.modelsDir, cacheFile: this.adapterFile, hintFile: this.hintFile })
+    child.on('exit', () => {
+      const lost = this.drop(child, true)
+      if (this.child === child) {
+        this.child = null
+        this.ready = null
+        if (lost) this.failures++ // it died while working
+      }
+    })
+    child.postMessage({ type: 'init', modelsDir: this.modelsDir, cacheFile: this.adapterFile, hintFile: this.hintFile, cpu: this.cpu })
     return this.ready
   }
 
-  /** { ok, vec } — ok:false for an unreadable image, null if the engine died. */
+  /**
+   * Answers the jobs sent to `child` (it's gone); how many there were. It works on one job at a
+   * time, in order: when it died by itself (`crashed`) the oldest job is the likely cause and gets
+   * null; the others weren't reached yet and get { retry: true } (try again, nothing counted).
+   */
+  drop(child, crashed = false) {
+    let n = 0
+    for (const [seq, job] of this.pending) {
+      if (job.child !== child) continue
+      this.pending.delete(seq)
+      clearTimeout(job.timer)
+      job.resolve(crashed && n === 0 ? null : { ok: false, retry: true })
+      n++
+    }
+    return n
+  }
+
+  /**
+   * { ok, vec } — ok:false for an unreadable image (stage 'decode'), a failed run (stage 'run'), no
+   * answer for a minute (timeout: the process is replaced) or the engine gone before it got to this
+   * one (retry); null if the engine died on it.
+   */
   async run(msg) {
     await this.start()
     const child = this.child
@@ -82,17 +125,60 @@ class SmartEngine {
       const timer = setTimeout(() => {
         this.pending.delete(seq)
         resolve({ ok: false, timeout: true })
+        this.hung(child)
       }, 60_000)
-      this.pending.set(seq, { resolve, timer })
+      this.pending.set(seq, { resolve, timer, child })
       child.postMessage({ ...msg, seq })
     })
   }
 
+  /** It stopped answering: a fresh process next time (on the CPU after the second time). */
+  hung(child) {
+    if (this.child !== child) return
+    if (++this.hangs >= 2) this.cpu = true
+    this.fail()
+  }
+
+  /** Something went wrong inside the engine: count it, and start a fresh process next time. */
+  fail() {
+    this.failures++
+    this.stop()
+  }
+
+  /** Stops the process without closing (the next run starts a fresh one). */
+  stop() {
+    const child = this.child
+    this.child = null
+    this.ready = null
+    this.info = null
+    if (!child) return
+    this.drop(child)
+    child.kill()
+  }
+
   dispose() {
     this.closed = true
-    this.child?.kill()
-    this.child = null
+    this.stop()
   }
+}
+
+/**
+ * Reads a binary file, waiting a moment while antivirus or the search indexer holds it.
+ * { buf } | { missing: true } | { error } (still unreadable: don't save over it this session).
+ */
+async function readBinary(file) {
+  let last = null
+  for (const ms of [0, 50, 100, 200, 400, 800, 1500]) {
+    if (ms) await new Promise((resolve) => setTimeout(resolve, ms))
+    try {
+      return { buf: await fsp.readFile(file) }
+    } catch (err) {
+      if (err?.code === 'ENOENT') return { missing: true }
+      last = err
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(err?.code)) break
+    }
+  }
+  return { error: last }
 }
 
 /** int8 + scale per vector (4× smaller than float32; error far below what changes a ranking). */
@@ -123,12 +209,30 @@ class SmartIndex extends EventEmitter {
     this.queue = []
     this.active = 0
     this.inflight = new Set()
-    this.failed = new Set() // unreadable this session
+    this.failed = new Set() // unreadable this session (never saved: tried again next time)
+    this.attempts = new Map() // id -> times the engine died or stalled on it (this session)
     this.progress = { done: 0, total: 0 }
     this.engine = new SmartEngine({ modelsDir, adapterFile, hintFile })
     this.queryCache = new Map()
     this.timers = {}
-    this.dirty = false
+    this.dirty = false // changes not on disk yet
+    this.blocked = false // smart.bin couldn't be read: don't save over it this session
+    this.writer = serial(async () => {
+      const data = this.serialize()
+      this.writing = true
+      try {
+        await writeAtomic(this.file, data)
+      } finally {
+        this.writing = false
+        if (this.flushed) {
+          // saveNow() wrote newer vectors while this one was on its way: put those back on top
+          this.flushed = false
+          try {
+            writeAtomicSync(this.file, this.serialize())
+          } catch {}
+        }
+      }
+    })
   }
 
   get available() {
@@ -138,17 +242,20 @@ class SmartIndex extends EventEmitter {
   // ---------- persistence: header JSON + int8 vectors ----------
 
   async load() {
-    let buf
-    try {
-      buf = await fsp.readFile(this.file)
-    } catch {
+    const r = await readBinary(this.file)
+    if (r.missing) return
+    if (r.error) {
+      this.blocked = true
+      console.error('[smart] smart.bin could not be read; not saving over it this session', r.error)
       return
     }
+    const buf = r.buf
     try {
-      if (buf.toString('latin1', 0, 4) !== MAGIC) return
+      if (buf.toString('latin1', 0, 4) !== MAGIC) throw new Error('not a search index')
       const headerLen = buf.readUInt32LE(4)
       const header = JSON.parse(buf.toString('utf8', 8, 8 + headerLen))
-      if (header.model !== MODEL || header.dims !== DIMS) return
+      if (header.model !== MODEL || header.dims !== DIMS) return // made for another model: rebuilt
+      if (buf.length < 8 + headerLen + header.ids.length * DIMS) throw new Error('cut short')
       let off = 8 + headerLen
       header.ids.forEach((id, i) => {
         const q = new Int8Array(DIMS)
@@ -157,8 +264,9 @@ class SmartIndex extends EventEmitter {
         this.vectors.set(id, { m: header.m[i], q, s: header.s[i] })
       })
     } catch (err) {
-      console.error('[smart] index unreadable, rebuilding', err)
       this.vectors.clear()
+      const keptAs = keepAside(this.file)
+      console.error(`[smart] index damaged (kept as ${keptAs}), rebuilding`, err)
     }
   }
 
@@ -187,24 +295,27 @@ class SmartIndex extends EventEmitter {
   async save() {
     clearTimeout(this.timers.save)
     this.timers.save = null
+    if (this.blocked) return
     this.dirty = false
     try {
-      const tmp = `${this.file}.tmp`
-      await fsp.writeFile(tmp, this.serialize())
-      await fsp.rename(tmp, this.file)
+      await this.writer()
     } catch (err) {
       console.error('Failed to save search index', err)
+      this.saveSoon(60_000) // still owed: again later, and at quit
     }
   }
 
   saveNow() {
-    if (!this.dirty) return
+    if (this.blocked || (!this.dirty && !this.writing)) return
     clearTimeout(this.timers.save)
     this.timers.save = null
     try {
-      fs.writeFileSync(this.file, this.serialize())
+      writeAtomicSync(this.file, this.serialize())
       this.dirty = false
-    } catch {}
+    } catch (err) {
+      console.error('Failed to save search index', err)
+    }
+    if (this.writing) this.flushed = true
   }
 
   // ---------- pipeline ----------
@@ -231,9 +342,14 @@ class SmartIndex extends EventEmitter {
 
   pump() {
     if (!this.enabled || this.halted || this.disposed || !this.available || !this.canRun()) return
+    const busy = [] // put back while still being read: their turn comes once that's over
     while (this.active < CONCURRENCY && this.queue.length) {
       const item = this.media.get(this.queue.shift())
-      if (!item || this.vectors.has(item.id) || this.inflight.has(item.id)) continue
+      if (!item || this.vectors.has(item.id)) continue
+      if (this.inflight.has(item.id)) {
+        busy.push(item.id)
+        continue
+      }
       this.active++
       this.inflight.add(item.id)
       this.embed(item).finally(() => {
@@ -244,12 +360,16 @@ class SmartIndex extends EventEmitter {
         this.pump()
       })
     }
+    this.queue.push(...busy)
   }
 
   async embed(item) {
     let res
+    // (no preview now is this item's problem, not a reason to stop: see below)
+    const data = await Promise.resolve()
+      .then(() => this.thumb(item))
+      .catch(() => null)
     try {
-      const data = await this.thumb(item)
       res = data ? await this.engine.run({ type: 'image', data }) : { ok: false }
     } catch (err) {
       this.halted = true
@@ -259,18 +379,46 @@ class SmartIndex extends EventEmitter {
       this.emitProgress()
       return
     }
-    if (!res) {
-      this.queue.push(item.id) // engine restarted; try again later
+    if (this.disposed || !this.enabled) return // (turned off: the engine was stopped)
+    if (res?.retry) {
+      // the engine went away before it got to this one
+      this.queue.push(item.id)
       this.progress.done--
       return
     }
-    if (this.media.get(item.id) !== item) return
+    if (!res || res.timeout || res.stage === 'run') {
+      // The engine went away, stalled or failed to run: it starts afresh and the item is tried
+      // again, but not forever when it's the one that keeps doing this.
+      if (res?.stage === 'run') this.engine.fail()
+      if (this.engine.failures >= MAX_FAILURES && !this.halted) {
+        this.halted = true
+        this.error = 'its engine keeps failing on this computer (it tries again when Lumen restarts)'
+        console.error(`[smart] indexing stopped for this session: ${this.error}`)
+        this.emitProgress()
+      }
+      const n = (this.attempts.get(item.id) ?? 0) + 1
+      this.attempts.set(item.id, n)
+      if (n < MAX_ATTEMPTS) {
+        this.queue.push(item.id)
+        this.progress.done--
+      } else this.failed.add(item.id)
+      return
+    }
+    const now = this.media.get(item.id)
+    if (!now) return // left the library meanwhile
+    if (now.mtime !== item.mtime) {
+      // changed while it was being read: read the new version
+      this.queue.push(item.id)
+      this.progress.done--
+      return
+    }
     if (!res.ok) {
       this.failed.add(item.id)
       return
     }
     const { q, s } = quantize(res.vec)
     this.vectors.set(item.id, { m: item.mtime, q, s })
+    this.attempts.delete(item.id)
     this.saveSoon()
   }
 
@@ -346,11 +494,14 @@ class SmartIndex extends EventEmitter {
     if (enabled) {
       this.halted = false
       this.error = null
+      this.failed.clear()
+      this.attempts.clear()
+      this.engine.failures = 0
       this.sync([...this.media.values()])
     } else {
       this.queue = []
       this.progress = { done: 0, total: 0 }
-      this.engine.dispose()
+      this.engine.stop() // frees its memory; a fresh one starts when it's turned back on
     }
     this.emitProgress()
   }

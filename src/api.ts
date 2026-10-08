@@ -41,6 +41,8 @@ export interface RemoveResult {
   /** History entry (for undo). */
   entryId?: string | null
   destination?: string
+  /** Files that moved but whose XMP sidecar stayed behind ("name: …"); not failures. */
+  notes?: string[]
 }
 
 /** Everything the window shows, as it opens. */
@@ -81,6 +83,8 @@ export interface LumenApi {
   /** Private: lock state, unlocking, marking items, the hidden folder. */
   privateStatus(): Promise<PrivateStatus>
   privateUnlockHello(): Promise<UnlockResult>
+  /** Runs the Windows Hello check again (after it didn't answer); resolves to the new status. */
+  privateRecheckHello(): Promise<PrivateStatus>
   privateUnlockPin(pin: string): Promise<UnlockResult>
   privateSetPin(pin: string): Promise<{ ok: boolean; error?: string }>
   privateRemovePin(): Promise<boolean>
@@ -136,7 +140,11 @@ export interface LumenApi {
   pickDestination(): Promise<string | null>
   pickFolders(title: string): Promise<string[]>
   historyList(): Promise<HistoryEntry[]>
-  restoreHistory(id: string): Promise<{ restored: number; total?: number }>
+  /**
+   * `renamed`: originals of edits put back under a new name ("IMG (2).jpg"), because a different
+   * photo has the old name now.
+   * `kept`: imported files left in place by an import undo (their originals were removed from the card, or they changed since). */
+  restoreHistory(id: string): Promise<{ restored: number; total?: number; kept?: number; renamed?: number }>
   clearHistory(): Promise<void>
   onHistory(cb: (entries: HistoryEntry[]) => void): Unsubscribe
   openRecycleBin(): Promise<void>

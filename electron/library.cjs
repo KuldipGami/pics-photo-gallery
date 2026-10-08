@@ -5,6 +5,7 @@ const crypto = require('node:crypto')
 const { EventEmitter } = require('node:events')
 const exifr = require('exifr')
 const { EXIFR_OPTIONS: XMP_OPTIONS, fromExifr, fromMoov } = require('./xmp.cjs')
+const { writeAtomic, serial, readJson, keepAside } = require('./safe-file.cjs')
 
 const IMAGE_EXT = new Set([
   'jpg', 'jpeg', 'jfif', 'png', 'gif', 'webp', 'bmp', 'avif', 'ico',
@@ -39,7 +40,14 @@ const skippedExtensions = (keys) => {
   return new Set(FILE_TYPES.filter((g) => want.has(g.key)).flatMap((g) => g.extensions))
 }
 
-const normFolder = (x) => String(x).toLowerCase().replace(/[\\/]+$/, '')
+/** Lower-cased, without a trailing separator; a drive root keeps its own ("c:\": "c:" alone means the current folder on C). */
+const normFolder = (x) => {
+  const s = String(x).toLowerCase().replace(/[\\/]+$/, '')
+  return /^[a-z]:$/.test(s) ? s + path.sep : s
+}
+
+/** Is lower-cased path `p` the folder `dir` (normFolder) or inside it? */
+const isUnder = (p, dir) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep)
 
 /** Skip options for scanning: { skipFolders: string[], skipTypes: string[], minBytes: number }. */
 const normSkip = (options) => ({
@@ -48,6 +56,7 @@ const normSkip = (options) => ({
   minBytes: Math.max(0, Number(options?.minBytes) || 0),
 })
 
+const RETRY_WATCH_MS = 30_000 // a library folder that isn't there: look again this often
 const MIN_VALID_DATE = Date.UTC(1971, 0, 1)
 const MAC_EPOCH = Date.UTC(1904, 0, 1)
 
@@ -59,6 +68,13 @@ const isMedia = (p) => {
   return IMAGE_EXT.has(ext) || VIDEO_EXT.has(ext)
 }
 const validDate = (ms) => Number.isFinite(ms) && ms > MIN_VALID_DATE && ms < Date.now() + 86_400_000
+
+/**
+ * Does a watcher event's name end in a real file extension ("notes.txt", "IMG_1.jpg.lumen.old")?
+ * Folder names often have dots too ("2019.05.12 Goa", "Trip.2019"): an "extension" with spaces,
+ * only digits or more than 6 characters isn't one.
+ */
+const hasFileExtension = (name) => /^\.(?=[a-z0-9]*[a-z])[a-z0-9]{1,6}$/i.test(path.extname(name))
 
 /** Run `fn` over `list` with at most `limit` concurrent promises. */
 async function pool(list, limit, fn) {
@@ -76,18 +92,24 @@ async function pool(list, limit, fn) {
 const isExcluded = (full, exclude) => {
   if (!exclude?.length) return false
   const p = full.toLowerCase()
-  return exclude.some((x) => p === x || p.startsWith(x + path.sep))
+  return exclude.some((x) => isUnder(p, x))
 }
 
 /**
+ * Throws when `dir` itself can't be read (the caller decides what that means for a library folder).
  * @param {string[]} exclude lower-cased folders left out (never the root itself)
  * @param {Set<string>} [skipExts] extensions left out (skipped file types)
+ * @param {string[]} [unread] collects subfolders that are there but couldn't be read
  */
-async function walk(dir, out, onFound, exclude, skipExts) {
+async function walk(dir, out, onFound, exclude, skipExts, unread, top = true) {
   let entries
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true })
-  } catch {
+  } catch (err) {
+    if (top) throw err
+    // A subfolder that's gone was deleted or moved away. Any other error (no permission, a network
+    // hiccup, a disk error) says nothing about what's in it: its items are kept as they were.
+    if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') unread?.push(dir)
     return
   }
   for (const entry of entries) {
@@ -95,7 +117,7 @@ async function walk(dir, out, onFound, exclude, skipExts) {
     if (name.startsWith('.') || SKIP_DIRS.has(name.toLowerCase())) continue
     const full = path.join(dir, name)
     if (entry.isDirectory()) {
-      if (!isExcluded(full, exclude)) await walk(full, out, onFound, exclude, skipExts)
+      if (!isExcluded(full, exclude)) await walk(full, out, onFound, exclude, skipExts, unread, false)
     } else if (entry.isFile() && isMedia(name) && !skipExts?.has(extOf(name))) {
       out.set(keyOf(full), full)
       onFound()
@@ -118,7 +140,8 @@ async function readExif(file) {
       translateValues: false,
     })
     if (!d) return null
-    const taken = d.DateTimeOriginal || d.CreateDate || d.ModifyDate
+    // the first real date: a zeroed one ("0000:00:00 00:00:00") comes back from exifr as 1899
+    const taken = [d.DateTimeOriginal, d.CreateDate, d.ModifyDate].find((x) => x instanceof Date && validDate(x.getTime()))
     const meta = {}
     if (d.Make) meta.make = String(d.Make).trim()
     if (d.Model) meta.model = String(d.Model).trim()
@@ -132,7 +155,7 @@ async function readExif(file) {
       meta.lon = d.longitude
     }
     return {
-      date: taken instanceof Date ? taken.getTime() : NaN,
+      date: taken ? taken.getTime() : NaN,
       meta: Object.keys(meta).length ? meta : undefined,
       marks: fromExifr(d),
     }
@@ -146,7 +169,74 @@ const MAX_MOOV = 16 * 1024 * 1024
 // location.ISO6709 in moov/meta; Android: moov/udta/©xyz). Searching the moov box finds either.
 const ISO6709 = /([+-]\d{1,2}\.\d{2,})([+-]\d{1,3}\.\d{2,})/
 
-/** Reads duration, creation time (`mvhd` box) and GPS position from an MP4/MOV file. */
+/** Child boxes of `buf` between `start` and `end`: [{ at (the box), type, start (of the body), end }]. */
+function childBoxes(buf, start = 0, end = buf.length) {
+  const out = []
+  for (let pos = start; pos + 8 <= end; ) {
+    let size = buf.readUInt32BE(pos)
+    let header = 8
+    if (size === 1 && pos + 16 <= end) {
+      size = Number(buf.readBigUInt64BE(pos + 8))
+      header = 16
+    } else if (size === 0) size = end - pos
+    if (size < header || pos + size > end) break
+    out.push({ at: pos, type: buf.toString('latin1', pos + 4, pos + 8), start: pos + header, end: pos + size })
+    pos += size
+  }
+  return out
+}
+
+// "2023-03-10T18:00:05+0530": with an offset, or none. ("…Z" is UTC, no better than `mvhd`.)
+const APPLE_DATE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[+-]\d{2}:?\d{2})?$/
+
+/**
+ * The time of recording as the clock where it was recorded showed it, from iPhones' (and other
+ * Apple-style recorders') moov/meta key com.apple.quicktime.creationdate, e.g.
+ * "2023-03-10T18:00:05+0530", taken as local time the way photos' EXIF dates are, so a video sits
+ * among the photos taken with it on a trip abroad (`mvhd` is UTC). NaN when there is none.
+ */
+function appleCreationDate(moov) {
+  const meta = childBoxes(moov).find((b) => b.type === 'meta')
+  if (!meta) return NaN
+  // QuickTime's meta box has no version/flags (the ISO one does)
+  let kids = childBoxes(moov, meta.start, meta.end)
+  if (!kids.some((b) => b.type === 'keys')) kids = childBoxes(moov, meta.start + 4, meta.end)
+  const keys = kids.find((b) => b.type === 'keys')
+  const ilst = kids.find((b) => b.type === 'ilst')
+  if (!keys || !ilst || keys.start + 8 > keys.end) return NaN
+  // keys: version/flags, count, then [size, namespace, name] each; ilst refers to them from 1
+  let index = 0
+  const count = moov.readUInt32BE(keys.start + 4)
+  for (let i = 1, p = keys.start + 8; i <= count && p + 8 <= keys.end; i++) {
+    const size = moov.readUInt32BE(p)
+    if (size < 8 || p + size > keys.end) break
+    if (moov.toString('latin1', p + 8, p + size) === 'com.apple.quicktime.creationdate') {
+      index = i
+      break
+    }
+    p += size
+  }
+  if (!index) return NaN
+  for (const entry of childBoxes(moov, ilst.start, ilst.end)) {
+    if (moov.readUInt32BE(entry.at + 4) !== index) continue
+    const data = childBoxes(moov, entry.start, entry.end).find((b) => b.type === 'data')
+    if (!data || data.start + 8 >= data.end) return NaN
+    // data: type, locale, then the text
+    const m = moov.toString('utf8', data.start + 8, data.end).replace(/\0+$/, '').trim().match(APPLE_DATE)
+    if (!m) return NaN
+    const [y, mo, d, h, mi, s] = m.slice(1, 7).map(Number)
+    const date = new Date(y, mo - 1, d, h, mi, s)
+    // the calendar must agree (no 31 February)
+    if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) return NaN
+    return date.getTime()
+  }
+  return NaN
+}
+
+/**
+ * Reads duration, creation time (`mvhd` box, UTC; `local`: the recorder's own clock, when it
+ * wrote one) and GPS position from an MP4/MOV file.
+ */
 async function readMp4(file) {
   let fh
   try {
@@ -193,6 +283,11 @@ async function readMp4(file) {
           if (childSize < 8) break
           child += childSize
         }
+        let local = NaN
+        try {
+          local = appleCreationDate(moov)
+        } catch {} // a damaged meta box: the rest still counts
+        if (validDate(local)) out.local = local
         const marks = fromMoov(moov)
         if (marks) out.marks = marks
         const gps = moov.toString('latin1').match(ISO6709)
@@ -249,15 +344,33 @@ async function buildItem(file, st) {
     }
   } else if (type === 'video' && MP4_EXT.has(ext)) {
     const mp4 = await readMp4(file)
+    /** true: `taken` is the recorder's own clock time (as photos' EXIF); false: from `mvhd` (UTC) or none. */
+    item.localTime = false
     if (mp4) {
       if (mp4.duration) item.duration = mp4.duration
-      if (mp4.created) item.date = item.taken = mp4.created
+      if (mp4.local) {
+        item.date = item.taken = mp4.local
+        item.localTime = true
+      } else if (mp4.created) item.date = item.taken = mp4.created
       if (mp4.gps) item.meta = { lat: mp4.gps.lat, lon: mp4.gps.lon }
       applyMarks(item, mp4.marks)
     }
   }
   return item
 }
+
+/**
+ * A video cached before Lumen read the recorder's own clock: only its date is read again (id,
+ * path, size and modified time stay, so its preview and analysis stay valid).
+ */
+async function withLocalTime(prev) {
+  const mp4 = await readMp4(prev.path)
+  if (!mp4?.local) return { ...prev, localTime: false }
+  return { ...prev, date: mp4.local, taken: mp4.local, localTime: true }
+}
+
+/** A video cached before `localTime` was read. */
+const needsLocalTime = (it) => it.type === 'video' && MP4_EXT.has(it.ext) && it.localTime === undefined
 
 /**
  * The media index. Scans library folders, extracts metadata (EXIF / MP4),
@@ -273,27 +386,55 @@ class Library extends EventEmitter {
     this.scanning = false
     this.found = 0
     this.rescanQueued = false
-    this.watchers = []
+    this.watchers = new Map() // library folder -> fs.watch watcher
+    this.watchFolders = []
     this.watchTimer = null
+    this.retryTimer = null
+    this.watchRound = 0
     this.exclude = []
     this.skip = normSkip(null)
+    /** Library folders the last scan couldn't read (drive not connected…): their items were kept as they were. */
+    this.unreachable = []
+    /**
+     * How load() went: 'ok' | 'missing' (first run) | 'corrupt' (damaged; kept aside as
+     * library.json.damaged-…, starting empty) | 'error' (there but unreadable: never saved over).
+     */
+    this.loadState = 'missing'
+    // one save at a time, each to a temp file of its own, so two saves can't mix
+    this.saveRun = serial(() => writeAtomic(this.cacheFile, JSON.stringify({ version: 1, items: this.list })))
   }
 
   async load() {
-    try {
-      const data = JSON.parse(await fsp.readFile(this.cacheFile, 'utf8'))
-      if (data.version === 1 && Array.isArray(data.items)) {
-        this.setItems(new Map(data.items.map((it) => [keyOf(it.path), it])))
+    const res = await readJson(this.cacheFile)
+    if (res.data) {
+      const data = res.data
+      if (data?.version === 1 && Array.isArray(data.items)) {
+        const items = data.items.filter((it) => it && typeof it.path === 'string' && typeof it.id === 'string')
+        this.setItems(new Map(items.map((it) => [keyOf(it.path), it])))
+        this.loadState = 'ok'
+      } else {
+        // not a library Lumen knows (a newer version's?): kept aside rather than overwritten
+        const keptAs = keepAside(this.cacheFile)
+        console.error('Library cache not understood; kept as', keptAs)
+        this.loadState = 'corrupt'
       }
-    } catch {}
+    } else if (res.missing) {
+      this.loadState = 'missing'
+    } else if (res.corrupt) {
+      console.error('Library cache damaged; kept as', res.keptAs)
+      this.loadState = 'corrupt'
+    } else {
+      console.error('Failed to read library cache', res.error)
+      this.loadState = 'error'
+    }
   }
 
   async save() {
+    // library.json is there but couldn't be read: writing now would replace it with less (the items
+    // of a drive that isn't connected, say), so this session leaves it as it is
+    if (this.loadState === 'error') return
     try {
-      await fsp.mkdir(path.dirname(this.cacheFile), { recursive: true })
-      const tmp = `${this.cacheFile}.tmp`
-      await fsp.writeFile(tmp, JSON.stringify({ version: 1, items: this.list }))
-      await fsp.rename(tmp, this.cacheFile)
+      await this.saveRun()
     } catch (err) {
       console.error('Failed to save library cache', err)
     }
@@ -309,8 +450,15 @@ class Library extends EventEmitter {
     return this.byId.get(id)
   }
 
+  /** `unreachable`: library folders the last scan couldn't read (their items were kept as they were). */
   status() {
-    return { scanning: this.scanning, found: this.found }
+    return { scanning: this.scanning, found: this.found, unreachable: [...this.unreachable] }
+  }
+
+  /** Is this path in a library folder the last scan couldn't read? Its items there were only kept, not checked. */
+  isUnreachable(p) {
+    const key = String(p).toLowerCase()
+    return this.unreachable.some((root) => isUnder(key, normFolder(root)))
   }
 
   /** Fills in metadata discovered later (e.g. a video's duration once it has been played). */
@@ -363,18 +511,33 @@ class Library extends EventEmitter {
     emitStatus(true)
 
     try {
+      // library.json couldn't be read at start-up (another program holding it?): one more try
+      // before building the library from nothing
+      let reloaded = false
+      if (this.loadState === 'error' && this.items.size === 0) {
+        await this.load()
+        reloaded = this.items.size > 0
+      }
+
       const files = new Map()
+      const unreachable = [] // library folders that couldn't be read at all
+      const kept = [] // [folder, its library folder] (normFolder): earlier items in these stay as they were
+      const onFound = () => {
+        this.found++
+        emitStatus(false)
+      }
       for (const root of folders) {
-        await walk(
-          root,
-          files,
-          () => {
-            this.found++
-            emitStatus(false)
-          },
-          walkExclude,
-          skip.exts,
-        )
+        const unread = []
+        try {
+          await walk(root, files, onFound, walkExclude, skip.exts, unread)
+        } catch {
+          // A drive that isn't connected, a network share not there yet (Lumen starts with
+          // Windows), a folder renamed in Explorer, no permission…: that says nothing about what's
+          // in it, so it isn't taken as empty (which would forget its people, tags, text…)
+          unreachable.push(root)
+          continue
+        }
+        for (const dir of unread) kept.push([normFolder(dir), normFolder(root)])
       }
       emitStatus(true)
 
@@ -388,14 +551,20 @@ class Library extends EventEmitter {
         let st
         try {
           st = await fsp.stat(file)
-        } catch {
+        } catch (err) {
+          // gone since it was listed: dropped; can't be read right now (locked…): kept as it was
+          const prev = this.items.get(key)
+          if (prev && err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') next.set(key, prev)
           return
         }
         if (st.size < skip.minBytes) return // "Skip tiny files" (stickers, icons, thumbnails)
         const prev = this.items.get(key)
         // (items cached by Lumen < 1.8 lack `taken`: read their metadata again once)
         if (prev && prev.size === st.size && prev.mtime === Math.round(st.mtimeMs) && prev.taken !== undefined && prev.rating !== undefined) {
-          next.set(key, prev)
+          if (needsLocalTime(prev)) {
+            changed = true
+            next.set(key, await withLocalTime(prev))
+          } else next.set(key, prev)
           return
         }
         changed = true
@@ -407,6 +576,29 @@ class Library extends EventEmitter {
         }
       })
 
+      // A library folder that went away during the scan (a drive unplugged) wasn't emptied either.
+      for (const root of folders) {
+        if (unreachable.includes(root)) continue
+        const st = await fsp.stat(root).catch(() => null)
+        if (st?.isDirectory()) continue
+        unreachable.push(root)
+        const dir = normFolder(root)
+        for (const key of [...next.keys()]) if (isUnder(key, dir)) next.delete(key)
+      }
+      for (const root of unreachable) kept.push([normFolder(root), normFolder(root)])
+      // Their earlier items stay, the very same ones (so nothing that follows the library sees a
+      // change), unless the skip lists now leave them out. Removing a folder from the library
+      // still drops its items: it isn't in `folders` any more.
+      if (kept.length) {
+        for (const [key, prev] of this.items) {
+          if (next.has(key)) continue
+          const hit = kept.find(([dir]) => isUnder(key, dir))
+          if (hit && this.keeps(prev, hit[1])) next.set(key, prev)
+        }
+      }
+      this.unreachable = unreachable
+      if (unreachable.length) console.warn('[library] not readable, items kept:', unreachable.join(', '))
+
       if (!changed && next.size !== this.items.size) changed = true
       if (!changed) {
         for (const key of this.items.keys()) {
@@ -416,7 +608,7 @@ class Library extends EventEmitter {
           }
         }
       }
-      if (changed || progressive) {
+      if (changed || progressive || reloaded) {
         this.setItems(next)
         this.emit('changed')
         await this.save()
@@ -424,6 +616,7 @@ class Library extends EventEmitter {
     } finally {
       this.scanning = false
       emitStatus(true)
+      this.retryWatchSoon() // a library folder that couldn't be read is looked at again in a while
       if (this.rescanQueued) {
         this.rescanQueued = false
         // the latest request's folders and options (one may have been added mid-scan)
@@ -434,19 +627,22 @@ class Library extends EventEmitter {
     }
   }
 
-  /** Does this file differ (size or date) from its library entry? True for files not in the library. */
+  /**
+   * Does this file differ (size or date) from its library entry? For a file not in the library:
+   * would a scan take it (not one "Skip tiny files" leaves out)?
+   */
   async changedOnDisk(full) {
     const prev = this.items.get(keyOf(full))
-    if (!prev) return true
     try {
       const st = await fsp.stat(full)
+      if (!prev) return st.isFile() && st.size >= this.skip.minBytes
       return st.size !== prev.size || Math.round(st.mtimeMs) !== prev.mtime
     } catch {
-      return true // gone
+      return !!prev // gone
     }
   }
 
-  /** Would walk() (from library folder `root`, lower-cased) pick up this media file? */
+  /** Would walk() (from library folder `root`, normFolder) pick up this media file? */
   wouldScan(full, root) {
     const segments = path.relative(root, full.toLowerCase()).split(path.sep)
     if (segments.some((s) => s.startsWith('.') || SKIP_DIRS.has(s))) return false
@@ -455,43 +651,140 @@ class Library extends EventEmitter {
     return normFolder(dir) === root || !isExcluded(dir, [...this.exclude, ...this.skip.folders])
   }
 
+  /** Would a scan from library folder `root` (normFolder) still take this earlier item? (Skip lists, size.) */
+  keeps(item, root) {
+    return this.wouldScan(item.path, root) && !this.skip.exts.has(extOf(item.path)) && !(item.size < this.skip.minBytes)
+  }
+
+  /** Lower-cased folders that hold library items, and every folder above them. */
+  knownFolders() {
+    if (this.folderIndex?.list !== this.list) {
+      const set = new Set()
+      for (const it of this.list) {
+        for (let dir = keyOf(path.dirname(it.path)); !set.has(dir); dir = path.dirname(dir)) {
+          set.add(dir)
+          if (path.dirname(dir) === dir) break
+        }
+      }
+      this.folderIndex = { list: this.list, set }
+    }
+    return this.folderIndex.set
+  }
+
   /**
    * Watches `folders` and calls `onChange` (debounced) when media may have changed. Also emits
    * 'file' (fullPath, 'rename' | 'change') for every media file event that a scan would include
    * (not a skipped type, not in an excluded or skipped folder); 'rename' = created, renamed or
    * deleted. Used by watch-alerts to check newly appeared files.
+   * A folder that can't be watched (its drive isn't connected) or whose watcher fails (unplugged)
+   * is looked at every 30 s; once it's back it is watched again and rescanned.
    */
   watch(folders, onChange) {
-    for (const w of this.watchers) w.close()
-    this.watchers = []
-    const rescanSoon = () => {
-      clearTimeout(this.watchTimer)
-      this.watchTimer = setTimeout(onChange, 1500)
+    for (const w of this.watchers.values()) w.close()
+    this.watchers = new Map()
+    clearTimeout(this.retryTimer)
+    this.retryTimer = null
+    this.watchRound++
+    this.watchFolders = [...folders]
+    this.onWatchChange = onChange
+    for (const folder of this.watchFolders) this.watchFolder(folder)
+    this.retryWatchSoon()
+  }
+
+  rescanSoon() {
+    clearTimeout(this.watchTimer)
+    this.watchTimer = setTimeout(() => this.onWatchChange?.(), 1500)
+  }
+
+  /** Starts watching one library folder. False when it can't be watched right now. */
+  watchFolder(folder) {
+    const root = normFolder(folder)
+    let watcher
+    try {
+      watcher = fs.watch(folder, { recursive: true }, (event, filename) => this.onFolderEvent(folder, root, event, filename))
+    } catch {
+      return false
     }
-    for (const folder of folders) {
+    watcher.on('error', () => {
+      // the drive was unplugged, the network share went away…: watched again once it's back
+      watcher.close()
+      if (this.watchers.get(folder) !== watcher) return
+      this.watchers.delete(folder)
+      this.rescanSoon()
+      this.retryWatchSoon()
+    })
+    this.watchers.set(folder, watcher)
+    return true
+  }
+
+  onFolderEvent(folder, root, event, filename) {
+    if (!filename) return this.rescanSoon()
+    const full = path.join(folder, filename)
+    if (isMedia(filename)) {
+      if (this.skip.exts.has(extOf(filename))) return // a skipped file type: nothing to rescan
+      const scanned = this.wouldScan(full, root)
+      if (scanned) this.emit('file', full, event)
+      // Windows reports reading a file (previews, text, video frames, the viewer…) as a change
+      // of the file and its folder, because its last-access time moves. Only a new size or date
+      // is worth a rescan; files that come, go or are renamed arrive as 'rename'.
+      if (event === 'change') {
+        if (scanned) this.changedOnDisk(full).then((changed) => changed && this.rescanSoon())
+        return
+      }
+      return this.rescanSoon()
+    }
+    // Not a photo or video: a folder ("2019.05.12 Goa" too) or another kind of file. A folder's
+    // 'change' is its last-access time; one that comes, goes or is renamed may hold many photos.
+    if (event === 'change') return
+    this.isFolderEvent(full, filename).then((yes) => yes && this.rescanSoon())
+  }
+
+  /** A name that isn't a photo or video came, went or was renamed: is it (or was it) a folder? */
+  async isFolderEvent(full, filename) {
+    try {
+      return (await fsp.stat(full)).isDirectory() // else another kind of file: nothing to do
+    } catch {
+      // Gone: a folder the library had photos in (deleted, or moved / renamed away). A name
+      // without a file extension might have been any folder, so it's rescanned anyway.
+      return !hasFileExtension(filename) || this.knownFolders().has(keyOf(full))
+    }
+  }
+
+  isUnreachableRoot(folder) {
+    const dir = normFolder(folder)
+    return this.unreachable.some((root) => normFolder(root) === dir)
+  }
+
+  /** While a library folder can't be watched or read, looks every 30 s whether it's back. */
+  retryWatchSoon() {
+    if (this.retryTimer) return
+    if (!this.watchFolders.some((f) => !this.watchers.has(f) || this.isUnreachableRoot(f))) return
+    const round = this.watchRound
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null
+      if (round === this.watchRound) this.retryWatch(round).catch(() => {})
+    }, RETRY_WATCH_MS)
+    this.retryTimer.unref?.()
+  }
+
+  async retryWatch(round) {
+    let back = false
+    for (const folder of this.watchFolders) {
+      const unwatched = !this.watchers.has(folder)
+      if (!unwatched && !this.isUnreachableRoot(folder)) continue
       try {
-        const root = normFolder(folder)
-        const watcher = fs.watch(folder, { recursive: true }, (event, filename) => {
-          if (filename && extOf(filename) && !isMedia(filename)) return
-          if (filename && this.skip.exts.has(extOf(filename))) return // a skipped file type: nothing to rescan
-          const full = filename ? path.join(folder, filename) : null
-          if (full && isMedia(filename)) {
-            if (this.wouldScan(full, root)) this.emit('file', full, event)
-          }
-          // Windows reports reading a file (previews, text, video frames, the viewer…) as a change
-          // of the file and its folder, because its last-access time moves. Only a new size or date
-          // is worth a rescan; files that come, go or are renamed arrive as 'rename'.
-          if (event === 'change' && full) {
-            if (!isMedia(filename) || !this.wouldScan(full, root)) return
-            this.changedOnDisk(full).then((changed) => changed && rescanSoon())
-            return
-          }
-          rescanSoon()
-        })
-        watcher.on('error', () => {})
-        this.watchers.push(watcher)
-      } catch {}
+        await fsp.readdir(folder)
+      } catch {
+        continue // still not there
+      }
+      if (round !== this.watchRound) return // watch() was called again meanwhile
+      if (unwatched && !this.watchers.has(folder) && !this.watchFolder(folder)) continue
+      back = true
     }
+    // Read what's there now (the items kept while it was away are brought up to date); the scan
+    // looks at what's still missing when it ends.
+    if (back) this.rescanSoon()
+    else this.retryWatchSoon()
   }
 }
 

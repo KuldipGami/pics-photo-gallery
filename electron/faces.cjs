@@ -1,10 +1,10 @@
 const fs = require('node:fs')
-const fsp = require('node:fs/promises')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { EventEmitter } = require('node:events')
 const { Worker } = require('node:worker_threads')
 const { utilityProcess } = require('electron')
+const { writeAtomic, writeAtomicSync, serial, readJson, keepAside } = require('./safe-file.cjs')
 
 // Faceprints are InsightFace ArcFace (buffalo_l) embeddings: 512 numbers, L2-normalised, compared
 // by cosine distance. Calibrated on test photos: copies of one face ~0.03 apart, the same person
@@ -21,6 +21,8 @@ const PAIR_SUGGEST_COS = 0.6 // "Same person?" review
 const MATCH_COS = 0.68 // "Possible matches" on a person's page (the user picks, so cast wider)
 const CONCURRENCY = 4 // photos in flight (rendering overlaps with GPU inference)
 const CLUSTER_EVERY = 300 // re-group after this many newly analysed photos with faces
+const MAX_ATTEMPTS = 2 // a photo the engine keeps dying or stalling on is left for the next session
+const MAX_FAILURES = 4 // engine crashes / stalls in a row (no good answer between): stop for the session
 
 const toEuclid = (cos) => Math.sqrt(2 * cos) // for unit vectors: |a-b|² = 2(1 - cos)
 const CLUSTER_SRC = fs.readFileSync(path.join(__dirname, 'faces-cluster.cjs'), 'utf8')
@@ -83,7 +85,10 @@ function runClusterWorker(job) {
   })
 }
 
-/** The InsightFace engine process (face-engine.cjs). Restarted automatically if it dies. */
+/**
+ * The InsightFace engine process (face-engine.cjs). Restarted automatically if it dies; killed and
+ * restarted if it stops answering (a stuck GPU), on the CPU once that has happened twice.
+ */
 class FaceEngine {
   constructor({ modelsDir, adapterFile }) {
     this.modelsDir = modelsDir
@@ -93,6 +98,9 @@ class FaceEngine {
     this.info = null
     this.seq = 0
     this.pending = new Map()
+    this.hangs = 0 // times it stopped answering this session
+    this.cpu = false
+    this.failures = 0 // crashes, stalls and failed runs since its last good answer
   }
 
   start() {
@@ -105,6 +113,10 @@ class FaceEngine {
     this.child = child
     this.ready = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('The face recognition engine did not start')), 120_000)
+      child.on('exit', () => {
+        clearTimeout(timer)
+        reject(new Error('The face recognition engine stopped while loading')) // no-op once ready
+      })
       child.on('message', (msg) => {
         if (msg.type === 'ready') {
           clearTimeout(timer)
@@ -112,29 +124,59 @@ class FaceEngine {
           this.info = msg
           console.log(`[faces] engine ready on ${msg.device}${msg.adapter ?? ''}`, JSON.stringify(msg.timings))
           resolve(msg)
+        } else if (msg.type === 'device') {
+          // the GPU failed mid-session: it carries on on the CPU
+          console.error(`[faces] engine moved to the ${msg.device}: ${msg.reason}`)
+          if (this.info) this.info = { ...this.info, device: msg.device, adapter: msg.adapter }
         } else if (msg.type === 'result') {
           const job = this.pending.get(msg.seq)
           if (!job) return
           this.pending.delete(msg.seq)
           clearTimeout(job.timer)
+          if (msg.ok) this.failures = 0
           job.resolve(msg)
         }
       })
     })
-    this.ready.catch((err) => console.error(`[faces] engine failed to start: ${err.message}`))
-    child.on('exit', () => {
-      for (const [seq, job] of this.pending) {
-        this.pending.delete(seq)
-        clearTimeout(job.timer)
-        job.resolve(null)
-      }
-      if (this.child === child) this.child = null
+    this.ready.catch((err) => {
+      console.error(`[faces] engine failed to start: ${err.message}`)
+      // not kept for the session: the next start() tries again with a fresh process
+      if (this.child === child) this.stop()
     })
-    child.postMessage({ type: 'init', modelsDir: this.modelsDir, cacheFile: this.adapterFile })
+    child.on('exit', () => {
+      const lost = this.drop(child, true)
+      if (this.child === child) {
+        this.child = null
+        this.ready = null
+        if (lost) this.failures++ // it died while working
+      }
+    })
+    child.postMessage({ type: 'init', modelsDir: this.modelsDir, cacheFile: this.adapterFile, cpu: this.cpu })
     return this.ready
   }
 
-  /** { ok, width, height, faces } — ok:false for an unreadable photo, null if the engine died. */
+  /**
+   * Answers the jobs sent to `child` (it's gone); how many there were. It works on one job at a
+   * time, in order: when it died by itself (`crashed`) the oldest job is the likely cause and gets
+   * null; the others weren't reached yet and get { retry: true } (try again, nothing counted).
+   */
+  drop(child, crashed = false) {
+    let n = 0
+    for (const [seq, job] of this.pending) {
+      if (job.child !== child) continue
+      this.pending.delete(seq)
+      clearTimeout(job.timer)
+      job.resolve(crashed && n === 0 ? null : { ok: false, retry: true })
+      n++
+    }
+    return n
+  }
+
+  /**
+   * { ok, width, height, faces } — ok:false for an unreadable photo (stage 'decode'), a failed run
+   * (stage 'run'), no answer for a minute (timeout: the process is replaced) or the engine gone
+   * before it got to this photo (retry); null if the engine died on it.
+   */
   async analyze(jpeg) {
     await this.start()
     const child = this.child
@@ -144,16 +186,39 @@ class FaceEngine {
       const timer = setTimeout(() => {
         this.pending.delete(seq)
         resolve({ ok: false, timeout: true })
+        this.hung(child)
       }, 60_000)
-      this.pending.set(seq, { resolve, timer })
+      this.pending.set(seq, { resolve, timer, child })
       child.postMessage({ type: 'analyze', seq, jpeg })
     })
   }
 
+  /** It stopped answering: a fresh process next time (on the CPU after the second time). */
+  hung(child) {
+    if (this.child !== child) return
+    if (++this.hangs >= 2) this.cpu = true
+    this.fail()
+  }
+
+  /** Something went wrong inside the engine: count it, and start a fresh process next time. */
+  fail() {
+    this.failures++
+    this.stop()
+  }
+
+  /** Stops the process without closing (the next analyze() starts a fresh one). */
+  stop() {
+    const child = this.child
+    this.child = null
+    this.ready = null
+    if (!child) return
+    this.drop(child)
+    child.kill()
+  }
+
   dispose() {
     this.closed = true
-    this.child?.kill()
-    this.child = null
+    this.stop()
   }
 }
 
@@ -170,9 +235,10 @@ class FaceIndex extends EventEmitter {
     this.items = new Map() // itemId -> { m: mtime, ar: aspect ratio, faces: [faceId] }
     this.faces = new Map() // faceId -> { id, item, box, score, px, d: Float32Array(512), person, rej: [], manual?, ignored? }
     this.people = new Map() // personId -> { id, name, hidden, created, cover?, notSame? }
-    // From an older face model: per photo, the user's choices waiting to be carried over to the
-    // faces the new model finds (matched by position) once that photo is re-analysed.
-    this.legacy = new Map() // itemId -> [{ box, person?, rej?, manual?, ignored?, cover? }]
+    // From an older face model, or a photo that changed: per photo, the user's choices waiting to be
+    // carried over to the faces found when it is analysed again (matched by position). `re` marks
+    // a photo that changed (not the model upgrade).
+    this.legacy = new Map() // itemId -> [{ box, person?, rej?, manual?, ignored?, cover?, re? }]
     this.photos = new Map() // itemId -> library item (images only)
     this.enabled = true
     this.halted = false
@@ -180,6 +246,9 @@ class FaceIndex extends EventEmitter {
     this.queue = []
     this.active = 0
     this.inflight = new Set() // photos being analysed right now (never queue them twice)
+    this.redo = new Set() // …of which these changed meanwhile: their result is thrown away
+    this.failed = new Set() // couldn't be analysed this session (never saved: tried again next time)
+    this.attempts = new Map() // itemId -> times the engine died or stalled on it (this session)
     this.sinceCluster = 0
     this.clustering = false
     this.clusterAgain = false
@@ -187,26 +256,60 @@ class FaceIndex extends EventEmitter {
     this.progress = { done: 0, total: 0 }
     this.engine = new FaceEngine({ modelsDir, adapterFile })
     this.timers = {}
+    this.generation = 0 // bumped whenever faces or people change (for the centroid cache)
+    this.dirty = false // changes not on disk yet
+    this.blocked = false // faces.json couldn't be read: never save over it this session
+    this.writer = serial(async () => {
+      const text = this.serialize()
+      this.writing = true
+      try {
+        await writeAtomic(this.file, text)
+        this.migrated = false
+      } finally {
+        this.writing = false
+        if (this.flushed) {
+          // saveNow() wrote newer data while this one was on its way: put that back on top
+          this.flushed = false
+          try {
+            writeAtomicSync(this.file, this.serialize())
+          } catch {}
+        }
+      }
+    })
   }
 
   // ---------- persistence ----------
 
   async load() {
-    let data
-    try {
-      data = JSON.parse(await fsp.readFile(this.file, 'utf8'))
-    } catch {
+    const r = await readJson(this.file)
+    if (r.error) {
+      // Still locked after a few tries (antivirus, a backup program): starting empty would save over
+      // every name and correction, so People stays off until Lumen is started again.
+      this.blocked = true
+      this.halted = true
+      this.error = "Lumen couldn't open its People data (faces.json). It will try again when Lumen restarts."
+      console.error('[faces] faces.json could not be read; leaving it alone this session', r.error)
       return
     }
-    if (data.version === 2 && data.model === MODEL) {
-      for (const [id, rec] of Object.entries(data.items)) this.items.set(id, rec)
-      for (const f of data.faces) {
-        this.faces.set(f.id, { ...f, d: decodeVec(f.e, f.s), rej: f.rej || [], e: undefined, s: undefined, enc: { e: f.e, s: f.s } })
+    if (r.corrupt) console.error(`[faces] faces.json was damaged (kept as ${r.keptAs}); starting again`)
+    const data = r.data
+    if (!data || typeof data !== 'object') return
+    try {
+      if (data.version === 2 && data.model === MODEL) {
+        for (const [id, rec] of Object.entries(data.items)) this.items.set(id, rec)
+        for (const f of data.faces) {
+          this.faces.set(f.id, { ...f, d: decodeVec(f.e, f.s), rej: f.rej || [], e: undefined, s: undefined, enc: { e: f.e, s: f.s } })
+        }
+        for (const p of data.people) this.people.set(p.id, p)
+        for (const [id, list] of Object.entries(data.legacy ?? {})) this.legacy.set(id, list)
+      } else if (data.version === 1) {
+        this.migrateFromV1(data)
       }
-      for (const p of data.people) this.people.set(p.id, p)
-      for (const [id, list] of Object.entries(data.legacy ?? {})) this.legacy.set(id, list)
-    } else if (data.version === 1) {
-      this.migrateFromV1(data)
+    } catch (err) {
+      // readable, but not what Lumen writes: kept aside like a damaged file
+      for (const map of [this.items, this.faces, this.people, this.legacy]) map.clear()
+      this.migrated = false
+      console.error(`[faces] faces.json couldn't be used (kept as ${keepAside(this.file)}); starting again`, err)
     }
   }
 
@@ -271,6 +374,7 @@ class FaceIndex extends EventEmitter {
 
   /** Throttled: at most one write per `ms` while analysing; user edits ask for a quicker save. */
   saveSoon(ms = 15_000) {
+    this.dirty = true
     const due = Date.now() + ms
     if (this.timers.save && this.saveDue <= due) return
     clearTimeout(this.timers.save)
@@ -281,39 +385,52 @@ class FaceIndex extends EventEmitter {
   async save() {
     clearTimeout(this.timers.save)
     this.timers.save = null
+    if (this.blocked) return
+    this.dirty = false
     try {
-      const tmp = `${this.file}.tmp`
-      await fsp.writeFile(tmp, this.serialize())
-      await fsp.rename(tmp, this.file)
+      await this.writer()
     } catch (err) {
       console.error('Failed to save faces', err)
+      this.saveSoon(60_000) // still owed: again later, and at quit
     }
   }
 
   saveNow() {
-    if (!this.timers.save && !this.migrated) return
+    if (this.blocked || (!this.dirty && !this.migrated && !this.writing)) return
     clearTimeout(this.timers.save)
     this.timers.save = null
     try {
-      fs.writeFileSync(this.file, this.serialize())
+      writeAtomicSync(this.file, this.serialize())
+      this.dirty = false
       this.migrated = false
-    } catch {}
+    } catch (err) {
+      console.error('Failed to save faces', err)
+    }
+    if (this.writing) this.flushed = true
   }
 
   // ---------- pipeline ----------
 
-  /** Reconcile with the library: forget removed/changed photos, queue new ones (newest first). */
+  /**
+   * Reconcile with the library: forget removed photos, analyse changed ones again (keeping the
+   * user's choices for their faces), queue new ones (newest first).
+   */
   sync(libraryItems) {
     this.photos = new Map(libraryItems.filter((it) => it.type === 'image').map((it) => [it.id, it]))
     let dropped = false
     for (const [id, rec] of this.items) {
       const it = this.photos.get(id)
       if (!it || it.mtime !== rec.m) {
+        if (it) this.keepChoices(id)
         this.dropItem(id)
         dropped = true
       }
     }
-    for (const id of this.legacy.keys()) if (!this.photos.has(id)) this.legacy.delete(id)
+    for (const id of this.legacy.keys()) {
+      if (this.photos.has(id)) continue
+      this.legacy.delete(id)
+      dropped = true
+    }
     if (dropped) {
       this.prunePeople()
       this.changed()
@@ -324,7 +441,7 @@ class FaceIndex extends EventEmitter {
       this.changed()
     }
     this.queue = [...this.photos.values()]
-      .filter((it) => !this.items.has(it.id) && !this.inflight.has(it.id))
+      .filter((it) => !this.items.has(it.id) && !this.inflight.has(it.id) && !this.failed.has(it.id))
       .sort((a, b) => b.date - a.date)
       .map((it) => it.id)
     this.progress = { done: 0, total: this.queue.length }
@@ -333,10 +450,15 @@ class FaceIndex extends EventEmitter {
   }
 
   pump() {
-    if (!this.enabled || this.halted || this.disposed || !this.canRun()) return
+    if (!this.enabled || this.halted || this.blocked || this.disposed || !this.canRun()) return
+    const busy = [] // put back while still being analysed: their turn comes once that's over
     while (this.active < CONCURRENCY && this.queue.length) {
       const item = this.photos.get(this.queue.shift())
-      if (!item || this.items.has(item.id) || this.inflight.has(item.id)) continue
+      if (!item || this.items.has(item.id)) continue
+      if (this.inflight.has(item.id)) {
+        busy.push(item.id)
+        continue
+      }
       this.active++
       this.inflight.add(item.id)
       this.analyze(item).finally(() => {
@@ -347,14 +469,18 @@ class FaceIndex extends EventEmitter {
         this.pump()
       })
     }
+    this.queue.push(...busy)
     if (!this.queue.length && !this.active && this.sinceCluster > 0) this.cluster()
   }
 
   async analyze(item) {
     let res
+    // (no picture now — the preview worker failed or timed out — is one photo's problem: see below)
+    const jpeg = await Promise.resolve()
+      .then(() => this.render(item))
+      .catch(() => null)
     try {
-      const jpeg = await this.render(item)
-      res = jpeg ? await this.engine.analyze(jpeg) : { ok: false }
+      res = jpeg ? await this.engine.analyze(jpeg) : { ok: false, stage: 'render' }
     } catch (err) {
       // The engine itself couldn't start (e.g. models missing). Stop instead of failing every photo.
       this.halted = true
@@ -364,36 +490,61 @@ class FaceIndex extends EventEmitter {
       this.emitProgress()
       return
     }
-    if (!res) {
-      this.queue.push(item.id) // engine restarted; try again later
-      this.progress.done--
+    if (this.disposed || !this.enabled) return // (turned off: the engine was stopped)
+    if (this.redo.delete(item.id)) return this.again(item) // edited while it was being analysed
+    if (res?.retry) return this.again(item) // the engine went away before it got to this one
+    if (!res || !res.ok) {
+      // Only a real answer is kept. A photo that couldn't be analysed now (no preview, the engine
+      // gone, stalled or failing after a GPU reset) isn't saved as "no faces": it's tried again
+      // after the engine restarts, and next session if it keeps failing.
+      if (res?.stage === 'run') this.engine.fail()
+      if (!res || res.timeout || res.stage === 'run') {
+        if (this.engine.failures >= MAX_FAILURES && !this.halted) {
+          this.halted = true
+          this.error = 'Its engine keeps failing on this computer. It tries again when Lumen restarts.'
+          console.error(`[faces] analysis stopped for this session: ${this.error}`)
+          this.emitProgress()
+        }
+        const n = (this.attempts.get(item.id) ?? 0) + 1
+        this.attempts.set(item.id, n)
+        if (n < MAX_ATTEMPTS) return this.again(item)
+      }
+      this.failed.add(item.id)
       return
     }
-    // changed while we were busy, or already analysed: never overwrite faces (and the user's choices)
-    if (this.photos.get(item.id) !== item || this.items.has(item.id)) return
+    const now = this.photos.get(item.id)
+    // left the library meanwhile, or already analysed: never overwrite faces (and the user's choices)
+    if (!now || this.items.has(item.id)) return
+    if (now.mtime !== item.mtime) return this.again(item) // changed while we were busy: read the new version
+    this.attempts.delete(item.id)
     const added = []
-    if (res.ok) {
-      res.faces.forEach((f, i) => {
-        if (f.score < KEEP_SCORE) return
-        const face = {
-          id: `${item.id}:${i}`,
-          item: item.id,
-          box: f.box.map((v) => +v.toFixed(4)),
-          score: +f.score.toFixed(3),
-          px: Math.round(Math.min(f.box[2] * res.width, f.box[3] * res.height)),
-          d: f.embedding instanceof Float32Array ? f.embedding : Float32Array.from(f.embedding),
-          person: null,
-          rej: [],
-        }
-        this.faces.set(face.id, face)
-        added.push(face)
-      })
-    }
+    res.faces.forEach((f, i) => {
+      if (f.score < KEEP_SCORE) return
+      const face = {
+        id: `${item.id}:${i}`,
+        item: item.id,
+        box: f.box.map((v) => +v.toFixed(4)),
+        score: +f.score.toFixed(3),
+        px: Math.round(Math.min(f.box[2] * res.width, f.box[3] * res.height)),
+        d: f.embedding instanceof Float32Array ? f.embedding : Float32Array.from(f.embedding),
+        person: null,
+        rej: [],
+      }
+      this.faces.set(face.id, face)
+      added.push(face)
+    })
     this.carryOver(item.id, added)
-    this.items.set(item.id, { m: item.mtime, ar: res.ok ? +(res.width / res.height).toFixed(4) : 1, faces: added.map((f) => f.id) })
+    this.items.set(item.id, { m: item.mtime, ar: +(res.width / res.height).toFixed(4), faces: added.map((f) => f.id) })
+    this.generation++
     if (added.length) this.sinceCluster++
     if (this.sinceCluster >= CLUSTER_EVERY) this.cluster()
     this.saveSoon()
+  }
+
+  /** Back in the queue (it's counted again when it's done). */
+  again(item) {
+    this.queue.push(item.id)
+    this.progress.done--
   }
 
   /** Give newly found faces the user's earlier choices for the same face (matched by position). */
@@ -483,6 +634,7 @@ class FaceIndex extends EventEmitter {
         }
         if (this.people.has(pid)) f.person = pid
       })
+      this.generation++
       this.mergeDuplicates()
       this.prunePeople()
       this.changed()
@@ -518,7 +670,41 @@ class FaceIndex extends EventEmitter {
         if (cosDist(a.v, b.v) < MERGE_COS) into.set(b.pid, a.pid)
       }
     }
-    for (const f of this.faces.values()) if (into.has(f.person)) f.person = into.get(f.person)
+    // as a merge by hand: "not this person" and "different people" follow the group
+    this.fold(into)
+  }
+
+  /**
+   * Folds people into others (`into`: Map person → the person it becomes): their faces move, and
+   * "not <from>" corrections and "different people" marks now mean the person it became.
+   */
+  fold(into) {
+    if (!into.size) return
+    const to = (p) => into.get(p) ?? p
+    const swap = (list) => [...new Set(list.map(to))]
+    for (const [pid, intoId] of into) {
+      const from = this.people.get(pid)
+      const target = this.people.get(intoId)
+      if (!from || !target) continue
+      if (!target.name && from.name) target.name = from.name
+      if (from.notSame?.length) target.notSame = [...new Set([...(target.notSame ?? []), ...from.notSame])]
+    }
+    for (const f of this.faces.values()) {
+      if (into.has(f.person)) f.person = into.get(f.person)
+      // "not <from>" now means "not <into>": they're the same person
+      if (f.rej.some((p) => into.has(p))) f.rej = swap(f.rej)
+    }
+    for (const list of this.legacy.values()) {
+      for (const t of list) {
+        if (into.has(t.person)) t.person = into.get(t.person)
+        if (t.rej?.some((p) => into.has(p))) t.rej = swap(t.rej)
+      }
+    }
+    for (const pid of into.keys()) this.people.delete(pid)
+    for (const p of this.people.values()) {
+      if (p.notSame?.some((x) => into.has(x) || x === p.id)) p.notSame = swap(p.notSame).filter((x) => x !== p.id)
+    }
+    this.generation++
   }
 
   prunePeople() {
@@ -531,6 +717,37 @@ class FaceIndex extends EventEmitter {
   dropItem(id) {
     for (const faceId of this.items.get(id)?.faces ?? []) this.faces.delete(faceId)
     this.items.delete(id)
+    this.generation++
+  }
+
+  /**
+   * A photo whose faces are about to be forgotten because it changed (an edit, a turn): what the
+   * user decided about its faces — moved by hand, "not this person", a removed person's face, a
+   * chosen cover, a face of someone they named or hid — waits in `legacy` and is carried over (by
+   * position) once it's analysed again. (It also keeps a named person whose every photo changed.)
+   */
+  keepChoices(id) {
+    const rec = this.items.get(id)
+    if (!rec) return
+    const covers = new Map()
+    for (const p of this.people.values()) if (p.cover) covers.set(p.cover, p.id)
+    const kept = []
+    for (const fid of rec.faces) {
+      const f = this.faces.get(fid)
+      if (!f) continue
+      const t = { box: f.box, ar: rec.ar ?? 1, re: 1 }
+      const owner = f.person ? this.people.get(f.person) : null
+      const cover = !!owner && covers.get(fid) === f.person
+      if (owner && (f.manual || cover || owner.name || owner.hidden)) {
+        t.person = f.person
+        if (f.manual) t.manual = true
+        if (cover) t.cover = true
+      }
+      if (f.rej.length) t.rej = [...f.rej]
+      if (f.ignored) t.ignored = true
+      if (t.person || t.rej || t.ignored) kept.push(t)
+    }
+    if (kept.length) this.legacy.set(id, [...(this.legacy.get(id) ?? []), ...kept])
   }
 
   // ---------- user actions ----------
@@ -565,28 +782,10 @@ class FaceIndex extends EventEmitter {
   }
 
   merge(fromIds, intoId) {
-    const into = this.people.get(intoId)
-    if (!into) return
-    for (const pid of fromIds) {
-      const from = this.people.get(pid)
-      if (!from || pid === intoId) continue
-      if (!into.name && from.name) into.name = from.name
-      if (from.notSame?.length) into.notSame = [...new Set([...(into.notSame ?? []), ...from.notSame])].filter((p) => p !== intoId)
-      const swap = (list) => [...new Set(list.map((p) => (p === pid ? intoId : p)))]
-      for (const f of this.faces.values()) {
-        if (f.person === pid) f.person = intoId
-        // "not <from>" now means "not <into>": they're the same person
-        if (f.rej.includes(pid)) f.rej = swap(f.rej)
-      }
-      for (const list of this.legacy.values()) {
-        for (const t of list) {
-          if (t.person === pid) t.person = intoId
-          if (t.rej?.includes(pid)) t.rej = swap(t.rej)
-        }
-      }
-      for (const p of this.people.values()) if (p.notSame?.includes(pid)) p.notSame = swap(p.notSame)
-      this.people.delete(pid)
-    }
+    if (!this.people.has(intoId)) return
+    const into = new Map()
+    for (const pid of fromIds) if (pid !== intoId && this.people.has(pid)) into.set(pid, intoId)
+    this.fold(into)
     this.edited()
   }
 
@@ -675,10 +874,16 @@ class FaceIndex extends EventEmitter {
     return !!(this.people.get(a)?.notSame?.includes(b) || this.people.get(b)?.notSame?.includes(a))
   }
 
+  /**
+   * Photos that changed (Lumen's own lossless edits) or left the library. Their faces go, but the
+   * user's choices for them wait to be carried over if the photo is analysed again (for a photo
+   * that's gone, until the next sync with the library).
+   */
   removeItems(ids) {
     for (const id of ids) {
+      this.keepChoices(id)
       this.dropItem(id)
-      this.legacy.delete(id)
+      if (this.inflight.has(id)) this.redo.add(id) // being analysed from before the change
     }
     this.edited()
   }
@@ -741,24 +946,37 @@ class FaceIndex extends EventEmitter {
   setEnabled(enabled) {
     this.enabled = enabled
     if (enabled) {
-      this.halted = false
-      this.error = null
-      this.pump()
+      this.halted = this.blocked
+      if (!this.blocked) this.error = null
+      this.failed.clear()
+      this.attempts.clear()
+      this.engine.failures = 0
+      this.sync([...this.photos.values()]) // what was added or changed while it was off
     } else {
       this.queue = []
       this.progress = { done: 0, total: 0 }
+      this.engine.stop() // frees the GPU's memory; a fresh one starts when it's turned back on
     }
     this.emitProgress()
     this.changed()
   }
 
+  /** "Delete all face data": an empty faces.json (written after any save still on its way). */
   async reset() {
     this.items.clear()
     this.faces.clear()
     this.people.clear()
     this.legacy.clear()
+    this.failed.clear()
+    this.attempts.clear()
     this.edits++
-    await fsp.rm(this.file, { force: true }).catch(() => {})
+    this.migrated = false
+    // (the user asked for a fresh start: writing over a file that couldn't be read is what they want)
+    this.blocked = false
+    this.halted = false
+    this.error = null
+    this.dirty = true
+    await this.save()
     this.changed()
     if (this.enabled) this.sync([...this.photos.values()])
   }
@@ -767,7 +985,7 @@ class FaceIndex extends EventEmitter {
 
   /** Average faceprint direction of every person (cached until something changes). */
   centroids(fresh = false) {
-    const key = `${this.edits}:${this.faces.size}`
+    const key = `${this.edits}:${this.generation}:${this.faces.size}`
     if (!fresh && this.centroidCache?.key === key) return this.centroidCache.map
     const sums = new Map()
     for (const f of this.faces.values()) {
@@ -824,13 +1042,19 @@ class FaceIndex extends EventEmitter {
     }, 300)
   }
 
+  /** Whether choices from the older face model are still waiting (not just photos that changed). */
+  upgrading() {
+    for (const list of this.legacy.values()) for (const t of list) if (!t.re) return true
+    return false
+  }
+
   progressInfo() {
     const running = this.enabled && !this.halted && (this.active > 0 || this.queue.length > 0)
     return {
       ...this.progress,
       running,
       error: this.error,
-      upgrading: this.legacy.size > 0,
+      upgrading: this.upgrading(),
       engine: this.engine.info ? { device: this.engine.info.device, adapter: this.engine.info.adapter } : null,
     }
   }

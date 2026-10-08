@@ -6,6 +6,7 @@ const readline = require('node:readline')
 const { spawn } = require('node:child_process')
 const { EventEmitter } = require('node:events')
 const sharp = require('sharp')
+const { writeAtomic, writeAtomicSync, serial, readJson } = require('./safe-file.cjs')
 
 const VERSION = 1 // bump to read every picture again (engine or reading settings changed)
 // Long side the engine reads. Body text of a page photographed from arm's length is still legible
@@ -269,7 +270,24 @@ class OcrIndex extends EventEmitter {
     this.progress = { done: 0, total: 0 }
     this.prepared = new WeakMap() // record -> { lines, folded, words }
     this.timers = {}
-    this.dirty = false
+    this.dirty = false // changes not on disk yet
+    this.blocked = false // ocr.json couldn't be read: don't save over it this session
+    this.writer = serial(async () => {
+      const text = this.serialize()
+      this.writing = true
+      try {
+        await writeAtomic(this.file, text)
+      } finally {
+        this.writing = false
+        if (this.flushed) {
+          // saveNow() wrote newer text while this one was on its way: put that back on top
+          this.flushed = false
+          try {
+            writeAtomicSync(this.file, this.serialize())
+          } catch {}
+        }
+      }
+    })
   }
 
   get available() {
@@ -279,12 +297,14 @@ class OcrIndex extends EventEmitter {
   // ---------- persistence: { v, lang, items: { id: [mtime, size, text?] } } ----------
 
   async load() {
-    let data
-    try {
-      data = JSON.parse(await fsp.readFile(this.file, 'utf8'))
-    } catch {
+    const r = await readJson(this.file)
+    if (r.error) {
+      this.blocked = true
+      console.error('[ocr] ocr.json could not be read; not saving over it this session', r.error)
       return
     }
+    if (r.corrupt) console.error(`[ocr] ocr.json was damaged (kept as ${r.keptAs}); reading the text again`)
+    const data = r.data
     if (data?.v !== VERSION || !data.items || typeof data.items !== 'object') return
     this.lang = data.lang ?? null
     for (const [id, r] of Object.entries(data.items)) {
@@ -307,26 +327,27 @@ class OcrIndex extends EventEmitter {
   async save() {
     clearTimeout(this.timers.save)
     this.timers.save = null
+    if (this.blocked) return
     this.dirty = false
     try {
-      const tmp = `${this.file}.tmp`
-      await fsp.writeFile(tmp, this.serialize())
-      await fsp.rename(tmp, this.file)
+      await this.writer()
     } catch (err) {
       console.error('Failed to save text index', err)
+      this.saveSoon(60_000) // still owed: again later, and at quit
     }
   }
 
   saveNow() {
-    if (!this.dirty) return
+    if (this.blocked || (!this.dirty && !this.writing)) return
     clearTimeout(this.timers.save)
     this.timers.save = null
     try {
-      const tmp = `${this.file}.tmp`
-      fs.writeFileSync(tmp, this.serialize())
-      fs.renameSync(tmp, this.file)
+      writeAtomicSync(this.file, this.serialize())
       this.dirty = false
-    } catch {}
+    } catch (err) {
+      console.error('Failed to save text index', err)
+    }
+    if (this.writing) this.flushed = true
   }
 
   // ---------- pipeline ----------
@@ -358,13 +379,16 @@ class OcrIndex extends EventEmitter {
   pump() {
     if (!this.enabled || this.halted || this.disposed || !this.available || this.timers.retry || !this.canRun()) return this.closeSoon()
     while (this.slots.length < ENGINES) this.slots.push({ engine: new OcrEngine(this.script), busy: false })
+    const reading = [] // put back while still being read: their turn comes once that's over
     for (const slot of this.slots) {
       if (slot.busy) continue
       if (slot !== this.slots[0] && !this.slots[0].engine.info) break // more engines once one has started
       let item = null
       while (!item && this.queue.length) {
         const it = this.media.get(this.queue.shift())
-        if (it && !this.records.has(it.id) && !this.inflight.has(it.id)) item = it
+        if (!it || this.records.has(it.id)) continue
+        if (this.inflight.has(it.id)) reading.push(it.id)
+        else item = it
       }
       if (!item) break
       clearTimeout(this.timers.idle)
@@ -380,6 +404,7 @@ class OcrIndex extends EventEmitter {
           this.pump()
         })
     }
+    this.queue.push(...reading)
     this.closeSoon()
   }
 
@@ -397,11 +422,7 @@ class OcrIndex extends EventEmitter {
     this.scriptReady ??= (async () => {
       const source = fs.readFileSync(path.join(__dirname, 'ocr-engine.ps1'), 'utf8') // inside app.asar when packaged
       const current = await fsp.readFile(this.script, 'utf8').catch(() => null)
-      if (current !== source) {
-        await fsp.mkdir(path.dirname(this.script), { recursive: true })
-        await fsp.writeFile(`${this.script}.tmp`, source)
-        await fsp.rename(`${this.script}.tmp`, this.script)
-      }
+      if (current !== source) await writeAtomic(this.script, source)
     })()
     return this.scriptReady.catch((err) => {
       this.scriptReady = null

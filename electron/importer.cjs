@@ -8,6 +8,7 @@ const exifr = require('exifr')
 const { IMAGE_EXT, VIDEO_EXT, extOf, keyOf } = require('./library.cjs')
 const organize = require('./organize.cjs')
 const { uniquePath, moveFile } = require('./cleanup.cjs')
+const { writeAtomicSync, readJsonSync } = require('./safe-file.cjs')
 
 /**
  * Import from a phone, a memory card or any folder: copies only the photos and videos that aren't
@@ -125,6 +126,45 @@ async function contentHash(file, size) {
   return h.digest('base64').slice(0, 24)
 }
 
+/** Reads up to `length` bytes at `position` (fewer only at the end of the file). */
+async function readFull(fh, buf, length, position) {
+  let got = 0
+  while (got < length) {
+    const { bytesRead } = await fh.read(buf, got, length - got, position + got)
+    if (!bytesRead) break
+    got += bytesRead
+  }
+  return got
+}
+
+/**
+ * True when two files hold exactly the same bytes, every one of them compared (whatever the size;
+ * contentHash only samples big files). Used before an original is deleted from a card.
+ */
+async function sameContent(a, b, signal) {
+  const fa = await fsp.open(a, 'r')
+  let fb
+  try {
+    fb = await fsp.open(b, 'r')
+    const [sa, sb] = await Promise.all([fa.stat(), fb.stat()])
+    if (sa.size !== sb.size) return false
+    const CHUNK = 4 * 1024 * 1024
+    const x = Buffer.allocUnsafe(CHUNK)
+    const y = Buffer.allocUnsafe(CHUNK)
+    for (let pos = 0; pos < sa.size; ) {
+      if (signal?.aborted) throw abortError()
+      const want = Math.min(CHUNK, sa.size - pos)
+      const [n, m] = await Promise.all([readFull(fa, x, want, pos), readFull(fb, y, want, pos)])
+      if (n !== want || m !== want || !x.subarray(0, n).equals(y.subarray(0, m))) return false
+      pos += n
+    }
+    return true
+  } finally {
+    await fa.close().catch(() => {})
+    await fb?.close().catch(() => {})
+  }
+}
+
 // ── capture dates (like library.cjs, which doesn't export its readers) ─────
 
 const MAC_EPOCH = Date.UTC(1904, 0, 1)
@@ -225,10 +265,13 @@ class ImportMemory {
     this.file = file
     this.data = { version: 1, sources: {} }
     this.timer = null
-    try {
-      const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
-      if (saved?.version === 1 && saved.sources && typeof saved.sources === 'object') this.data = saved
-    } catch {}
+    this.readOnly = false // imports.json is there but couldn't be read: never written over this session
+    if (!file) return
+    const res = readJsonSync(file) // a damaged file is kept aside, not treated as empty and overwritten
+    if (res.error) this.readOnly = true
+    const saved = res.data
+    if (saved?.version === 1 && saved.sources && typeof saved.sources === 'object') this.data = saved
+    else if (saved !== undefined) this.readOnly = true // a format this version doesn't know
   }
 
   has(sourceId, key) {
@@ -273,12 +316,9 @@ class ImportMemory {
   saveNow() {
     clearTimeout(this.timer)
     this.timer = null
-    if (!this.file) return
+    if (!this.file || this.readOnly) return
     try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true })
-      const tmp = `${this.file}.tmp`
-      fs.writeFileSync(tmp, JSON.stringify(this.data))
-      fs.renameSync(tmp, this.file)
+      writeAtomicSync(this.file, JSON.stringify(this.data))
     } catch (err) {
       console.error('Failed to save imports.json', err)
     }
@@ -1154,7 +1194,8 @@ class Importer {
         })
       }
 
-      // 3. remove the originals from the card (only copies that match the original byte for byte)
+      // 3. remove the originals from the card (only copies that match the original byte for byte,
+      //    all of it compared, whatever the size)
       if (o.deleteAfter && source.canDelete && source.kind !== 'device' && !cancelled()) {
         const removable = records.filter((r) => r.kept && r.c.path)
         let done = 0
@@ -1162,16 +1203,18 @@ class Importer {
           if (cancelled()) break
           progress('removing', done++, removable.length, r.c.name)
           try {
-            const original = r.c.hash ?? (await contentHash(r.c.path, r.c.size))
-            const copy = await contentHash(r.kept, r.c.size)
-            if (original !== copy) {
+            if (!(await sameContent(r.c.path, r.kept, o.signal))) {
               res.errors.push(`${r.c.name}: left on ${source.name} (the copy doesn't match the original)`)
               continue
             }
             if (source.kind === 'folder' && o.trash) await o.trash(r.c.path)
             else await fsp.unlink(r.c.path)
             res.removed++
+            // Lumen now holds the only copies: undoing the import must never recycle them
+            r.rec.sourceRemoved = true
+            if (r.jpg) r.jpg.sourceRemoved = true
           } catch (err) {
+            if (err?.name === 'AbortError' || cancelled()) break
             res.errors.push(`${r.c.name}: couldn't remove it from ${source.name}: ${err?.message ?? err}`)
           }
         }
@@ -1195,6 +1238,7 @@ class Importer {
         destination: dest,
         note: notes.join(' · '),
         source: { id: source.id, name: source.name, kind: source.kind },
+        removedOriginals: res.removed,
         files: res.files,
       }
     }
@@ -1242,6 +1286,10 @@ class Importer {
     try {
       const st = await fsp.stat(staged)
       let warning = null
+      // Shorter than the phone listed: the transfer was cut off (the phone locked or went to sleep).
+      // It isn't imported or remembered; the staged part is deleted below.
+      if (c.size && st.size < c.size)
+        throw new Error(`the copy stopped early (${st.size.toLocaleString()} of ${c.size.toLocaleString()} bytes; the phone may have locked). Keep the phone unlocked and import again.`)
       if (c.size && st.size !== c.size) warning = `${c.name}: the phone listed ${c.size.toLocaleString()} bytes, the copy has ${st.size.toLocaleString()} (phones that convert photos while copying do this)`
       const taken = await readTaken(staged, c.ext)
       if (taken) c.taken = taken
@@ -1290,8 +1338,12 @@ class Importer {
     o.onFile?.(out.file.to)
     const jpg = { from: r.rec.from, to: out.file.to, size: out.file.size, key: r.rec.key }
     res.files.push(jpg)
+    r.jpg = jpg
     if (out.moveError) res.errors.push(out.moveError)
-    if (out.moved) {
+    if (out.keptOriginal) {
+      // the JPG isn't the whole picture (a panorama over 8192 px): the HEIC stays next to it
+      res.warnings.push(out.keptOriginal)
+    } else if (out.moved) {
       r.rec.to = out.moved.to // the HEIC original, kept aside (outside the scanned folders)
       r.kept = out.moved.to
     } else if (o.heicOriginals === 'none') {
@@ -1306,16 +1358,29 @@ class Importer {
   /**
    * Undoes an import: the copies go to the Recycle Bin (`trash(path)`, i.e. shell.trashItem) and
    * are forgotten, so a later import offers them again. Empty dated folders it made are removed.
-   * Marks undone files `restored`; resolves to how many.
+   * Kept (never recycled): copies whose original was removed from the card after copying (they
+   * are the only ones left: `sourceRemoved`, or every file of an older entry that removed
+   * originals), and files that aren't the imported copy any more (another size now). Their
+   * number is set as `entry.keptOnUndo`. Marks undone files `restored`; resolves to how many.
    */
   async undo(entry, trash) {
     let n = 0
+    let kept = 0
     const dirs = new Set()
     const forgot = []
+    // Entries from before `sourceRemoved` existed only say so in their note.
+    const removedUnknown = entry.removedOriginals === undefined && /removed from .+ after copying/.test(String(entry.note ?? ''))
     for (const f of entry.files ?? []) {
       if (f.restored || !f.to) continue
-      if (!exists(f.to)) {
-        f.restored = true
+      let st
+      try {
+        st = await fsp.stat(f.to)
+      } catch (err) {
+        if (err?.code === 'ENOENT') f.restored = true // gone already
+        continue
+      }
+      if (f.sourceRemoved || removedUnknown || (Number.isFinite(f.size) && st.size !== f.size)) {
+        kept++
         continue
       }
       try {
@@ -1326,6 +1391,7 @@ class Importer {
         n++
       } catch {}
     }
+    entry.keptOnUndo = kept
     if (entry.source?.id && forgot.length) this.memory.forget(entry.source.id, forgot)
     for (const dir of dirs) {
       for (let d = dir, i = 0; i < 3 && entry.destination && isUnder(d, entry.destination) && trimSep(d).toLowerCase() !== trimSep(entry.destination).toLowerCase(); i++, d = path.dirname(d)) {

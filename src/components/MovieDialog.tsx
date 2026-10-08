@@ -40,6 +40,8 @@ export interface MovieResult {
   encoder: string
   /** Names of items that couldn't be read (left out / left dark). */
   skipped: string[]
+  /** The path asked for, when the old movie there was open (in a player) and couldn't be replaced: `file` is then a free name next to it. */
+  notReplaced?: string
 }
 
 interface Props {
@@ -371,6 +373,11 @@ export function MovieDialog({ items, title: suggestedTitle = '', subtitle: sugge
             <p>
               {formatDuration(stage.result.duration)} long · made in {formatDuration(Math.max(1, stage.result.seconds))}
             </p>
+            {stage.result.notReplaced && (
+              <p className="mv-warn">
+                <TriangleAlert size={14} /> The old movie was open, so this one was saved as “{fileName(stage.result.file)}”.
+              </p>
+            )}
             {stage.result.skipped.length > 0 && (
               <p className="mv-warn">
                 <TriangleAlert size={14} /> {stage.result.skipped.length === 1 ? `${stage.result.skipped[0]} couldn't be read.` : `${stage.result.skipped.length} items couldn't be read.`}

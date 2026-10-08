@@ -63,6 +63,10 @@ interface Props {
 const SLIDE_MS = 4000
 const IDLE_MS = 2600
 
+/** Something is typed here (not a slider or a checkbox). */
+const isTextBox = (el: EventTarget | null) =>
+  el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button', 'submit', 'color'].includes(el.type))
+
 const readPref = (key: string) => {
   try {
     return localStorage.getItem(key)
@@ -111,6 +115,8 @@ export function Viewer({
   const [showInfo, setShowInfo] = useState(() => readPref('lumen.info') === '1')
   const [idle, setIdle] = useState(false)
   const [slideshow, setSlideshow] = useState(false)
+  /** A text box in the viewer has the focus (a tag, the date taken): the slideshow waits. */
+  const [typing, setTyping] = useState(false)
   const [dims, setDims] = useState<{ id: string; w: number; h: number } | null>(null)
   const [zoom, setZoom] = useState({ actual: 1, zoomed: false })
   const [highlight, setHighlight] = useState<FaceBox | null>(null)
@@ -144,12 +150,18 @@ export function Viewer({
     setHighlight(null)
   }, [item?.id])
 
-  // Slideshow: images advance on a timer, videos when they finish.
+  // Editing ends the slideshow: it would move on and throw the edit away.
   useEffect(() => {
-    if (!slideshow || item?.type !== 'image') return
+    if (editing) setSlideshow(false)
+  }, [editing])
+
+  // Slideshow: images advance on a timer, videos when they finish. Not while something is being
+  // typed (a tag would land on the next photo); the timer starts over afterwards.
+  useEffect(() => {
+    if (!slideshow || editing || typing || item?.type !== 'image') return
     const t = setTimeout(next, SLIDE_MS)
     return () => clearTimeout(t)
-  }, [slideshow, index, item?.type])
+  }, [slideshow, editing, typing, index, item?.type])
 
   // Preload neighbours for instant navigation: their previews right away, their full pictures once
   // this one is showing (a HEIC's full picture is made on demand and takes a second or more).
@@ -291,6 +303,8 @@ export function Viewer({
       className={`viewer${idle ? ' idle' : ''}${showInfo ? ' info-open' : ''}`}
       onMouseMove={poke}
       onMouseDown={poke}
+      onFocus={(e) => setTyping(isTextBox(e.target))}
+      onBlur={() => setTyping(false)}
     >
       <div className="viewer-backdrop">
         <img src={thumbUrl(item)} alt="" />
@@ -329,7 +343,7 @@ export function Viewer({
                 item={item}
                 videoRef={videoRef}
                 onDims={onDims}
-                onEnded={() => slideshow && next()}
+                onEnded={() => slideshow && !editing && !typing && next()}
               />
             )}
           </div>

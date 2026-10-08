@@ -89,21 +89,39 @@ function fromView(recipe, W0, H0) {
   return { map, scale: Math.max(fit.w, fit.h) / Math.max(W0, H0) }
 }
 
-/** The photo upright (EXIF orientation), optionally shrunk to `maxSize`, as raw pixels. */
-function decode(input, maxSize) {
+/**
+ * The photo upright (EXIF orientation), optionally shrunk to `maxSize`, as raw pixels. Transparency
+ * is dropped unless `alpha` (for saving as PNG, WebP, AVIF or TIFF, which keep it).
+ */
+function decode(input, maxSize, { alpha = false } = {}) {
   let img = sharp(input, { failOn: 'none' }).rotate()
   if (maxSize) img = img.resize(maxSize, maxSize, { fit: 'inside', withoutEnlargement: true })
-  return img.removeAlpha().raw().toBuffer({ resolveWithObject: true })
+  if (!alpha) img = img.removeAlpha()
+  return img.raw().toBuffer({ resolveWithObject: true })
+}
+
+/** Output formats that can store transparency. */
+const ALPHA_FORMATS = new Set(['png', 'webp', 'avif', 'tiff'])
+
+/** Adds the transparency of `input` (upright, full size) back to erased raw RGB pixels. */
+async function withAlphaOf(input, img) {
+  const { width, height } = img.info
+  const mask = await sharp(input, { failOn: 'none' }).rotate().extractChannel('alpha').raw().toBuffer({ resolveWithObject: true })
+  if (mask.info.width !== width || mask.info.height !== height) return img
+  return sharp(img.data, { raw: { width, height, channels: img.info.channels } })
+    .joinChannel(mask.data, { raw: { width, height, channels: 1 } })
+    .raw()
+    .toBuffer({ resolveWithObject: true })
 }
 
 /**
  * Runs the recipe. `input` is a file path or an image buffer; `maxSize` shrinks the picture first
- * (for previews); `erase(img, steps)` runs the magic eraser steps. Resolves to a sharp pipeline
- * ready for output.
+ * (for previews); `erase(img, steps)` runs the magic eraser steps; `alpha` keeps transparency.
+ * Resolves to a sharp pipeline ready for output.
  */
-async function apply(input, recipe, maxSize, erase) {
+async function apply(input, recipe, maxSize, erase, { alpha = false } = {}) {
   const r = cleanRecipe(recipe)
-  let img = await decode(input, maxSize)
+  let img = await decode(input, maxSize, { alpha })
   if (r.erase.length) {
     if (!erase) throw new Error("The magic eraser isn't available")
     img = await erase(img, r.erase)
@@ -207,19 +225,28 @@ class Editor {
     this.cache = null // { id, mtime, source, small: { size, buf }, full: Promise<{ data, info }> }
   }
 
-  /** The picture to edit (full size), cached for the item being edited. */
-  async source(item) {
-    if (this.cache?.id === item.id && this.cache.mtime === item.mtime) return this.cache.source
+  /**
+   * The cache entry of the item being edited (made when needed). Callers keep the object they get:
+   * `this.cache` may already belong to another photo by the time an await returns.
+   */
+  async entry(item) {
+    if (this.cache?.id === item.id && this.cache.mtime === item.mtime) return this.cache
     const source = await this.thumbs.source(item)
     if (!source) throw new Error("This photo can't be opened for editing")
-    this.cache = { id: item.id, mtime: item.mtime, source, small: null, full: null }
-    return source
+    if (this.cache?.id === item.id && this.cache.mtime === item.mtime) return this.cache // made meanwhile
+    const cache = { id: item.id, mtime: item.mtime, source, small: null, full: null }
+    this.cache = cache
+    return cache
+  }
+
+  /** The picture to edit (full size), cached for the item being edited. */
+  async source(item) {
+    return (await this.entry(item)).source
   }
 
   /** The photo upright at full size as raw pixels; kept once the magic eraser is used. */
   async full(item) {
-    await this.source(item)
-    const cache = this.cache
+    const cache = await this.entry(item)
     if (!cache.full) {
       cache.full = decode(cache.source)
       cache.full.catch(() => (cache.full = null))
@@ -257,17 +284,18 @@ class Editor {
 
   /** A preview of the recipe, about `size` px on its long side (JPEG). */
   async preview(item, recipe, size = 1600) {
-    await this.source(item)
+    // this photo's own cache entry (another photo may be opened while this one is being prepared)
+    const cache = await this.entry(item)
     // Previews start from a cached downscaled copy, so moving a slider stays quick.
-    if (!this.cache.small || this.cache.small.size !== size) {
-      const buf = await sharp(this.cache.source, { failOn: 'none' })
+    if (!cache.small || cache.small.size !== size) {
+      const buf = await sharp(cache.source, { failOn: 'none' })
         .rotate()
         .resize(size, size, { fit: 'inside', withoutEnlargement: true })
         .jpeg({ quality: 92 })
         .toBuffer()
-      this.cache.small = { size, buf }
+      cache.small = { size, buf }
     }
-    const out = await apply(this.cache.small.buf, recipe, undefined, this.eraseFor(item))
+    const out = await apply(cache.small.buf, recipe, undefined, this.eraseFor(item))
     const { data, info } = await out.jpeg({ quality: 85 }).toBuffer({ resolveWithObject: true })
     return { data, width: info.width, height: info.height }
   }
@@ -277,16 +305,20 @@ class Editor {
     const r = cleanRecipe(recipe)
     if (isIdentity(r)) throw new Error('Nothing to save — no changes yet')
     const source = await this.source(item)
+    const format = OUTPUT[item.ext] && typeof source === 'string' ? OUTPUT[item.ext] : 'jpeg'
+    // a transparent PNG / WebP / AVIF / TIFF stays transparent (JPG has no transparency)
+    const alpha = ALPHA_FORMATS.has(format) && !!(await sharp(source, { failOn: 'none' }).metadata()).hasAlpha
     let out
     if (r.erase.length) {
       // the erased full-size picture is usually still cached from pressing "Erase"
       const erase = this.eraseFor(item)
       if (!erase) throw new Error("The magic eraser isn't available")
-      out = await render(await erase(await this.full(item), r.erase), r)
+      let img = await erase(await this.full(item), r.erase)
+      if (alpha) img = await withAlphaOf(source, img)
+      out = await render(img, r)
     } else {
-      out = await apply(source, r)
+      out = await apply(source, r, undefined, undefined, { alpha })
     }
-    const format = OUTPUT[item.ext] && typeof source === 'string' ? OUTPUT[item.ext] : 'jpeg'
     const ext = format === 'jpeg' ? (OUTPUT[item.ext] === 'jpeg' ? item.ext : 'jpg') : item.ext
     const file = await freeName(item.dir, path.basename(item.name, path.extname(item.name)), ext)
     // The pixels were rebuilt, so write the facts that matter explicitly: capture date (the copy sits

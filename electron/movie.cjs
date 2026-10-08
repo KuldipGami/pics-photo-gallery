@@ -3,7 +3,8 @@ const fsp = require('node:fs/promises')
 const path = require('node:path')
 const { Worker } = require('node:worker_threads')
 const sharp = require('sharp')
-const { run, probe, encoders, encoderArgs, FfmpegError, Canceled, TONEMAP } = require('./ffmpeg.cjs')
+const { run, probe, encoders, encoderArgs, FfmpegError, Canceled, TONEMAP, trackTemp, untrackTemp } = require('./ffmpeg.cjs')
+const { renameRetry } = require('./safe-file.cjs')
 
 /**
  * Memory movies: a set of photos (and short video clips) → an MP4 slideshow with a gentle
@@ -203,7 +204,7 @@ async function titleOverlay(title, subtitle, W, H) {
         align: 'centre',
         rgba: true,
         dpi: 72,
-        wrap: 'word',
+        wrap: 'word-char', // a word too long for a line ("#SummerVacation2024Goa") is broken too
       },
     })
       .png()
@@ -212,6 +213,22 @@ async function titleOverlay(title, subtitle, W, H) {
   if (title) parts.push(await render(title, Math.round(unit * 0.1), 600))
   if (subtitle) parts.push(await render(subtitle, Math.round(unit * 0.042), 400))
   const gap = Math.round(unit * 0.018)
+  // Whatever still doesn't fit (a very long title, an odd font) is scaled down: a layer bigger than
+  // the frame would make the whole movie fail.
+  const fit = async (p, maxW, maxH) => {
+    if (p.info.width <= maxW && p.info.height <= maxH) return p
+    return sharp(p.data).resize({ width: maxW, height: maxH, fit: 'inside' }).png().toBuffer({ resolveWithObject: true })
+  }
+  for (let i = 0; i < parts.length; i++) parts[i] = await fit(parts[i], Math.round(W * 0.94), H)
+  const room = Math.round(H * 0.9) - gap * (parts.length - 1)
+  const textH = parts.reduce((s, p) => s + p.info.height, 0)
+  if (textH > room) {
+    const k = room / textH
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i]
+      parts[i] = await fit(p, Math.max(1, Math.floor(p.info.width * k)), Math.max(1, Math.floor(p.info.height * k)))
+    }
+  }
   const blockH = parts.reduce((s, p) => s + p.info.height, 0) + gap * (parts.length - 1)
   let y = Math.round(H / 2 - blockH / 2)
   const band = Math.round(blockH + unit * 0.3)
@@ -548,7 +565,7 @@ class ClipReader {
     const count = Math.ceil(entry.dur * FPS) + 3
     const args = ['-v', 'error', '-ss', entry.offset.toFixed(3), '-t', (entry.dur + 1).toFixed(3), '-i', entry.path, '-an', '-sn', '-dn']
     args.push('-filter_complex', clipFilter(entry.info, W, H), '-map', '[v]', '-frames:v', String(count), '-f', 'rawvideo', '-pix_fmt', 'nv12', 'pipe:1')
-    run(args, { stdout: 'stream', signal: this.abort.signal, idleTimeout: 60_000, onSpawn: (child) => this.attach(child) })
+    run(args, { stdout: 'stream', signal: this.abort.signal, idleTimeout: 60_000, onSpawn: (child, activity) => this.attach(child, activity) })
       .catch(() => {})
       .finally(() => {
         signal?.removeEventListener('abort', kill)
@@ -557,9 +574,12 @@ class ClipReader {
       })
   }
 
-  attach(child) {
+  attach(child, activity) {
     this.child = child
+    this.activity = activity
     child.stdout.on('data', (chunk) => {
+      activity.poke() // frames coming in: not stuck
+      if (this.closed) return
       let pos = 0
       while (pos < chunk.length) {
         if (!this.partial) {
@@ -575,9 +595,20 @@ class ClipReader {
           this.partial = null
         }
       }
-      if (this.frames.length >= 8) child.stdout.pause()
+      if (this.frames.length >= 8) {
+        child.stdout.pause()
+        activity.hold() // ffmpeg now waits for the movie to catch up: that isn't a hang
+      }
       this.flush()
     })
+  }
+
+  /** Lets ffmpeg go on decoding (it paused once 8 frames were waiting). */
+  resume() {
+    const out = this.child?.stdout
+    if (!out?.isPaused() || this.closed) return
+    this.activity?.poke()
+    out.resume()
   }
 
   flush() {
@@ -585,7 +616,7 @@ class ClipReader {
       const resolve = this.wanted.shift()
       resolve(this.take())
     }
-    if (this.frames.length < 4) this.child?.stdout.resume()
+    if (this.frames.length < 4) this.resume()
   }
 
   take() {
@@ -606,17 +637,22 @@ class ClipReader {
   next() {
     if (this.frames.length || this.ended) {
       const f = this.take()
-      if (this.frames.length < 4) this.child?.stdout.resume()
+      if (this.frames.length < 4) this.resume()
       return Promise.resolve(f)
     }
     return new Promise((resolve) => {
       this.wanted.push(resolve)
-      this.child?.stdout.resume()
+      this.resume()
     })
   }
 
+  /** Stops ffmpeg and lets go of the frames still held (~3 MB each at 1080p). */
   close() {
+    this.closed = true
     this.abort.abort()
+    this.frames = []
+    this.partial = null
+    this.last = null
   }
 }
 
@@ -677,12 +713,14 @@ async function mixSound({ entries, total, opt, dir, signal }) {
   const script = path.join(dir, 'sound.txt')
   await fsp.writeFile(script, graph.join(';\n'))
   args.push('-filter_complex_script', script, '-map', '[a]', '-t', total.toFixed(3))
-  // Windows' own AAC encoder is several times faster than ffmpeg's; ffmpeg's is the fallback
+  // Windows' own AAC encoder is several times faster than ffmpeg's; ffmpeg's is the fallback.
+  // (Progress output tells the idle timer it's working: with "-v error" it says nothing otherwise.)
+  const opts = { signal, idleTimeout: 120_000, duration: total, onProgress: () => {} }
   try {
-    await run([...args, '-c:a', 'aac_mf', '-b:a', '192k', '-y', out], { signal, idleTimeout: 120_000 })
+    await run([...args, '-c:a', 'aac_mf', '-b:a', '192k', '-y', out], opts)
   } catch (err) {
     if (err instanceof Canceled) throw err
-    await run([...args, '-c:a', 'aac', '-b:a', '192k', '-y', out], { signal, idleTimeout: 120_000 })
+    await run([...args, '-c:a', 'aac', '-b:a', '192k', '-y', out], opts)
   }
   return out
 }
@@ -695,14 +733,16 @@ async function mixSound({ entries, total, opt, dir, signal }) {
  *                the middle of the faces) }] in movie order
  *   getSource    (item) → path or image buffer for a photo (default: item.path); HEIC etc. are
  *                decoded by the caller
- *   output       the .mp4 to write (replaced if it exists)
+ *   output       the .mp4 to write (replaced if it exists; when that one can't be replaced, e.g. it's
+ *                playing in a player, the movie is saved next to it as "<name> (2).mp4")
  *   title, subtitle   the title card ("Goa", "March 2023"); none when both are empty
  *   photoSeconds (3.5), clipSeconds (5), clipAudio (true: clips keep their sound, music lowered)
  *   music        an audio file (or null); musicVolume 0–1
  *   size         1080 | 720;  shape 'landscape' | 'portrait'
  *   date         creation time stored in the file (ms; default now)
  * `onProgress({ phase: 'preparing' | 'rendering' | 'finishing', fraction, done, total, fps })`,
- * `signal` cancels. Resolves to { file, duration, frames, encoder, seconds, skipped: [names] }.
+ * `signal` cancels. Resolves to { file, duration, frames, encoder, seconds, skipped: [names],
+ * notReplaced? (the requested output, when the movie had to go to another name) }.
  */
 async function makeMovie(options, { onProgress, signal } = {}) {
   const t0 = Date.now()
@@ -721,6 +761,7 @@ async function makeMovie(options, { onProgress, signal } = {}) {
   signal?.addEventListener('abort', onAbort, { once: true })
   const sig = abort.signal
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lumen-movie-'))
+  trackTemp(dir) // deleted at quit if the app closes mid-movie
   let pool = null
   const readers = new Map()
   const report = throttle(onProgress)
@@ -973,7 +1014,10 @@ async function makeMovie(options, { onProgress, signal } = {}) {
             const idx = old.index
             canvases.get(idx).then(() => pool.broadcast({ type: 'drop', id: idx }), () => {})
             canvases.delete(idx)
-          } else if (old.kind === 'clip') readers.get(old.index)?.close()
+          } else if (old.kind === 'clip') {
+            readers.get(old.index)?.close()
+            readers.delete(old.index)
+          }
         }
         const secs = (Date.now() - t1) / 1000
         report({ phase: 'rendering', fraction: 0.02 + 0.95 * (written / frames), done: written, total: frames, fps: secs > 0.5 ? written / secs : 0 })
@@ -992,18 +1036,37 @@ async function makeMovie(options, { onProgress, signal } = {}) {
     const part = `${output}.part`
     const meta = ['-metadata', `creation_time=${new Date(opt.date).toISOString()}`, '-metadata', 'comment=Made with Lumen']
     if (opt.title) meta.push('-metadata', `title=${[opt.title, opt.subtitle].filter(Boolean).join(' · ')}`)
+    let file = output
+    trackTemp(part)
     try {
       await run(
         ['-v', 'error', '-i', videoFile, ...(audio ? ['-i', audio] : []), '-map', '0:v', ...(audio ? ['-map', '1:a', '-shortest'] : []), '-c', 'copy', ...meta, '-movflags', '+faststart', '-f', 'mp4', '-y', part],
-        { signal: sig },
+        { signal: sig, duration: total, onProgress: () => {} },
       )
-      await fsp.rename(part, output)
+      try {
+        await renameRetry(part, output)
+      } catch {
+        // The movie it would replace is open (playing in a player) or read-only: keep the new one
+        // under a free name next to it rather than throw it away.
+        file = await freeName(output)
+        await renameRetry(part, file)
+      }
     } catch (err) {
       await fsp.rm(part, { force: true }).catch(() => {})
       throw err
+    } finally {
+      untrackTemp(part)
     }
     report({ phase: 'finishing', fraction: 1, done: frames, total: frames }, true)
-    return { file: output, duration: total, frames, encoder, seconds: (Date.now() - t0) / 1000, skipped }
+    return {
+      file,
+      duration: total,
+      frames,
+      encoder,
+      seconds: (Date.now() - t0) / 1000,
+      skipped,
+      ...(file !== output ? { notReplaced: output } : {}),
+    }
   } catch (err) {
     if (sig.aborted || err instanceof Canceled) throw new Canceled()
     throw err
@@ -1013,8 +1076,24 @@ async function makeMovie(options, { onProgress, signal } = {}) {
     for (const r of readers.values()) r.close()
     pool?.close()
     await new Promise((r) => setTimeout(r, 100)) // let killed processes let go of their files
-    await fsp.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {})
+    // (if it can't be deleted now, it stays on the list for quit time)
+    await fsp.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).then(() => untrackTemp(dir), () => {})
   }
+}
+
+/** "Goa.mp4" → the first of "Goa (2).mp4", "Goa (3).mp4"… that doesn't exist yet. */
+async function freeName(file) {
+  const ext = path.extname(file)
+  const base = file.slice(0, file.length - ext.length)
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${base} (${n})${ext}`
+    try {
+      await fsp.access(candidate)
+    } catch {
+      return candidate
+    }
+  }
+  throw new FfmpegError("The movie couldn't be saved: no free file name")
 }
 
 /** Runs at most `n` tasks at once, in the order they were asked for. */

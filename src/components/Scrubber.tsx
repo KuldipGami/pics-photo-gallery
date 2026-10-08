@@ -75,6 +75,12 @@ export function Scrubber({ layout, scrollTop, viewport, onSeek }: Props) {
         if (dragging) seek(y)
       }}
       onPointerUp={() => setDragging(false)}
+      // the drag can also end without a pointerup (touch taken over, window lost focus…)
+      onPointerCancel={() => {
+        setDragging(false)
+        setHover(null)
+      }}
+      onLostPointerCapture={() => setDragging(false)}
       onPointerLeave={() => !dragging && setHover(null)}
     >
       <div className="scrubber-track" style={{ top: PAD, height: track }}>

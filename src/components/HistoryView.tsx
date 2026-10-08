@@ -41,6 +41,44 @@ export function historyTitle(e: HistoryEntry) {
   }
 }
 
+/**
+ * The question before an import is undone (History → Restore, or Undo after importing): the
+ * imported files go to the Recycle Bin, except those whose originals were removed from the source
+ * (they're the only copies, so they stay).
+ */
+export function importUndoConfirm({ files, removedOriginals = 0, source }: { files: number; removedOriginals?: number; source?: string }) {
+  const from = source || 'the source'
+  return {
+    title: 'Undo this import?',
+    message:
+      removedOriginals > 0
+        ? `The imported files go to the Recycle Bin (up to ${plural(files, 'file')}). Files whose originals were removed from ${from} after copying are kept: they are the only copies.`
+        : `${plural(files, 'imported file')} ${files === 1 ? 'goes' : 'go'} to the Recycle Bin. You can restore ${files === 1 ? 'it' : 'them'} from there.`,
+    warning:
+      removedOriginals > 0
+        ? `${plural(removedOriginals, 'original was', 'originals were')} removed from ${from}, so ${removedOriginals === 1 ? 'its copy is' : 'their copies are'} kept in your library.`
+        : undefined,
+    confirmLabel: 'Undo import',
+    danger: true,
+  }
+}
+
+/**
+ * How many originals an import removed from its source. Entries from before that was counted only
+ * say so in their note; undoing one of those keeps every file, so they all count.
+ */
+export const removedOriginalsOf = (e: HistoryEntry) =>
+  e.removedOriginals ?? (/removed from .+ after copying/.test(e.note ?? '') ? e.files.filter((f) => !f.restored).length : 0)
+
+/** The toast after an import was undone; `kept` = files left in place (originals removed, or changed since). */
+export function importUndoneText(res: { restored: number; kept?: number }) {
+  const kept = res.kept ?? 0
+  const parts: string[] = []
+  if (res.restored) parts.push(`Moved ${plural(res.restored, 'imported file')} to the Recycle Bin.`)
+  if (kept) parts.push(`Kept ${plural(kept, 'file')}: the original${kept === 1 ? ' was' : 's were'} removed from the source, or the file changed since.`)
+  return parts.join(' ') || 'Nothing could be undone: the files were moved or renamed since.'
+}
+
 const canRestore = (e: HistoryEntry) =>
   ['moved', 'renamed', 'dates', 'edited', 'converted', 'imported'].includes(e.kind) &&
   (e.files.some((f) => !f.restored) || (e.dateChanges ?? []).some((d) => !d.restored))

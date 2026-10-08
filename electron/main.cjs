@@ -7,7 +7,7 @@ process.env.UV_THREADPOOL_SIZE ??= String(Math.max(4, Math.min(20, cores)))
 
 const path = require('node:path')
 const fs = require('node:fs')
-const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, nativeImage, Menu, clipboard, session, powerMonitor } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, nativeImage, Menu, clipboard, session, powerMonitor, screen } = require('electron')
 
 if (process.env.LUMEN_USER_DATA) app.setPath('userData', path.resolve(process.env.LUMEN_USER_DATA))
 
@@ -37,7 +37,8 @@ const { makeMovie } = require('./movie.cjs')
 const { History } = require('./history.cjs')
 const cleanup = require('./cleanup.cjs')
 const edits = require('./edits.cjs')
-const { isJpeg } = require('./jpeg-exif.cjs')
+const { isJpeg, setSwapJournal, recoverSwaps } = require('./jpeg-exif.cjs')
+const ffmpeg = require('./ffmpeg.cjs')
 const organize = require('./organize.cjs')
 const { Locations, assignLocations, historyNote } = require('./locations.cjs')
 const locSuggest = require('./location-suggest.cjs')
@@ -84,28 +85,40 @@ function isOurProcess(pid) {
   }
 }
 
+/** What the running copy wrote to instance.json: { version, pid, finishingUntil? } (null if unreadable). */
+function readInstanceFile() {
+  try {
+    return JSON.parse(fs.readFileSync(INSTANCE_FILE, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/** Longest the newer copy waits for an older one finishing a file job before ending it. */
+const HANDOVER_LIMIT_MS = 100_000
+
 /**
  * Only one Lumen runs at a time. Launching a *newer* version while an older one (1.2+) is open
  * makes the old one quit and hand over, so the newest build is always the one you see. An old
  * copy that can't quit (1.6.0 could get stuck in the background after its window closed) is
- * ended after 5 seconds.
+ * ended after 5 seconds, unless it said it is finishing a file job (instance.json
+ * `finishingUntil`): then it gets until that time, so it can record what it moved.
  */
 async function acquireSingleInstance() {
   const data = { version: VERSION }
   if (app.requestSingleInstanceLock(data)) return true
-  let running = null
-  try {
-    running = JSON.parse(fs.readFileSync(INSTANCE_FILE, 'utf8'))
-  } catch {}
+  const running = readInstanceFile()
   if (!running?.version || !isNewer(VERSION, running.version)) return false // the open window was focused instead
-  const waitForLock = async () => {
-    for (let i = 0; i < 25; i++) {
+  const waitForLock = async (ms = 5000) => {
+    for (const until = Date.now() + ms; Date.now() < until; ) {
       await sleep(200)
       if (app.requestSingleInstanceLock(data)) return true
     }
     return false
   }
   if (await waitForLock()) return true
+  const finishing = Number(readInstanceFile()?.finishingUntil) - Date.now()
+  if (finishing > 0 && (await waitForLock(Math.min(finishing, HANDOVER_LIMIT_MS) + 2000))) return true
   if (!isOurProcess(running.pid)) return false
   try {
     process.kill(running.pid)
@@ -225,12 +238,30 @@ let background
 let contextMenuOn = false
 // Folder events that came in while Lumen was moving files itself (replayed afterwards).
 const heldFileEvents = []
+/** The analyses (faces, search, text, duplicates) haven't followed the library's latest change yet. */
+let indexesStale = false
+/** The saved library, faces, albums… have been loaded. */
+let dataLoaded = false
+/**
+ * The library holds every library folder's items: it was loaded from library.json, or a scan has
+ * read every folder since. Until then, a folder that couldn't be read has no items at all.
+ */
+let libraryComplete = false
 
 const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, 'models') : path.join(__dirname, '..', 'models')
 
 function startServices() {
   library = new Library(path.join(userData, 'library.json'))
-  priv = new PrivateFolder(path.join(userData, 'private.json'), { roots: () => store.get('folders'), dataDir: userData })
+  priv = new PrivateFolder(path.join(userData, 'private.json'), {
+    roots: () => store.get('folders'),
+    dataDir: userData,
+    // (until the library holds every folder's items, every file marked private counts too:
+    // "nothing private" must be sure)
+    count: () => {
+      const hidden = dataLoaded ? priv.split(library.list).hidden.length : 0
+      return libraryComplete ? hidden : Math.max(hidden, priv.hashes.size)
+    },
+  })
   thumbs = new Thumbnails(path.join(userData, 'thumbnails'))
   // Background analysis (faces, search, duplicates) waits until every preview exists, so it never
   // slows down browsing.
@@ -310,6 +341,11 @@ function startServices() {
     send('library:changed', { items: listedJson() })
     send('private:changed')
     updatePlaces()
+    // (not before the library knows every folder's items: see 'scanned' below)
+    if (!libraryComplete) {
+      indexesStale = true
+      return
+    }
     const shown = visibleLibrary()
     faces.sync(shown)
     smart.sync(shown)
@@ -325,17 +361,38 @@ function startServices() {
   // The analyses follow the library after a scan. One that found nothing new (with no other change
   // since the last one) leaves them alone: re-syncing them re-forms every duplicate group, which
   // holds up this process for about a second.
-  let indexesStale = false
   library.on('changed', () => {
     indexesStale = true
     send('library:changed', { items: listedJson() })
     thumbs.warmUp(library.list)
     updatePlaces()
   })
-  library.on('status', (status) => send('scan:status', status))
+  let unreachableBefore = []
+  library.on('status', (status) => {
+    send('scan:status', status)
+    // A library folder that couldn't be read is back (a drive or share connected again): watching
+    // for new duplicates leaves out folders missing when it started, so start it again.
+    const now = Array.isArray(status?.unreachable) ? status.unreachable : []
+    const back = unreachableBefore.some((r) => !now.some((n) => folderKey(n) === folderKey(r)))
+    unreachableBefore = now
+    if (back) updateWatching()
+  })
   library.on('scanned', async () => {
+    // A library folder this scan couldn't read (drive not connected, share not there yet) kept its
+    // items as they were. With no saved library to go by (library.json missing, damaged or
+    // unreadable at start), nothing is known about its photos yet: dropping what isn't in the
+    // library now would delete their faces, names, tags and text for good. Wait for a scan that
+    // reads every folder.
+    if (!libraryComplete && library.unreachable.length) {
+      indexesStale = true
+      thumbs.prefetch(visibleLibrary())
+      return
+    }
+    if (!library.unreachable.length) libraryComplete = true
     tags.reconcile(library.list)
-    tags.prune(library.list)
+    // (ratings and tags of files in a folder that couldn't be read stay: their files weren't checked)
+    const unchecked = library.unreachable.length ? [...tags.entries.values()].filter((e) => library.isUnreachable(e.path)).map((e) => ({ path: e.path })) : []
+    tags.prune(unchecked.length ? [...library.list, ...unchecked] : library.list)
     if (!indexesStale) {
       thumbs.prefetch(visibleLibrary()) // previews that failed earlier get another try
       return
@@ -444,8 +501,7 @@ async function openFolder(dir) {
   } catch {
     return
   }
-  const inLibrary = store.get('folders').some((f) => keyOf(f) === keyOf(dir) || keyOf(dir).startsWith(keyOf(f) + path.sep))
-  if (!inLibrary) await addFolders([dir])
+  if (!inLibraryFolders(dir)) await addFolders([dir])
   launchRequest = { ...launchRequest, folder: dir }
   send('app:open-folder', dir)
 }
@@ -530,12 +586,55 @@ function applyTheme() {
   if (win && !IS_MAC) win.setTitleBarOverlay(overlay())
 }
 
+/** A path compared case-insensitively, without trailing separators ("D:\" → "d:"). */
+const folderKey = (p) => keyOf(String(p)).replace(/[\\/]+$/, '')
+/** `p` is `folder` or inside it (works for drive roots too). */
+const isWithin = (p, folder) => {
+  const k = folderKey(p)
+  const f = folderKey(folder)
+  return !!f && (k === f || k.startsWith(f + path.sep))
+}
+/** `p` is one of the library folders or inside one. */
+const inLibraryFolders = (p) => store.get('folders').some((f) => isWithin(p, f))
+/** `dir` sits inside a library folder (not one itself) and holds none: safe to leave out of scans. */
+const strictlyInsideLibrary = (dir) => {
+  const folders = store.get('folders')
+  return folders.some((f) => isWithin(dir, f) && folderKey(dir) !== folderKey(f)) && !folders.some((f) => isWithin(f, dir))
+}
+
+/** A native message box in front of Lumen's window (or on its own when there's none). */
+const messageBox = (options) =>
+  (win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options)).catch(() => null)
+
 /** Where 'Move to folder' puts removed duplicates: <first library folder>\Duplicates unless chosen. */
 function defaultMoveDestination() {
   const first = store.get('folders')[0]
   return first ? path.join(first, 'Duplicates') : path.join(app.getPath('pictures'), 'Duplicates')
 }
 const moveDestination = () => store.get('moveDestination') || defaultMoveDestination()
+
+/**
+ * Why `dest` can't take removed duplicates, or null when it can. The folder they go to is left out
+ * of scans, so a library folder, a folder holding one or a whole drive would hide the library and
+ * every name, tag and analysis with it.
+ */
+function moveDestinationProblem(dest) {
+  if (typeof dest !== 'string' || !path.isAbsolute(dest)) return 'Choose a folder for removed duplicates.'
+  const resolved = path.resolve(dest)
+  if (folderKey(path.parse(resolved).root) === folderKey(resolved)) {
+    return `“${resolved}” is a whole drive. Choose a folder inside your library (for example “${defaultMoveDestination()}”) or one outside it.`
+  }
+  const folders = store.get('folders')
+  const same = folders.find((f) => folderKey(f) === folderKey(resolved))
+  if (same) return `“${same}” is one of your library folders. Choose a folder inside it (for example “${path.join(same, 'Duplicates')}”) or one outside your library.`
+  const held = folders.find((f) => isWithin(f, resolved))
+  if (held) return `“${resolved}” holds your library folder “${held}”. Choose a folder inside your library (for example “${defaultMoveDestination()}”) or one outside it.`
+  return null
+}
+
+/** Explains (in a message box) why a folder was refused for removed duplicates. */
+const refuseMoveDestination = (problem) =>
+  messageBox({ type: 'warning', title: 'Lumen', message: "That folder can't hold removed duplicates", detail: `${problem}\n\nThe folder they go to isn't shown in Lumen, so this one would hide your photos.`, buttons: ['OK'] })
 
 /** Folders never scanned: removed duplicates, HEIC originals kept aside after converting. */
 function excludedFolders() {
@@ -545,7 +644,10 @@ function excludedFolders() {
     ...(first ? [path.join(first, 'HEIC originals')] : []),
     // exports land in Pictures (a library folder by default): they'd all show up as duplicates
     path.join(app.getPath('pictures'), 'Lumen exports'),
-  ]
+    // Only a folder inside a library folder is left out (one outside isn't scanned anyway). Leaving
+    // out a library folder itself, one holding a library folder or a whole drive ("D:\") would hide
+    // the library from scans, and the scan would then drop everything known about it.
+  ].filter(strictlyInsideLibrary)
 }
 
 function configureDupes() {
@@ -588,31 +690,78 @@ function startsWithWindows() {
 async function withScansHeld(task) {
   scanHolds++
   try {
-    for (let i = 0; library.scanning && i < 600; i++) await new Promise((r) => setTimeout(r, 100))
+    for (let i = 0; library.scanning && !quitting && i < 600; i++) await new Promise((r) => setTimeout(r, 100))
     return await tags.hold(task)
   } finally {
     if (--scanHolds === 0) {
       scanWanted = false
-      scan()
-      // new files that arrived meanwhile still get checked (Lumen's own are ignored by now)
-      for (const [file, event] of heldFileEvents.splice(0)) alerts?.queue(file, event)
+      // (not while quitting: everything moved was carried over by relocate() and saved)
+      if (!quitting) {
+        scan()
+        // new files that arrived meanwhile still get checked (Lumen's own are ignored by now)
+        for (const [file, event] of heldFileEvents.splice(0)) alerts?.queue(file, event)
+      }
     }
   }
 }
+
+// ---------- file jobs (finished and recorded before Lumen quits) ----------
+
+/**
+ * Jobs that move, rename, convert, remove or put back files (Organize, Clean up, Import, History,
+ * Private, lossless edits): each { controller, done }. Quitting stops them (controller.abort(): the
+ * engines stop before the next file and return what they did) and waits until each one has
+ * recorded that in History and carried everything over to the new paths.
+ */
+const fileJobs = new Set()
+
+/** Runs `task(signal, controller)` as a file job (it starts right away). Resolves or rejects as the task does. */
+function fileJob(task) {
+  const controller = new AbortController()
+  const job = { controller, done: null }
+  fileJobs.add(job)
+  job.done = (async () => {
+    try {
+      return await task(controller.signal, controller)
+    } finally {
+      fileJobs.delete(job)
+    }
+  })()
+  return job.done
+}
+const CLOSING = 'Lumen is closing.'
 
 function watchFolders() {
   library.watch(store.get('folders'), scan)
 }
 
+/**
+ * The saved window position still shows its title bar on a screen (a monitor unplugged or an undocked
+ * laptop would put it off-screen, where it can't be reached).
+ */
+function onScreen(b) {
+  if (!Number.isFinite(b?.x) || !Number.isFinite(b?.y)) return false
+  const width = Number(b.width) || 1360
+  try {
+    return screen.getAllDisplays().some(({ workArea: a }) => {
+      const across = Math.min(b.x + width, a.x + a.width) - Math.max(b.x, a.x)
+      const down = Math.min(b.y + TITLEBAR_HEIGHT, a.y + a.height) - Math.max(b.y, a.y)
+      return across >= 160 && down >= TITLEBAR_HEIGHT / 2
+    })
+  } catch {
+    return false
+  }
+}
+
 function createWindow() {
   const saved = store.get('window') || {}
   nativeTheme.themeSource = store.get('theme')
+  const placed = onScreen(saved) // otherwise Windows centres it on the main screen
 
   win = new BrowserWindow({
     width: saved.width || 1360,
     height: saved.height || 860,
-    x: saved.x,
-    y: saved.y,
+    ...(placed && { x: saved.x, y: saved.y }),
     minWidth: 820,
     minHeight: 560,
     show: false,
@@ -648,6 +797,13 @@ function createWindow() {
       e.preventDefault()
       win.hide()
       notify(bgx.TEXTS.stillWatchingTitle, bgx.TEXTS.stillWatchingBody)
+      return
+    }
+    // A file job is running: quitting stops it after the current file and records what it did;
+    // the window stays until then (a few seconds at most) and closes with the quit.
+    if (!quitting && fileJobs.size) {
+      e.preventDefault()
+      app.quit()
     }
   })
   win.on('closed', () => {
@@ -662,7 +818,8 @@ function createWindow() {
   win.webContents.setVisualZoomLevelLimits(1, 1)
   win.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return
-    if (input.key === 'F12' || (input.control && input.shift && input.key.toLowerCase() === 'i')) {
+    // Developer tools only in development: in the installed app they could unlock Private.
+    if (!app.isPackaged && (input.key === 'F12' || (input.control && input.shift && input.key.toLowerCase() === 'i'))) {
       win.webContents.toggleDevTools()
       event.preventDefault()
     }
@@ -678,7 +835,11 @@ function createWindow() {
 
 // ---------- IPC ----------
 
-const itemsFor = (ids) => (Array.isArray(ids) ? ids : [ids]).map((id) => library.get(id)).filter(Boolean)
+/** Library items by id. While Private is locked, private items aren't served (to open, show, copy, drag, export…). */
+const itemsFor = (ids) => {
+  const items = (Array.isArray(ids) ? ids : [ids]).map((id) => library.get(id)).filter(Boolean)
+  return priv && !priv.unlocked ? items.filter((it) => !priv.isPrivate(it.path)) : items
+}
 
 function setFavorites(ids, value) {
   const current = new Map(store.get('favorites').map((p) => [keyOf(p), p]))
@@ -788,9 +949,10 @@ ipcMain.handle('app:gpu', async () => {
   return gpuInfo
 })
 
+// (quit, not exit: running file jobs finish and everything is saved first; the new copy starts after)
 ipcMain.handle('app:relaunch', () => {
   app.relaunch()
-  app.exit(0)
+  app.quit()
 })
 
 // ---------- people ----------
@@ -874,12 +1036,17 @@ ipcMain.handle('edit:save', async (_e, id, recipe) => {
   try {
     const file = await editor.save(item, recipe)
     ownFiles([file])
+    keepPrivate(item, file)
     scan() // pick the new copy up right away (the folder watcher would too, a moment later)
     return { id: idOf(file), name: path.basename(file) }
   } catch (err) {
     return { error: String(err?.message || err) }
   }
 })
+/** A copy made from a private photo or video (edit, frame) is private too, before the library sees it. */
+function keepPrivate(item, file) {
+  if (file && priv.isPrivate(item.path)) priv.add([file])
+}
 ipcMain.handle('edit:close', () => editor.release())
 ipcMain.handle('edit:erase', async (_e, id, recipe, strokes) => {
   const [item] = itemsFor(id)
@@ -898,6 +1065,8 @@ let videoJob = null
 let movieJob = null
 /** Movies made in this session: the only files movie:open / movie:reveal will touch. */
 const movieFiles = new Set()
+/** Music chosen with movie:pick-music in this session: the only audio files handed to ffmpeg. */
+const musicFiles = new Set()
 const failure = (err) => (err?.canceled ? { canceled: true } : { error: String(err?.message || err) })
 
 ipcMain.handle('video:info', async (_e, id) => {
@@ -917,6 +1086,7 @@ ipcMain.handle('video:save', async (_e, id, recipe) => {
   try {
     const r = await videoEdit.saveEdit(it, recipe, { signal: job.signal, onProgress: (f) => send('video:progress', f) })
     ownFiles([r.file])
+    keepPrivate(it, r.file)
     scan()
     return { id: idOf(r.file), name: path.basename(r.file), mode: r.mode }
   } catch (err) {
@@ -933,6 +1103,7 @@ ipcMain.handle('video:frame', async (_e, id, seconds) => {
   try {
     const r = await videoEdit.saveFrame(it, Number(seconds) || 0)
     ownFiles([r.file])
+    keepPrivate(it, r.file)
     scan()
     return { id: idOf(r.file), name: path.basename(r.file) }
   } catch (err) {
@@ -949,11 +1120,14 @@ ipcMain.handle('movie:pick-music', async () => {
       { name: 'All files', extensions: ['*'] },
     ],
   })
-  return r.canceled ? null : (r.filePaths[0] ?? null)
+  const file = r.canceled ? null : (r.filePaths[0] ?? null)
+  if (file) musicFiles.add(file)
+  return file
 })
 ipcMain.handle('movie:make', async (_e, req) => {
   const items = itemsFor(idList(req?.ids))
   if (!items.length) return { error: 'Choose some photos or videos for the movie' }
+  if (req.music && !musicFiles.has(req.music)) return { error: 'Choose the music again.' }
   const name = String(req.title || 'Movie').replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim() || 'Movie'
   const s = await dialog.showSaveDialog(win, {
     title: 'Save the movie',
@@ -1029,9 +1203,11 @@ async function refreshEdited(paths) {
 /**
  * Files Lumen moved or renamed inside the library: an item's id is a hash of its path, so carry
  * everything known about it (library entry, preview, fingerprint, faces, search vector, favorite,
- * albums) over to the new path instead of analysing it again. `pairs`: [{ from, to }].
+ * albums, History) over to the new path instead of analysing it again. `pairs`: [{ from, to, sidecar? }].
+ * `history: false` for pairs that aren't moves (a HEIC handing over to the JPG made from it): History
+ * entries keep pointing at the files themselves.
  */
-async function relocate(pairs) {
+async function relocate(pairs, { history: followInHistory = true } = {}) {
   const ids = new Map()
   const paths = new Map()
   const items = new Map(library.items)
@@ -1058,7 +1234,8 @@ async function relocate(pairs) {
         } catch {}
       }
     }
-    for (const map of [dupes.records, smart.vectors, videoFrames.records, ocr.records]) {
+    // (duplicate fingerprints and dismissed groups: dupes.remapIds below)
+    for (const map of [smart.vectors, videoFrames.records, ocr.records]) {
       if (map.has(oldId)) {
         map.set(newId, map.get(oldId))
         map.delete(oldId)
@@ -1076,10 +1253,13 @@ async function relocate(pairs) {
   library.emit('changed')
   library.save()
   faces.remapIds(ids)
+  dupes.remapIds(ids)
   albums.remapPaths(paths)
   priv.remap(pairs)
   tags.remapPaths(paths)
   userLocations.remap(pairs)
+  // older History entries follow the files, so undoing them acts where the files are now
+  if (followInHistory) history.remapPaths(pairs)
   dupes.saveSoon(2000)
   smart.saveSoon(2000)
   videoFrames.saveSoon(2000)
@@ -1168,9 +1348,10 @@ const convertedPairs = (entry) => {
 let organizing = false
 ipcMain.handle('organize:run', async (_e, action, skip) => {
   if (organizing) return { done: 0, errors: ['Another change is still running.'] }
+  if (quitting) return { done: 0, errors: [CLOSING] }
   organizing = true
   try {
-    return await withScansHeld(() => runOrganize(action, new Set(idList(skip))))
+    return await fileJob((signal) => withScansHeld(() => runOrganize(action, new Set(idList(skip)), signal)))
   } catch (err) {
     return { done: 0, errors: [String(err?.message ?? err)] }
   } finally {
@@ -1179,9 +1360,10 @@ ipcMain.handle('organize:run', async (_e, action, skip) => {
   }
 })
 
-async function runOrganize(action, skipped) {
+async function runOrganize(action, skipped, signal) {
   const o = organizeOptions()
   const kept = visibleLibrary().filter((it) => !skipped.has(it.id))
+  if (signal?.aborted) return { done: 0, errors: [CLOSING] }
   if (action === 'dates') {
     const files = await organize.applyDateFixes(organize.findDateFixes(visibleLibrary()))
     if (files.length) {
@@ -1193,7 +1375,17 @@ async function runOrganize(action, skipped) {
   if (action === 'folders') {
     if (!o.root) return { done: 0, errors: ['Choose where the dated folders go first.'] }
     const plan = organize.planFolders(organize.organizeSource(kept, o.root, o.roots), o.root, o.folderPattern)
-    const res = await organize.executePlan(plan, { copy: o.copy })
+    // Moving into a folder outside the library: it becomes a library folder first (as Import's
+    // destination does), so the scan after the move finds the photos there instead of dropping them
+    // with their faces, names, tags and text.
+    if (!o.copy && plan.length && !inLibraryFolders(o.root)) {
+      try {
+        await fs.promises.mkdir(o.root, { recursive: true })
+      } catch {}
+      await addFolders([o.root])
+      if (!inLibraryFolders(o.root)) return { done: 0, errors: [`Couldn't add ${o.root} to your library folders, so nothing was moved.`] }
+    }
+    const res = await organize.executePlan(plan, { copy: o.copy, signal })
     ownFiles(res.files.map((f) => f.to))
     if (res.files.length) {
       history.add({ kind: o.copy ? 'copied' : 'moved', destination: o.root, files: res.files.map(({ id, ...f }) => f) })
@@ -1203,7 +1395,7 @@ async function runOrganize(action, skipped) {
   }
   if (action === 'rename') {
     const plan = organize.planRenames(kept, o.renamePattern, o.deviceNamesOnly)
-    const res = await organize.executePlan(plan)
+    const res = await organize.executePlan(plan, { signal })
     ownFiles(res.files.map((f) => f.to))
     if (res.files.length) {
       history.add({ kind: 'renamed', files: res.files.map(({ id, ...f }) => f) })
@@ -1216,12 +1408,13 @@ async function runOrganize(action, skipped) {
       quality: o.quality,
       originalsDir: o.moveOriginals ? originalsDir() : null,
       roots: o.roots,
+      signal,
       onProgress: (done, total) => send('organize:progress', { done, total }),
     })
     ownFiles(res.files.map((f) => f.to))
     if (res.entry) {
       history.add(res.entry)
-      await relocate(convertedPairs(res.entry))
+      await relocate(convertedPairs(res.entry), { history: false })
     }
     return { done: res.files.length, errors: res.errors }
   }
@@ -1230,27 +1423,31 @@ async function runOrganize(action, skipped) {
 
 /** Turns JPEGs by quarter turns (orientation tag only). Resolves { done, errors }. */
 ipcMain.handle('edit:rotate', async (_e, ids, turns) => {
-  const items = itemsFor(idList(ids)).filter((it) => isJpeg(it.ext))
-  const q = Math.round(Number(turns)) || 0
-  const files = []
-  const errors = []
-  await tags.hold(async () => {
-    for (const it of items) {
-      const res = await edits.rotate(it, q, backupsDir())
-      if (res.error) errors.push(`${it.name}: ${res.error}`)
-      else files.push(res.file)
-    }
-  })
-  if (files.length) {
-    const how = ((q % 4) + 4) % 4 === 1 ? '90° right' : ((q % 4) + 4) % 4 === 3 ? '90° left' : '180°'
-    history.add({
-      kind: 'edited',
-      note: files.length === 1 ? `Turned ${path.basename(files[0].from)} ${how}` : `Turned ${files.length} photos ${how}`,
-      files,
+  if (quitting) return { done: 0, errors: [CLOSING] }
+  return fileJob(async (signal) => {
+    const items = itemsFor(idList(ids)).filter((it) => isJpeg(it.ext))
+    const q = Math.round(Number(turns)) || 0
+    const files = []
+    const errors = []
+    await tags.hold(async () => {
+      for (const it of items) {
+        if (signal.aborted) break
+        const res = await edits.rotate(it, q, backupsDir())
+        if (res.error) errors.push(`${it.name}: ${res.error}`)
+        else files.push(res.file)
+      }
     })
-    await refreshEdited(files.map((f) => f.from))
-  }
-  return { done: files.length, errors }
+    if (files.length) {
+      const how = ((q % 4) + 4) % 4 === 1 ? '90° right' : ((q % 4) + 4) % 4 === 3 ? '90° left' : '180°'
+      history.add({
+        kind: 'edited',
+        note: files.length === 1 ? `Turned ${path.basename(files[0].from)} ${how}` : `Turned ${files.length} photos ${how}`,
+        files,
+      })
+      await refreshEdited(files.map((f) => f.from))
+    }
+    return { done: files.length, errors }
+  })
 })
 
 /** Writes the date taken into a JPEG (EXIF, lossless) and sets its file date to match. */
@@ -1259,11 +1456,14 @@ ipcMain.handle('edit:date', async (_e, id, ms) => {
   if (!it || !isJpeg(it.ext)) return { error: 'Only JPEG photos can be changed without re-saving them.' }
   const date = Number(ms)
   if (!Number.isFinite(date) || new Date(date).getFullYear() < 1900 || date > Date.now() + 86_400_000) return { error: 'That date looks wrong.' }
-  const res = await tags.hold(() => edits.setDateTaken(it, date, backupsDir()))
-  if (res.error) return { error: res.error }
-  history.add({ kind: 'edited', note: `Date taken of ${it.name} set to ${new Date(date).toLocaleString()}`, files: [res.file] })
-  await refreshEdited([it.path])
-  return { ok: true }
+  if (quitting) return { error: CLOSING }
+  return fileJob(async () => {
+    const res = await tags.hold(() => edits.setDateTaken(it, date, backupsDir()))
+    if (res.error) return { error: res.error }
+    history.add({ kind: 'edited', note: `Date taken of ${it.name} set to ${new Date(date).toLocaleString()}`, files: [res.file] })
+    await refreshEdited([it.path])
+    return { ok: true }
+  })
 })
 
 // ---------- duplicates & search ----------
@@ -1273,6 +1473,7 @@ ipcMain.handle('dupes:dismiss', (_e, ids) => dupes.dismiss(idList(ids)))
 
 ipcMain.handle('private:add', (_e, ids) => priv.add(itemsFor(idList(ids)).map((it) => it.path)))
 ipcMain.handle('private:remove', async (_e, ids) => {
+  if (!priv.unlocked) return 0 // only someone who unlocked Private can make items public again
   const items = itemsFor(idList(ids))
   const res = await movePrivate(priv.vaultItems(items), 'out')
   const movedTo = new Map(res.files.map((f) => [keyOf(f.from), f.to]))
@@ -1284,7 +1485,9 @@ ipcMain.handle('private:hide', async (_e, ids) => {
   return { done: res.files.length, errors: res.errors, folder: res.folders?.[0] ?? null }
 })
 ipcMain.handle('private:reset', async () => {
-  if (priv.helloState === 'available') return false // with Windows Hello there's always a way in
+  // With Windows Hello there's always a way in. Asked again now: a glitch in an earlier check
+  // must not open the way to wiping (and so showing) everything private.
+  if (quitting || (await priv.checkHello()) === 'available') return false
   await movePrivate(priv.vaultItems(library.list), 'out')
   priv.reset()
   return true
@@ -1293,7 +1496,8 @@ ipcMain.handle('private:reset', async () => {
 /** Moves items into ('in') or out of the hidden private folder, recorded in History. */
 async function movePrivate(items, way) {
   if (!items.length) return { files: [], errors: [] }
-  return withScansHeld(async () => {
+  if (quitting) return { files: [], errors: [CLOSING] }
+  return fileJob(() => withScansHeld(async () => {
     const res = way === 'in' ? await priv.moveIntoVault(items) : await priv.moveOutOfVault(items)
     ownFiles(res.files.map((f) => f.to))
     if (res.files.length) {
@@ -1307,7 +1511,7 @@ async function movePrivate(items, way) {
       await relocate(res.files)
     }
     return res
-  })
+  }))
 }
 
 // ---------- export & share ----------
@@ -1359,21 +1563,31 @@ ipcMain.handle('import:pick-folder', async () => {
   importSources.set(source.id, source)
   return source
 })
+/**
+ * A second scan or import while one runs is refused before it touches `importAbort`, so Cancel
+ * still stops the one that's running.
+ */
+function refuseIfImporting() {
+  if (importAbort || importer.busy) throw new Error(`Lumen is still ${importer.busy || 'busy with an import'}.`)
+  if (quitting) throw new Error(CLOSING)
+}
+
 ipcMain.handle('import:scan', async (_e, sourceId) => {
   const source = importSources.get(sourceId)
   if (!source) throw new Error('That device or folder is no longer available.')
-  importAbort = new AbortController()
+  refuseIfImporting()
+  const controller = (importAbort = new AbortController())
   try {
     return await importer.scan(source, {
       items: library.list,
       hashOf: importHashOf,
       skipExtensions: skippedExtensions(store.get('skippedTypes')),
       minBytes: store.get('minFileKB') * 1024,
-      signal: importAbort.signal,
+      signal: controller.signal,
       onProgress: (p) => send('import:scan-progress', p),
     })
   } finally {
-    importAbort = null
+    if (importAbort === controller) importAbort = null
     send('import:scan-progress', null)
   }
 })
@@ -1392,34 +1606,36 @@ ipcMain.handle('import:pick-destination', async () => {
   return res.filePaths[0]
 })
 ipcMain.handle('import:run', async (_e, scanId, deleteAfter) => {
-  importAbort = new AbortController()
-  const signal = importAbort.signal
-  try {
-    const res = await withScansHeld(() =>
-      importer.run(scanId, {
-        ...importOptions(deleteAfter),
-        items: library.list,
-        hashOf: importHashOf,
-        quality: store.get('jpegQuality'),
-        originalsDir: originalsDir(),
-        heicSource: (it) => thumbs.source(it),
-        trash: (p) => shell.trashItem(p),
-        signal,
-        onProgress: (p) => send('import:progress', p),
-        // new files from an import aren't "new duplicates" (held folder events replay after it)
-        onFile: (p) => alerts?.ignore([p], 10 * 60_000),
-      }),
-    )
-    const entry = res.entry ? history.add(res.entry) : null
-    const dest = res.destination
-    const inLibrary = store.get('folders').some((f) => keyOf(dest) === keyOf(f) || keyOf(dest).startsWith(keyOf(f) + path.sep))
-    if (res.imported && dest && !inLibrary) await addFolders([dest])
-    const { files, entry: _entry, ...rest } = res
-    return { ...rest, entryId: entry?.id ?? null }
-  } finally {
-    importAbort = null
-    send('import:progress', null)
-  }
+  refuseIfImporting()
+  return fileJob(async (signal, controller) => {
+    importAbort = controller // (Cancel and quitting both stop it)
+    try {
+      const res = await withScansHeld(async () => {
+        const r = await importer.run(scanId, {
+          ...importOptions(deleteAfter),
+          items: library.list,
+          hashOf: importHashOf,
+          quality: store.get('jpegQuality'),
+          originalsDir: originalsDir(),
+          heicSource: (it) => thumbs.source(it),
+          trash: (p) => shell.trashItem(p),
+          signal,
+          onProgress: (p) => send('import:progress', p),
+          // new files from an import aren't "new duplicates" (held folder events replay after it)
+          onFile: (p) => alerts?.ignore([p], 10 * 60_000),
+        })
+        // a destination outside the library becomes a library folder before the scan that follows
+        if (r.imported && r.destination && !inLibraryFolders(r.destination)) await addFolders([r.destination])
+        return r
+      })
+      const entry = res.entry ? history.add(res.entry) : null
+      const { files, entry: _entry, ...rest } = res
+      return { ...rest, entryId: entry?.id ?? null }
+    } finally {
+      if (importAbort === controller) importAbort = null
+      send('import:progress', null)
+    }
+  })
 })
 
 // ---------- ratings & tags ----------
@@ -1439,11 +1655,17 @@ ipcMain.handle('locations:search', (_e, q) => (typeof q === 'string' ? locSugges
 ipcMain.handle('locations:describe', (_e, lat, lon) => locSuggest.describe(places, Number(lat), Number(lon)))
 ipcMain.handle('locations:set', async (_e, assignments, label) => {
   const targets = (Array.isArray(assignments) ? assignments : [])
-    .map((a) => ({ item: library.get(a?.id), lat: Number(a?.lat), lon: Number(a?.lon) }))
+    .map((a) => ({ item: itemsFor(a?.id)[0], lat: Number(a?.lat), lon: Number(a?.lon) }))
     .filter((t) => t.item)
   if (!targets.length) return { done: 0, kept: [], errors: [] }
+  if (quitting) return { done: 0, kept: [], errors: [CLOSING] }
+  return fileJob(() => setLocations(targets, label))
+})
+
+async function setLocations(targets, label) {
   ownFiles(targets.map((t) => t.item.path))
-  const res = await assignLocations(targets, { store: userLocations, backupsDir: backupsDir() })
+  // (held: the background rating/tag writer rewrites JPEGs too, and one of the two changes would be lost)
+  const res = await tags.hold(() => assignLocations(targets, { store: userLocations, backupsDir: backupsDir() }))
   if (res.files.length) history.add({ kind: 'edited', note: historyNote(targets, typeof label === 'string' ? label.slice(0, 120) : ''), files: res.files })
   // Only the place changed, not the picture: keep previews, faces and search vectors; just update the entry
   // (with the new size, so the next scan doesn't read it again).
@@ -1456,7 +1678,7 @@ ipcMain.handle('locations:set', async (_e, assignments, label) => {
     library.save()
   }
   return { done: res.written.length + res.stored.length, kept: res.kept, errors: res.errors }
-})
+}
 
 ipcMain.handle('ocr:search', (_e, q) => (typeof q === 'string' ? ocr.search(q.slice(0, 200)) : { ids: [], snippets: [], scores: [] }))
 ipcMain.handle('ocr:hits', (_e, tokens) =>
@@ -1502,7 +1724,13 @@ ipcMain.handle('settings:set', (_e, patch) => {
   if (typeof patch.findCrops === 'boolean') allowed.findCrops = patch.findCrops
   if (['best', 'sharpest', 'largest', 'oldest', 'newest'].includes(patch.keepRule)) allowed.keepRule = patch.keepRule
   if (Array.isArray(patch.protectedFolders)) allowed.protectedFolders = patch.protectedFolders.filter((p) => typeof p === 'string' && fs.existsSync(p))
-  if (patch.moveDestination === null || (typeof patch.moveDestination === 'string' && path.isAbsolute(patch.moveDestination))) allowed.moveDestination = patch.moveDestination
+  if (patch.moveDestination === null) allowed.moveDestination = null
+  else if (typeof patch.moveDestination === 'string' && path.isAbsolute(patch.moveDestination)) {
+    // (the old folder stays when this one would hide the library)
+    const problem = moveDestinationProblem(patch.moveDestination)
+    if (problem) refuseMoveDestination(problem)
+    else allowed.moveDestination = patch.moveDestination
+  }
   if (typeof patch.carryDates === 'boolean') allowed.carryDates = patch.carryDates
   if (Number.isFinite(patch.blurThreshold)) allowed.blurThreshold = Math.min(80, Math.max(5, Math.round(patch.blurThreshold)))
   if (Number.isFinite(patch.largeFileMB)) allowed.largeFileMB = Math.min(500, Math.max(5, Math.round(patch.largeFileMB)))
@@ -1574,6 +1802,11 @@ function forgetItems(ids) {
   faces.removeItems(ids)
   albums.forget(ids)
   tags.forget(ids)
+  // (until the library knows every folder's items, the next full scan does this: see 'scanned')
+  if (!libraryComplete) {
+    indexesStale = true
+    return
+  }
   smart.sync(visibleLibrary())
   ocr.sync(visibleLibrary())
   dupes.sync(visibleLibrary())
@@ -1586,23 +1819,86 @@ function forgetItems(ids) {
 async function removeItems(ids, how, dest) {
   const items = itemsFor(idList(ids))
   if (!items.length) return { removed: 0, failed: 0, errors: [] }
-  const removing = new Set(items.map((it) => it.id))
-  const byId = new Map(library.list.map((it) => [it.id, it]))
-  const dateChanges = store.get('carryDates') !== false ? await cleanup.carryDates(dupes.groupsOf([...removing]), removing, byId) : []
-  if (dateChanges.length) await retime(await newTimes(dateChanges.map((c) => c.path)))
   const destination = how === 'move' ? dest || moveDestination() : undefined
-  const res = await tags.hold(() => (how === 'move' ? cleanup.moveTo(items, destination) : cleanup.recycle(items)))
-  let entry = null
-  if (res.files.length || dateChanges.length) {
-    entry = history.add({
-      kind: how === 'move' ? 'moved' : 'recycled',
-      destination,
-      files: res.files.map(({ id, ...f }) => f),
-      dateChanges,
-    })
+  const refuse = (message) => ({ removed: 0, failed: items.length, errors: [message], entryId: null, destination })
+  if (quitting) return refuse(CLOSING)
+  // (a folder that would hide the library from scans, even one saved before this was checked)
+  const problem = how === 'move' ? moveDestinationProblem(destination) : null
+  if (problem) {
+    refuseMoveDestination(problem)
+    return refuse(problem)
   }
-  forgetItems(res.files.map((f) => f.id))
-  return { removed: res.files.length, failed: res.errors.length, errors: res.errors, entryId: entry?.id ?? null, destination }
+  return fileJob(async (signal) => {
+    const removing = new Set(items.map((it) => it.id))
+    const byId = new Map(library.list.map((it) => [it.id, it]))
+    const dateChanges = store.get('carryDates') !== false ? await cleanup.carryDates(dupes.groupsOf([...removing]), removing, byId) : []
+    if (dateChanges.length) await retime(await newTimes(dateChanges.map((c) => c.path)))
+    let kept = null
+    const res = await tags.hold(async () => {
+      // what forgetItems() drops, so undoing the move can put it back (taken before the move: a scan
+      // finishing meanwhile could drop the moved files' Lumen-only ratings and tags)
+      if (how === 'move') kept = rememberForUndo(items)
+      return how === 'move' ? cleanup.moveTo(items, destination, { signal }) : cleanup.recycle(items, { signal })
+    })
+    let entry = null
+    if (res.files.length || dateChanges.length) {
+      const moved = kept ? keptFor(kept, res.files.map((f) => f.from)) : null
+      entry = history.add({
+        kind: how === 'move' ? 'moved' : 'recycled',
+        destination,
+        files: res.files.map(({ id, ...f }) => f),
+        dateChanges,
+        ...(moved && { forgotten: moved }),
+      })
+    }
+    forgetItems(res.files.map((f) => f.id))
+    // (`notes`: files that moved but whose XMP sidecar stayed behind; not failures)
+    return { removed: res.files.length, failed: res.errors.length, errors: res.errors, notes: res.notes ?? [], entryId: entry?.id ?? null, destination }
+  })
+}
+
+/**
+ * Favorites, album memberships and Lumen-only ratings/tags of items about to leave the library
+ * (forgetItems drops them): { favorites: [path], albums: [{ id, paths, cover? }], tags: [[path, entries]] }.
+ */
+function rememberForUndo(items) {
+  const paths = items.map((it) => it.path)
+  const want = new Set(paths.map(keyOf))
+  return {
+    favorites: store.get('favorites').filter((p) => want.has(keyOf(p))),
+    albums: albums.membershipsOf(paths),
+    // one path at a time, so each file's entries can be told apart later
+    tags: paths.map((p) => [p, tags.snapshot([p])]).filter(([, e]) => Array.isArray(e) && e.length),
+  }
+}
+
+/** Only what belongs to `paths` (the files that really moved); null when there's nothing. */
+function keptFor(kept, paths) {
+  const want = new Set(paths.map(keyOf))
+  const out = {
+    favorites: kept.favorites.filter((p) => want.has(keyOf(p))),
+    albums: kept.albums.map((m) => ({ ...m, paths: m.paths.filter((p) => want.has(keyOf(p))) })).filter((m) => m.paths.length || (m.cover && want.has(keyOf(m.cover)))),
+    tags: kept.tags.filter(([p]) => want.has(keyOf(p))),
+  }
+  return out.favorites.length || out.albums.length || out.tags.length ? out : null
+}
+
+/** Undo of a Clean up move: the files of `paths` that are back get their favorite, albums, ratings and tags back. */
+function restoreForgotten(forgotten, paths) {
+  if (!forgotten || !paths.length) return
+  const back = new Set(paths.map(keyOf))
+  const favs = (Array.isArray(forgotten.favorites) ? forgotten.favorites : []).filter((p) => typeof p === 'string' && back.has(keyOf(p)))
+  if (favs.length) {
+    const current = new Map(store.get('favorites').map((p) => [keyOf(p), p]))
+    for (const p of favs) current.set(keyOf(p), p)
+    store.set({ favorites: [...current.values()] })
+    send('settings:changed', settingsPayload())
+  }
+  albums.restoreMemberships(forgotten.albums, paths)
+  const entries = (Array.isArray(forgotten.tags) ? forgotten.tags : [])
+    .filter((t) => Array.isArray(t) && typeof t[0] === 'string' && back.has(keyOf(t[0])) && Array.isArray(t[1]))
+    .flatMap(([, e]) => e)
+  if (entries.length) tags.restoreEntries(entries)
 }
 
 ipcMain.handle('items:trash', (_e, ids) => removeItems(ids, 'recycle'))
@@ -1614,6 +1910,11 @@ ipcMain.handle('cleanup:pick-destination', async () => {
     properties: ['openDirectory', 'createDirectory'],
   })
   if (res.canceled || !res.filePaths[0]) return null
+  const problem = moveDestinationProblem(res.filePaths[0])
+  if (problem) {
+    await refuseMoveDestination(problem) // (the folder chosen before stays)
+    return null
+  }
   store.set({ moveDestination: res.filePaths[0] })
   send('settings:changed', settingsPayload())
   scan()
@@ -1634,20 +1935,39 @@ ipcMain.handle('history:clear', async () => {
 ipcMain.handle('history:restore', async (_e, id) => {
   const entry = typeof id === 'string' ? history.get(id) : null
   if (!entry) return { restored: 0 }
+  if (quitting) return { restored: 0, total: entry.files.length }
+  return fileJob(() => restoreEntry(entry))
+})
+
+async function restoreEntry(entry) {
   let restored = 0
+  let kept
+  let renamed
   if (entry.kind === 'edited') {
-    const done = await edits.restoreBackups(entry.files)
+    // (held: the background rating/tag writer must not rewrite a photo while its original goes back)
+    const done = await tags.hold(() => edits.restoreBackups(entry.files))
     restored = done.length + userLocations.revert(entry.files)
-    if (done.length) await refreshEdited(done.map((f) => f.from))
+    // A different photo has the edited one's place now: the original came back next to it under a
+    // new name ("IMG_1 (2).jpg", `restoredAs`) and that other photo was left as it was.
+    const inPlace = done.filter((f) => !f.restoredAs)
+    const beside = done.filter((f) => f.restoredAs)
+    renamed = beside.length
+    // the original doesn't hold the rating and tags set since (never written into the other photo)
+    if (inPlace.length) tags.rewrite(inPlace.map((f) => f.from))
+    if (done.length) await refreshEdited([...inPlace.map((f) => f.from), ...beside.map((f) => f.restoredAs)])
   } else if (entry.kind === 'imported') {
     restored = await importer.undo(entry, (p) => shell.trashItem(p))
+    kept = entry.keptOnUndo ?? 0
   } else if (['moved', 'renamed', 'converted', 'dates'].includes(entry.kind)) {
     await withScansHeld(async () => {
       if (entry.kind === 'moved' || entry.kind === 'renamed') {
         const pending = entry.files.filter((f) => !f.restored)
         ownFiles(pending.map((f) => f.from))
         restored = await cleanup.restoreMoves(entry.files)
-        await relocate(pending.filter((f) => f.restored).map((f) => ({ from: f.to, to: f.from })))
+        const back = pending.filter((f) => f.restored)
+        await relocate(back.map((f) => ({ from: f.to, to: f.from, ...(f.sidecar && { sidecar: { from: f.sidecar.to, to: f.sidecar.from } }) })))
+        // a Clean up move: favorites, albums, ratings and tags dropped when the files left come back
+        if (entry.forgotten) restoreForgotten(entry.forgotten, back.map((f) => f.from))
         const dated = (entry.dateChanges ?? []).filter((c) => !c.restored)
         if (await cleanup.restoreDates(entry.dateChanges)) await retime(await newTimes(dated.filter((c) => c.restored).map((c) => c.path)))
       } else if (entry.kind === 'converted') {
@@ -1655,7 +1975,10 @@ ipcMain.handle('history:restore', async (_e, id) => {
         ownFiles((entry.movedOriginals ?? []).map((m) => m.from))
         restored = await organize.undoConversion(entry, (p) => shell.trashItem(p))
         const back = convertedPairs({ ...entry, files: pending.filter((f) => f.restored) })
-        await relocate(back.map((p) => ({ from: p.to, to: p.from })))
+        await relocate(
+          back.map((p) => ({ from: p.to, to: p.from })),
+          { history: false },
+        )
       } else {
         const done = []
         for (const f of entry.files) {
@@ -1672,9 +1995,11 @@ ipcMain.handle('history:restore', async (_e, id) => {
     })
   }
   history.changed(entry)
-  if (restored) scan()
-  return { restored, total: entry.files.length }
-})
+  if (restored && !quitting) scan()
+  // (an import's undo keeps the copies whose originals left the card, and any that changed since)
+  // (`renamed`: originals of edits that came back under a new name, next to the photo now at their place)
+  return { restored, total: entry.files.length, ...(kept !== undefined && { kept }), ...(renamed && { renamed }) }
+}
 ipcMain.handle('shell:recycle-bin', () => {
   if (process.platform === 'win32') require('node:child_process').spawn('explorer.exe', ['shell:RecycleBinFolder'], { detached: true, stdio: 'ignore' }).unref()
 })
@@ -1708,21 +2033,49 @@ ipcMain.handle('items:open', (_e, id) => {
   if (item) return shell.openPath(item.path)
 })
 
+// (only a folder is opened; for a file, Explorer shows it: opening one would run an .exe, .bat or .lnk)
 ipcMain.handle('folders:reveal', (_e, dir) => {
-  if (typeof dir === 'string' && fs.existsSync(dir)) shell.openPath(dir)
+  if (typeof dir !== 'string' || !path.isAbsolute(dir)) return
+  let st = null
+  try {
+    st = fs.statSync(dir)
+  } catch {
+    return
+  }
+  if (st.isDirectory()) shell.openPath(dir)
+  else shell.showItemInFolder(dir)
 })
 
-ipcMain.handle('items:copy', (_e, id, kind) => {
+/**
+ * Puts a photo on the clipboard. Windows' own image reader (nativeImage) only knows PNG and JPEG,
+ * so the picture is decoded the way the editor does (HEIC, WebP, RAW… through thumbs.source), turned
+ * upright and handed over as PNG. Resolves false (the clipboard is left as it was) when that fails.
+ */
+async function copyImage(item) {
+  if (item?.type !== 'image') return false
+  try {
+    const sharp = require('sharp')
+    let source = await thumbs.source(item).catch(() => null)
+    if (!source) source = await thumbs.get(item, 'preview').catch(() => null)
+    if (!source) return false
+    const png = await sharp(source, { failOn: 'none' }).rotate().png({ compressionLevel: 1 }).toBuffer()
+    const image = nativeImage.createFromBuffer(png)
+    if (image.isEmpty()) return false
+    clipboard.writeImage(image)
+    return true
+  } catch {
+    return false
+  }
+}
+
+ipcMain.handle('items:copy', async (_e, id, kind) => {
   const [item] = itemsFor(id)
   if (!item) return false
   if (kind === 'path') {
     clipboard.writeText(item.path)
     return true
   }
-  const image = nativeImage.createFromPath(item.path)
-  if (image.isEmpty()) return false
-  clipboard.writeImage(image)
-  return true
+  return copyImage(item)
 })
 
 ipcMain.handle('items:menu', (event, id, ids) => {
@@ -1757,7 +2110,15 @@ ipcMain.handle('items:menu', (event, id, ids) => {
       ? []
       : [
           ...(item.type === 'image'
-            ? [{ label: 'Copy image', click: () => clipboard.writeImage(nativeImage.createFromPath(item.path)) }]
+            ? [
+                {
+                  label: 'Copy image',
+                  click: () =>
+                    copyImage(item).then((ok) => {
+                      if (!ok) messageBox({ type: 'warning', title: 'Lumen', message: "Couldn't copy this image", detail: `${item.name} couldn't be read as a picture. The clipboard wasn't changed.`, buttons: ['OK'] })
+                    }),
+                },
+              ]
             : []),
           { label: 'Copy path', click: () => clipboard.writeText(item.path) },
         ]),
@@ -1772,6 +2133,8 @@ ipcMain.on('items:drag', (event, ids) => {
   if (!items.length) return
   const cached = thumbs.cachedPath(items[0])
   let icon = cached ? nativeImage.createFromPath(cached) : nativeImage.createFromPath(ICON)
+  // (a WebP thumbnail reads as empty here: Windows needs an icon to show, so Lumen's own goes instead)
+  if (icon.isEmpty()) icon = nativeImage.createFromPath(ICON)
   if (!icon.isEmpty()) icon = icon.resize({ width: 96 })
   event.sender.startDrag({ file: items[0].path, files: items.map((it) => it.path), icon })
 })
@@ -1813,6 +2176,16 @@ app.on('second-instance', (_event, argv, cwd, data) => {
   }
   const args = bgx.parseArgs(argv, { cwd })
   if (args.tray && !args.folder) return // started with Windows again: already running
+  if (quitting) {
+    // Lumen was opened again while this copy finishes quitting (a file job, the last saves): it
+    // can't take this launch any more, so a new copy starts the moment this one has exited.
+    if (!relaunchAsked) {
+      relaunchAsked = true
+      const keep = process.argv.slice(1).filter((a) => a !== '--tray' && a !== '--autoscan')
+      app.relaunch({ args: [...keep, ...(args.folder ? ['--folder', args.folder] : []), ...(args.autoscan ? ['--autoscan'] : [])] })
+    }
+    return
+  }
   // No window (e.g. still starting, or hidden in the notification area): open one.
   showWindow()
   if (args.folder) servicesReady.then(() => openFolder(args.folder))
@@ -1824,11 +2197,16 @@ app.on('second-instance', (_event, argv, cwd, data) => {
   }
 })
 
+/** instance.json: which Lumen runs (for a newer one launching), plus `extra` (e.g. finishingUntil). */
+function writeInstanceFile(extra = {}) {
+  try {
+    fs.writeFileSync(INSTANCE_FILE, JSON.stringify({ version: VERSION, pid: process.pid, ...extra }))
+  } catch {}
+}
+
 app.whenReady().then(async () => {
   if (!(await singleInstance)) return
-  try {
-    fs.writeFileSync(INSTANCE_FILE, JSON.stringify({ version: VERSION, pid: process.pid }))
-  } catch {}
+  writeInstanceFile()
   if (process.platform === 'win32') app.setAppUserModelId('app.lumen.gallery')
   session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ['https://tile.openstreetmap.org/*'] }, (details, done) => {
     done({ requestHeaders: { ...details.requestHeaders, 'User-Agent': `Lumen/${VERSION} (Windows photo gallery)` } })
@@ -1857,19 +2235,58 @@ app.whenReady().then(async () => {
     },
     () => {},
   )
+  // A photo rewrite (rating, tags, rotation, date, location) cut short last time, by a crash or a
+  // forced exit, can leave the photo only as "name.jpg.lumen.old": put it back before anything
+  // reads the library folders.
+  try {
+    setSwapJournal(path.join(userData, 'pending-swaps.json'))
+    const swaps = await recoverSwaps()
+    const keptCopies = Array.isArray(swaps?.kept) ? swaps.kept.filter((p) => typeof p === 'string') : []
+    if (swaps?.restored || swaps?.cleaned || keptCopies.length) {
+      trace(`photo rewrites recovered: ${swaps.restored} put back, ${swaps.cleaned} tidied, ${keptCopies.length} kept as copies`)
+    }
+    if (keptCopies.length) {
+      // Lumen's own files (not new duplicates); said once, since they now show in the library
+      ownFiles(keptCopies)
+      for (const p of keptCopies) trace(`kept as a copy: ${p}`)
+      const shown = keptCopies.slice(0, 8).join('\n') + (keptCopies.length > 8 ? `\n…and ${keptCopies.length - 8} more` : '')
+      messageBox({
+        type: 'info',
+        title: 'Lumen',
+        message: `${keptCopies.length === 1 ? 'A photo' : `${keptCopies.length} photos`} from an unfinished change ${keptCopies.length === 1 ? 'was' : 'were'} kept as ${keptCopies.length === 1 ? 'a copy' : 'copies'}`,
+        detail: `Last time Lumen closed while changing a photo, and the earlier version wasn't the same picture, so it was kept next to the photo instead of being deleted:\n\n${shown}\n\nCheck ${keptCopies.length === 1 ? 'it' : 'them'} and delete what you don't need.`,
+        buttons: ['OK'],
+      })
+    }
+  } catch (err) {
+    console.error("Couldn't check for photo rewrites left over from last time", err)
+  }
   // (ocr.load: without it every launch read the text of every photo again, for an hour or more)
   await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), ocr.load(), history.load(), userLocations.load(), tags.load(), priv.load()])
+  dataLoaded = true
   placesData = places.group(listed())
   if (launchArgs.folder) await openFolder(launchArgs.folder)
   if (launchArgs.autoscan) showDuplicates()
   markServicesReady()
   tags.resume() // writes left over from last time
-  trace(`data loaded: ${library.list.length} items`)
+  trace(`data loaded: ${library.list.length} items (library ${library.loadState})`)
   thumbs.prefetch(visibleLibrary())
-  faces.sync(visibleLibrary())
-  smart.sync(visibleLibrary())
-  ocr.sync(visibleLibrary())
-  dupes.sync(visibleLibrary())
+  libraryComplete = library.loadState === 'ok'
+  if (libraryComplete) {
+    faces.sync(visibleLibrary())
+    smart.sync(visibleLibrary())
+    ocr.sync(visibleLibrary())
+    dupes.sync(visibleLibrary())
+  } else {
+    // No saved library to go by (first run, or library.json damaged or unreadable): syncing the
+    // analyses with an empty list would drop every face, name and fingerprint. The first scan's
+    // 'scanned' event syncs them with what is really there.
+    indexesStale = true
+  }
+  // memory-movie work folders left by a crash or a forced exit
+  Promise.resolve()
+    .then(() => ffmpeg.sweepStaleTemps())
+    .catch(() => {})
   watchFolders()
   scan()
   updateWatching()
@@ -1886,11 +2303,87 @@ app.on('window-all-closed', () => {
   if (!IS_MAC) app.quit()
 })
 
+/** Quitting has started (no new file job starts; closing the window no longer hides it in the tray). */
 let quitting = false
+/** The file jobs are done and the background saves finished (or ran out of time): the next quit goes through. */
+let readyToQuit = false
+let savedAtQuit = false
+/** A launch came in while quitting: a new copy starts once this one has exited. */
+let relaunchAsked = false
 
-app.on('before-quit', () => {
-  if (!ownsInstance || quitting) return
-  quitting = true
+// How long quitting waits for each step. Whatever happens, the process ends after all of them.
+const JOBS_LIMIT_MS = 60_000
+const TAGS_LIMIT_MS = 10_000
+const SAVES_LIMIT_MS = 5_000
+const QUIT_LIMIT_MS = JOBS_LIMIT_MS + TAGS_LIMIT_MS + SAVES_LIMIT_MS + 10_000
+
+/** Resolves 'done', 'failed' or 'timeout': when `promise` settles or after `ms`. Never rejects. */
+const settleWithin = (promise, ms) =>
+  new Promise((resolve) => {
+    const timer = setTimeout(() => resolve('timeout'), ms)
+    Promise.resolve(promise).then(
+      () => (clearTimeout(timer), resolve('done')),
+      () => (clearTimeout(timer), resolve('failed')),
+    )
+  })
+
+/**
+ * Before quitting: stops the running file jobs (after their current file) and waits until each has
+ * recorded what it did in History and carried albums, favorites, faces, private marks… over to the
+ * new paths; then for the rating/tag writes still queued and the saves that run in the background.
+ * Every wait has a limit, so this always ends.
+ */
+async function finishBeforeQuit() {
+  // a newer Lumen that is taking over waits for this instead of ending it after 5 s
+  writeInstanceFile({ finishingUntil: Date.now() + QUIT_LIMIT_MS })
+  // jobs that only make new files just stop (their temp files go at the end)
+  videoJob?.abort()
+  movieJob?.abort()
+  exports_.cancel()
+  importAbort?.abort() // (an import, or an import scan)
+  const jobs = [...fileJobs]
+  let stuck = false
+  if (jobs.length) {
+    trace(`quitting: stopping ${jobs.length} file job${jobs.length === 1 ? '' : 's'}`)
+    for (const job of jobs) job.controller.abort()
+    stuck = (await settleWithin(Promise.allSettled(jobs.map((j) => j.done)), JOBS_LIMIT_MS)) === 'timeout'
+    trace(stuck ? `file jobs still running after ${JOBS_LIMIT_MS / 1000} s` : 'file jobs finished')
+  }
+  // (a stuck job may be holding the tag writer: then there's no point waiting for it)
+  if (tags && !stuck) {
+    const how = await settleWithin(tags.flush(), TAGS_LIMIT_MS)
+    if (how === 'timeout') trace(`rating/tag writes still queued after ${TAGS_LIMIT_MS / 1000} s (they're retried next time)`)
+  }
+  // (only what has changed: nothing is written over files that haven't even been loaded yet)
+  await settleWithin(
+    Promise.allSettled([history?.flush(), userLocations?.flush(), albums?.flush(), jobs.length && dataLoaded ? library.save() : null]),
+    SAVES_LIMIT_MS,
+  )
+}
+
+app.on('before-quit', (e) => {
+  if (!ownsInstance) return
+  if (!readyToQuit) {
+    // First finish the file jobs and the background saves, then quit again for real.
+    e.preventDefault()
+    if (quitting) return
+    quitting = true
+    trace('quitting: finishing file jobs and saves')
+    // Never linger invisibly in the background (that blocks the next launch): exit for real at the latest then.
+    setTimeout(() => {
+      trace(`still running ${QUIT_LIMIT_MS / 1000} s after quitting started: forcing exit`)
+      app.exit(0)
+    }, QUIT_LIMIT_MS).unref()
+    finishBeforeQuit()
+      .catch((err) => trace(`finishing before quit failed: ${err?.message ?? err}`))
+      .finally(() => {
+        readyToQuit = true
+        app.quit()
+      })
+    return
+  }
+  if (savedAtQuit) return
+  savedAtQuit = true
   trace('quitting: saving and stopping background work')
   store.saveNow()
   thumbs?.dispose()
@@ -1905,9 +2398,15 @@ app.on('before-quit', () => {
   videoJob?.abort()
   movieJob?.abort()
   exports_.cancel()
+  // temp and .part files of video jobs that were stopped
+  try {
+    ffmpeg.cleanupTempsSync()
+  } catch {}
   alerts?.dispose()
   background?.dispose()
   albums?.saveNow()
+  userLocations?.saveNow()
+  history?.saveNow()
   // Everything is saved. If anything still holds the app open, don't linger invisibly in the
   // background (that blocks the next launch): exit for real.
   trace('saved')

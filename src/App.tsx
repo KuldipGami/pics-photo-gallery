@@ -37,7 +37,7 @@ import { api, thumbUrl } from './api'
 import { AlbumNameDialog, AlbumPicker, AlbumsView, AlbumTitle } from './components/AlbumsView'
 import { CleanupView, type CleanupTab } from './components/CleanupView'
 import { CompareView, type CompareSource } from './components/CompareView'
-import { HistoryView, historyTitle } from './components/HistoryView'
+import { HistoryView, historyTitle, importUndoConfirm, importUndoneText, removedOriginalsOf } from './components/HistoryView'
 import { MemoriesView, MemoryStrip } from './components/MemoriesView'
 import { MapView, hasPosition, type MapViewState } from './components/MapView'
 import { LocationDialog } from './components/LocationDialog'
@@ -86,11 +86,11 @@ import { TitleBar } from './components/TitleBar'
 import { Viewer } from './components/Viewer'
 import { useEvent, useLibrary, useSmartSearch, useTextHits, useToasts } from './hooks'
 import { baseName, formatBytes, formatCount, formatRange, summarize } from './lib/format'
-import { buildReports, groupKey, isUnder, largeList, lowQualityList, ruleMarks, screenshotList, type Facts } from './lib/cleanup'
+import { buildReports, isUnder, largeList, lowQualityList, newFiles, ruleNewFiles, screenshotList, type Facts } from './lib/cleanup'
 import { pairLivePhotos } from './lib/live'
-import { findTrips, formatTripDates, onThisDay } from './lib/memories'
+import { findTrips, formatTripDates, matchTrip, onThisDay } from './lib/memories'
 import { fold, MONTH_WORDS, searchTokens, tokenMask, TYPE_WORDS } from './lib/search'
-import type { FaceBox, FaceRef, MediaItem, Memory, PairSuggestion, Person, PersonMatch, TypeFilter, View } from './types'
+import type { DupGroup, FaceBox, FaceRef, HistoryEntry, MediaItem, Memory, PairSuggestion, Person, PersonMatch, Trip, TypeFilter, View } from './types'
 
 interface PickerOptions {
   title: string
@@ -167,7 +167,8 @@ export default function App() {
   const [peopleSelection, setPeopleSelection] = useState<Set<string>>(() => new Set())
   const [personTab, setPersonTab] = useState<'photos' | 'faces'>('photos')
   const [faceSelection, setFaceSelection] = useState<Set<string>>(() => new Set())
-  const faceAnchor = useRef<number | null>(null)
+  /** The face shift-click selects from (an id: the list can change in between). */
+  const faceAnchor = useRef<string | null>(null)
   const [picker, setPicker] = useState<PickerOptions | null>(null)
   const [suggestions, setSuggestions] = useState<PairSuggestion[]>([])
   /** Suggestions frozen when the review opens (the live list changes as you merge). */
@@ -200,6 +201,9 @@ export default function App() {
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
   const [importResult, setImportResult] = useState<ImportResult | null>(null)
   const [importDeleteAfter, setImportDeleteAfter] = useState(false)
+  /** Import was clicked and hasn't finished (the first progress can take a while: a scan may be running). */
+  const [importStarting, setImportStarting] = useState(false)
+  const importStartingRef = useRef(false)
   const mapView = useRef<MapViewState | null>(null)
   const [placeCountry, setPlaceCountry] = useState<string | null>(null)
   const { toasts, push: toast, dismiss: dismissToast } = useToasts()
@@ -207,17 +211,23 @@ export default function App() {
   const [cleanupTab, setCleanupTab] = useState<CleanupTab>('duplicates')
   /** Files selected for removal (shared by every Clean up list and the compare view). */
   const [marks, setMarks] = useState<Set<string>>(() => new Set())
-  /** Groups already given the keep rule once (later changes are the user's). */
+  /** Files the keep rule has decided on once (later changes are the user's). */
   const ruled = useRef(new Set<string>())
   const [compare, setCompare] = useState<CompareSource | null>(null)
-  /** Moves made in this session, newest last (Ctrl+Z undoes them). */
+  /** Moves made in this session, newest last (Ctrl+Z undoes the last one while it's the latest change to files). */
   const [sessionMoves, setSessionMoves] = useState<string[]>([])
+  /** Turned copies, hidden from the sideways list until the duplicate groups are worked out again. */
+  const [turned, setTurned] = useState<{ groups: DupGroup[]; ids: Set<string> } | null>(null)
   // ---------- organize (DupeLens) ----------
   const [organizePlan, setOrganizePlan] = useState<OrganizePlan | null>(null)
   const [organizeBusy, setOrganizeBusy] = useState(false)
   const [organizeProgress, setOrganizeProgress] = useState<{ done: number; total: number } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
-  const selectAnchor = useRef<number | null>(null)
+  /** The search box was typed in during the last second: its last word may be half a name still. */
+  const [typingSearch, setTypingSearch] = useState(false)
+  const typingTimer = useRef(0)
+  /** The item shift-click selects from (an id: items can be deleted or moved in between). */
+  const selectAnchor = useRef<string | null>(null)
   const internalDrag = useRef(false)
   /** Items dragged from the grid (they can be dropped on an album in the sidebar). */
   const draggingIds = useRef<string[]>([])
@@ -256,12 +266,40 @@ export default function App() {
   const favDep = view.kind === 'favorites' ? favorites : null
 
   // ---------- live photos, trips & memories ----------
-  const { live, hidden: liveClips } = useMemo(() => pairLivePhotos(items), [items])
+  const { live: libraryLive, hidden: liveClips } = useMemo(() => pairLivePhotos(items), [items])
+  // private Live Photos too (their clips go to Private with them)
+  const privLive = useMemo(() => pairLivePhotos(privateItems), [privateItems])
+  const live = useMemo(
+    () => (privLive.live.size ? new Map([...libraryLive, ...privLive.live]) : libraryLive),
+    [libraryLive, privLive],
+  )
   /** Everything shown in grids: Live Photo clips appear as part of their photo instead. */
   const shownItems = useMemo(() => (liveClips.size ? items.filter((it) => !liveClips.has(it.id)) : items), [items, liveClips])
+  const shownPrivate = useMemo(
+    () => (privLive.hidden.size ? privateItems.filter((it) => !privLive.hidden.has(it.id)) : privateItems),
+    [privateItems, privLive],
+  )
+  /**
+   * The ids plus the motion clips of the Live Photos among them. Clips aren't shown in grids, so
+   * what's done to a photo (Private, Recycle Bin, Move) is done to its clip too: otherwise the clip,
+   * with its sound, would turn up on its own in Photos and Videos.
+   */
+  const withClips = (ids: string[]) => {
+    const out = new Set(ids)
+    for (const id of ids) {
+      const clip = live.get(id)
+      if (clip) out.add(clip.id)
+    }
+    return [...out]
+  }
   const trips = useMemo(() => findTrips(shownItems, places), [shownItems, places])
   const tripById = useMemo(() => new Map(trips.map((t) => [t.id, t])), [trips])
   const currentTrip = view.kind === 'trip' ? tripById.get(view.id) : undefined
+  /** The open trip as last seen: it gets a new id when its first photo changes (see matchTrip). */
+  const lastTrip = useRef<Trip | null>(null)
+  useEffect(() => {
+    if (currentTrip) lastTrip.current = currentTrip
+  }, [currentTrip])
   const today = new Date().toDateString()
   const memories = useMemo(() => onThisDay(shownItems), [shownItems, today])
   const [hiddenMemoriesDay, setHiddenMemoriesDay] = useState(() => {
@@ -366,7 +404,7 @@ export default function App() {
 
   /** The current view's items before searching. */
   const baseList = useMemo(() => {
-    let list = view.kind === 'private' ? privateItems : shownItems
+    let list = view.kind === 'private' ? shownPrivate : shownItems
     if (view.kind === 'videos') list = list.filter((it) => it.type === 'video')
     else if (view.kind === 'favorites') list = list.filter((it) => favorites.has(it.id))
     else if (view.kind === 'folder') list = list.filter((it) => it.dir === view.dir)
@@ -389,7 +427,7 @@ export default function App() {
     return list
     // `favDep`/`personDep`/`placeDep` instead of the full objects: toggling a heart or renaming
     // someone shouldn't refilter views that don't depend on them.
-  }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip, similar, byId, privateItems])
+  }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip, similar, byId, shownPrivate])
 
   // ---------- search ----------
   // Every word is matched against what Lumen knows about an item (name, folder, date, camera,
@@ -419,7 +457,9 @@ export default function App() {
   const search = useMemo(() => {
     if (!tokens.length || !isGrid) return null
     const known = new Set(knownWords)
-    const typingLast = !/\s$/.test(query)
+    // The last word counts as the start of a name ("sun" for Sunil) only while it's being typed.
+    // A finished search (or a smart album's saved one) looks "sun" up in what's in the photos too.
+    const typingLast = typingSearch && !!query.trim() && !/[^\p{L}\p{N}]$/u.test(query)
     const isKnown = (t: string, i: number) =>
       /^\d+$/.test(t) ||
       known.has(t) ||
@@ -451,7 +491,7 @@ export default function App() {
       .slice(0, 4)
       .map(([mask]) => phraseOf(mask))
     return { masks, full, strict, lookups, phraseOf, byText }
-  }, [tokens, query, isGrid, baseList, namesByItem, placeTextByItem, knownWords, tagsData, textHits])
+  }, [tokens, query, typingSearch, isGrid, baseList, namesByItem, placeTextByItem, knownWords, tagsData, textHits])
   const smart = useSmartSearch(smartOn && search ? search.lookups : [])
 
   const visible = useMemo(() => {
@@ -552,18 +592,29 @@ export default function App() {
     }
   }, [byId, protectedFolders])
   const keepRule = settings?.keepRule ?? 'best'
-  // New groups get the keep rule once (like DupeLens after a scan); later the user's choices stand.
+  // New copies get the keep rule once (like DupeLens after a scan); later the user's choices stand.
+  // Decided per file, so a group gaining or losing a copy doesn't select again what was unselected,
+  // and only files still in the library are ranked (the best copy may be gone).
   useEffect(() => {
     if (!settings || !dupes.groups.length) return
-    const fresh = dupes.groups.filter((g) => !ruled.current.has(groupKey(g)))
-    if (!fresh.length) return
-    for (const g of fresh) ruled.current.add(groupKey(g))
+    const present = (id: string) => byId.has(id)
+    const fresh = newFiles(dupes.groups, present, ruled.current)
+    if (!fresh.size) return
     setMarks((prev) => {
+      const { add, remove } = ruleNewFiles(dupes.groups, keepRule, isProtected, present, fresh, prev)
+      if (!add.length && !remove.length) return prev
       const next = new Set(prev)
-      for (const g of fresh) for (const id of ruleMarks(g, keepRule, isProtected)) next.add(id)
+      for (const id of add) next.add(id)
+      for (const id of remove) next.delete(id)
       return next
     })
-  }, [dupes.groups, settings?.keepRule])
+  }, [dupes.groups, settings?.keepRule, byId])
+  /** Each file's duplicate group (for "keep at least one copy"). */
+  const groupOf = useMemo(() => {
+    const m = new Map<string, DupGroup>()
+    for (const g of dupes.groups) for (const id of g.ids) m.set(id, g)
+    return m
+  }, [dupes.groups])
   // protected files are never selected
   useEffect(() => {
     setMarks((prev) => {
@@ -582,10 +633,18 @@ export default function App() {
   /** Groups where the selection would leave no copy at all. */
   const allCopiesWarning = (ids: string[]) => {
     const sel = new Set(ids)
-    const n = dupes.groups.filter((g) => g.ids.filter((id) => byId.has(id)).every((id) => sel.has(id))).length
+    const n = dupes.groups.filter((g) => {
+      const live = g.ids.filter((id) => byId.has(id))
+      return live.length > 1 && live.every((id) => sel.has(id))
+    }).length
     return n ? `In ${formatCount(n)} group${n === 1 ? '' : 's'} every copy is selected, so no copy of those photos will remain.` : undefined
   }
-  const afterRemove = (ids: string[], res: { removed: number; failed: number; errors?: string[] }) => {
+  /** Files that moved (or went to the Recycle Bin) without their XMP sidecar: worth knowing, not a failure. */
+  const sidecarNotes = (res: { notes?: string[] }) => {
+    const notes = res.notes ?? []
+    if (notes.length) toast(notes.length === 1 ? notes[0] : `${formatCount(notes.length)} files went without their XMP sidecar, like ${notes[0]}`)
+  }
+  const afterRemove = (ids: string[], res: { removed: number; failed: number; errors?: string[]; notes?: string[] }) => {
     setMarks((prev) => {
       const next = new Set(prev)
       for (const id of ids) next.delete(id)
@@ -597,14 +656,21 @@ export default function App() {
       return next
     })
     if (res.failed) toast(`Removed ${formatCount(res.removed)}, but ${formatCount(res.failed)} failed: ${res.errors?.[0] ?? ''}`, { error: true })
+    sidecarNotes(res)
   }
-  const moveToFolder = (ids: string[]) => {
-    if (!ids.length || !settings) return
+  /** " This includes 2 Live Photo clips…" when the photos' motion clips go along. */
+  const clipsNote = (ids: string[], all: string[]) => {
+    const n = all.length - ids.length
+    return n > 0 ? ` This includes ${formatCount(n)} Live Photo clip${n === 1 ? '' : 's'} of the selected photos.` : ''
+  }
+  const moveToFolder = (selected: string[]) => {
+    if (!selected.length || !settings) return
+    const ids = withClips(selected)
     const { n, bytes } = removeLabel(ids)
     const dest = settings.moveDestination ?? settings.defaultMoveDestination
     setConfirm({
       title: `Move ${formatCount(n)} file${n === 1 ? '' : 's'}?`,
-      message: `${formatBytes(bytes)} will be moved out of your photo folders into the folder below (it isn't shown in Lumen). You can undo this afterwards, even after closing Lumen.`,
+      message: `${formatBytes(bytes)} will be moved out of your photo folders into the folder below (it isn't shown in Lumen). You can undo this afterwards, even after closing Lumen.${clipsNote(selected, ids)}`,
       confirmLabel: 'Move files',
       warning: allCopiesWarning(ids),
       extra: (
@@ -620,6 +686,7 @@ export default function App() {
         const res = await api.moveItems(ids)
         afterRemove(ids, res)
         if (res.entryId) setSessionMoves((m) => [...m, res.entryId!])
+        else setSessionMoves([])
         if (res.removed)
           toast(`Moved ${formatCount(res.removed)} file${res.removed === 1 ? '' : 's'} to “${baseName(res.destination ?? dest)}”`, {
             action: { label: 'Undo', run: () => undoMove(res.entryId!) },
@@ -627,25 +694,37 @@ export default function App() {
       },
     })
   }
-  const recycle = (ids: string[]) => {
-    if (!ids.length) return
+  const recycle = (selected: string[]) => {
+    if (!selected.length) return
+    const ids = withClips(selected)
     const { n, bytes } = removeLabel(ids)
     setConfirm({
       title: `Move ${formatCount(n)} file${n === 1 ? '' : 's'} to the ${BIN}?`,
-      message: `This frees ${formatBytes(bytes)}. You can restore them from the ${BIN} if you need them back.`,
+      message: `This frees ${formatBytes(bytes)}. You can restore them from the ${BIN} if you need them back.${clipsNote(selected, ids)}`,
       confirmLabel: `Move to ${BIN}`,
       danger: true,
       warning: allCopiesWarning(ids),
       onConfirm: async () => {
+        setSessionMoves([]) // Ctrl+Z is for the latest change to files only
         const res = await api.trash(ids)
         afterRemove(ids, res)
         if (res.removed) toast(`Moved ${formatCount(res.removed)} file${res.removed === 1 ? '' : 's'} to the ${BIN}`)
       },
     })
   }
-  const undoMove = async (entryId?: string) => {
-    const id = entryId ?? sessionMoves[sessionMoves.length - 1]
-    if (!id) return
+  // Ctrl+Z (and Clean up's Undo) put back the last move only while it's still the latest change to
+  // files: anything newer in History (Recycle Bin, Organize, an import, an edit…) or Clear history ends
+  // it. Moves undone this way don't count, so Ctrl+Z again undoes the move before.
+  const undoneMoves = useRef(new Set<string>())
+  const undoableMove = useMemo(() => {
+    const last = sessionMoves[sessionMoves.length - 1]
+    if (!last) return null
+    let newest: HistoryEntry | null = null
+    for (const e of history) if (!undoneMoves.current.has(e.id) && (!newest || e.time > newest.time)) newest = e
+    return newest?.id === last ? last : null
+  }, [sessionMoves, history])
+  const undoMove = async (id: string) => {
+    undoneMoves.current.add(id)
     setSessionMoves((m) => m.filter((x) => x !== id))
     const res = await api.restoreHistory(id)
     toast(
@@ -669,6 +748,11 @@ export default function App() {
     setPin: api.privateSetPin,
     lock: api.privateLock,
     onStatus: api.onPrivateStatus,
+    recheckHello: async () => {
+      const s = await api.privateRecheckHello()
+      setPrivStatus(s)
+      return s
+    },
   }
   useEffect(() => api.onPrivateStatus(setPrivStatus), [])
   useEffect(() => {
@@ -693,9 +777,9 @@ export default function App() {
     setConfirm({
       ...c,
       onConfirm: async () => {
-        const n = await api.privateAdd(ids)
+        await api.privateAdd(withClips(ids))
         setSelection(new Set())
-        toast(`Moved ${plural(n || ids.length, 'item')} to Private`)
+        toast(`Moved ${plural(ids.length, 'item')} to Private`)
       },
     })
   }
@@ -704,7 +788,7 @@ export default function App() {
     setConfirm({
       ...privateConfirm('remove', ids.length),
       onConfirm: async () => {
-        await api.privateRemove(ids)
+        await api.privateRemove(withClips(ids))
         setSelection(new Set())
         toast(`${plural(ids.length, 'item')} back in your library`)
       },
@@ -715,7 +799,8 @@ export default function App() {
     setConfirm({
       ...privateConfirm('hide', ids.length),
       onConfirm: async () => {
-        const res = await api.privateHide(ids)
+        setSessionMoves([])
+        const res = await api.privateHide(withClips(ids))
         setSelection(new Set())
         toast(res.errors.length ? `Hid ${formatCount(res.done)}, ${formatCount(res.errors.length)} failed: ${res.errors[0]}` : `Hid ${plural(res.done, 'item')} in File Explorer. Undo it from History if needed.`, { error: res.errors.length > 0 })
       },
@@ -772,8 +857,14 @@ export default function App() {
     }
   }
   const runImport = () => {
-    if (!importScan || !importPlan) return
+    if (!importScan || !importPlan || importStartingRef.current || importProgress) return
     const go = async () => {
+      // "starting" right away: the first progress can take a while (a library scan may be running),
+      // and a second click meanwhile would start a second import
+      if (importStartingRef.current) return
+      importStartingRef.current = true
+      setImportStarting(true)
+      setSessionMoves([])
       try {
         const res = await api.importRun(importScan.scanId, importDeleteAfter)
         setImportResult(res)
@@ -781,6 +872,9 @@ export default function App() {
         toast(t.text, { error: t.error })
       } catch (err) {
         toast(String((err as Error)?.message ?? err).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), { error: true })
+      } finally {
+        importStartingRef.current = false
+        setImportStarting(false)
       }
     }
     const c = importConfirm(importScan, importPlan, importOpts)
@@ -788,23 +882,31 @@ export default function App() {
     else go()
   }
 
-  // Lumen moved or renamed files (Organize, History): selections and ruled groups follow them.
+  // Lumen moved or renamed files (Organize, HEIC convert, History): selections, the files the keep
+  // rule has seen, the open viewer, Find similar, a map selection and open dialogs follow them.
   useEffect(
     () =>
       api.onRelocated((pairs) => {
         const map = new Map(pairs)
-        const follow = (prev: Set<string>) => (pairs.some(([from]) => prev.has(from)) ? new Set([...prev].map((id) => map.get(id) ?? id)) : prev)
+        const to = (id: string) => map.get(id) ?? id
+        /** The same array when nothing in it moved (so nothing re-renders for it). */
+        const list = (ids: string[]) => (ids.some((id) => map.has(id)) ? ids.map(to) : ids)
+        const follow = (prev: Set<string>) => (pairs.some(([from]) => prev.has(from)) ? new Set([...prev].map(to)) : prev)
         setMarks(follow)
         setSelection(follow)
-        ruled.current = new Set(
-          [...ruled.current].map((key) =>
-            key
-              .split('|')
-              .map((id) => map.get(id) ?? id)
-              .sort()
-              .join('|'),
-          ),
+        ruled.current = new Set([...ruled.current].map(to))
+        setViewer((v) => (v && list(v.ids) !== v.ids ? { ...v, ids: list(v.ids) } : v))
+        setSimilar((s) => (s && (map.has(s.id) || list(s.ids) !== s.ids) ? { ...s, id: to(s.id), ids: list(s.ids) } : s))
+        setView((v) =>
+          v.kind === 'similar' && map.has(v.id) ? { ...v, id: to(v.id) } : v.kind === 'map-items' && list(v.ids) !== v.ids ? { ...v, ids: list(v.ids) } : v,
         )
+        setFocus((f) => (f && map.has(f.id) ? { id: to(f.id) } : f))
+        setTagging((t) => t && list(t))
+        setLocating((l) => l && list(l))
+        setAlbumPicker((a) => a && list(a))
+        setExporting((e) => (e && list(e.ids) !== e.ids ? { ...e, ids: list(e.ids) } : e))
+        setMovie((m) => (m && list(m.ids) !== m.ids ? { ...m, ids: list(m.ids) } : m))
+        setPendingEdit((p) => (p && map.has(p.from) ? { ...p, from: to(p.from) } : p))
       }),
     [],
   )
@@ -831,15 +933,19 @@ export default function App() {
         moveOriginals: settings.moveOriginals,
       }
     : ORGANIZE_DEFAULTS
-  const sideways = useMemo(
-    () => (view.kind === 'organize' ? findSideways(dupes.groups, byId, marks) : []),
-    [view.kind, dupes.groups, byId, marks],
-  )
+  const sideways = useMemo(() => {
+    if (view.kind !== 'organize') return []
+    // copies turned already stay off the list until the groups are worked out again (else a
+    // second click would turn them once more)
+    const skip = turned && turned.groups === dupes.groups ? new Set([...marks, ...turned.ids]) : marks
+    return findSideways(dupes.groups, byId, skip)
+  }, [view.kind, dupes.groups, byId, marks, turned])
   const organizeRun = (action: OrganizeAction, run: () => Promise<{ done: number; errors: string[] }>, turnCount?: number) => {
     if (!organizePlan || !settings || organizeBusy) return
     const c = organizeConfirm(action, organizePlan, organizeOptions, { turnCount, originalsDir: settings.originalsDir })
     const go = async () => {
       setOrganizeBusy(true)
+      setSessionMoves([])
       try {
         const res = await run()
         const t = organizeDoneText(action, res.done, res.errors, settings.organizeCopy)
@@ -881,6 +987,9 @@ export default function App() {
           const res = await api.rotateLossless(group, turns)
           done += res.done
           errors.push(...res.errors)
+          // errors read "<name>: <why>"
+          const ok = group.filter((id) => !res.errors.some((e) => e.startsWith(`${byId.get(id)?.name ?? ''}:`)))
+          if (ok.length) setTurned((t) => ({ groups: dupes.groups, ids: new Set([...(t && t.groups === dupes.groups ? t.ids : []), ...ok]) }))
         }
         return { done, errors }
       },
@@ -916,6 +1025,24 @@ export default function App() {
     [viewer?.ids, byId],
   )
   const viewerIndex = viewer ? Math.min(viewer.index, viewerItems.length - 1) : -1
+  // What the open dialogs get: the same objects from render to render (the window re-renders up to
+  // every half second while Lumen works in the background), so nothing in them starts over.
+  const itemsOf = (ids: string[] | undefined) => (ids ? ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it) : [])
+  const exportItems = useMemo(() => itemsOf(exporting?.ids), [exporting, byId])
+  const movieItems = useMemo(() => itemsOf(movie?.ids), [movie, byId])
+  const locatingItems = useMemo(() => itemsOf(locating ?? undefined), [locating, byId])
+  const taggingValues = useMemo(() => itemsOf(tagging ?? undefined).map((it) => marksOf(it, tagsData).tags), [tagging, byId, tagsData])
+  const exportBridge = useMemo(
+    () => ({
+      defaults: api.exportDefaults,
+      pick: api.exportPick,
+      start: api.exportStart,
+      cancel: api.exportCancel,
+      onProgress: api.onExportProgress,
+      reveal: api.exportReveal,
+    }),
+    [],
+  )
 
   useEffect(() => {
     if (viewer && viewerItems.length === 0) setViewer(null)
@@ -930,7 +1057,11 @@ export default function App() {
     if (view.kind === 'person' && !peopleById.has(view.id)) setView({ kind: 'people' })
     if (view.kind === 'album' && !albumById.has(view.id)) setView({ kind: 'albums' })
     if (view.kind === 'place' && places.places.length && !placeById.has(view.id)) setView({ kind: 'places' })
-    if (view.kind === 'trip' && items.length && !tripById.has(view.id)) setView({ kind: 'memories' })
+    if (view.kind === 'trip' && items.length && !tripById.has(view.id)) {
+      // a trip's id comes from its first located photo: when that changes, stay on the same trip
+      const again = lastTrip.current && matchTrip(lastTrip.current, trips)
+      setView(again ? { kind: 'trip', id: again.id } : { kind: 'memories' })
+    }
   }, [view, peopleById, albumById, placeById, places.places.length, tripById, items.length])
 
   // An edited copy was saved: once the library has picked it up, show it next to its original.
@@ -940,10 +1071,13 @@ export default function App() {
     setPendingEdit(null)
     setViewer((v) => {
       if (!v) return v
-      const ids = v.ids.filter((id) => id !== pendingEdit.id)
+      // positions count what the viewer shows (ids still in the library), like viewer.index does
+      const ids = v.ids.filter((id) => id !== pendingEdit.id && byId.has(id))
       const at = ids.indexOf(pendingEdit.from)
-      ids.splice(at + 1, 0, pendingEdit.id)
-      return { ids, index: at + 1 }
+      // next to its original; with the original gone, where it was (what's shown now)
+      const index = at >= 0 ? at + 1 : Math.max(0, Math.min(v.index, ids.length))
+      ids.splice(index, 0, pendingEdit.id)
+      return { ids, index }
     })
   }, [pendingEdit, byId])
   useEffect(() => {
@@ -1114,16 +1248,19 @@ export default function App() {
   }
 
   const toggleFace = (face: FaceRef, index: number, e: { shiftKey: boolean }) => {
-    const anchor = faceAnchor.current
+    // Shift-click: from the face clicked before, found again by id (faces may have moved away since);
+    // a plain toggle when it's gone.
+    const at = personFaces[index]?.faceId === face.faceId ? index : personFaces.findIndex((f) => f.faceId === face.faceId)
+    const from = e.shiftKey && faceAnchor.current ? personFaces.findIndex((f) => f.faceId === faceAnchor.current) : -1
+    const range = from >= 0 && at >= 0 ? personFaces.slice(Math.min(from, at), Math.max(from, at) + 1).map((f) => f.faceId) : null
     setFaceSelection((prev) => {
       const next = new Set(prev)
-      if (e.shiftKey && anchor !== null) {
-        for (let i = Math.min(anchor, index); i <= Math.max(anchor, index); i++) next.add(personFaces[i].faceId)
-      } else if (next.has(face.faceId)) next.delete(face.faceId)
+      if (range) for (const id of range) next.add(id)
+      else if (next.has(face.faceId)) next.delete(face.faceId)
       else next.add(face.faceId)
       return next
     })
-    faceAnchor.current = index
+    faceAnchor.current = face.faceId
   }
 
   const togglePersonSelect = (id: string) =>
@@ -1175,17 +1312,23 @@ export default function App() {
       confirmLabel: `Move to ${BIN}`,
       danger: true,
       onConfirm: async () => {
-        const res = await api.trash(ids)
+        setSessionMoves([]) // Ctrl+Z is for the latest change to files only
+        // a Live Photo's clip goes with it (it isn't shown on its own)
+        const all = withClips(ids)
+        const res = await api.trash(all)
         setSelection((prev) => {
           const next = new Set(prev)
-          for (const id of ids) next.delete(id)
+          for (const id of all) next.delete(id)
           return next
         })
+        const gone = new Set(all)
+        setMarks((prev) => (all.some((id) => prev.has(id)) ? new Set([...prev].filter((id) => !gone.has(id))) : prev))
         toast(
           res.failed
             ? `Moved ${res.removed}, couldn't move ${res.failed}`
-            : `Moved ${res.removed} item${res.removed === 1 ? '' : 's'} to the ${BIN}`,
+            : `Moved ${plural(ids.length, 'item')} to the ${BIN}`,
         )
+        sidecarNotes(res)
       },
     })
   }
@@ -1201,27 +1344,29 @@ export default function App() {
   }
 
   const selectIndex = (index: number, mode: 'toggle' | 'range') => {
-    const anchor = selectAnchor.current
+    const item = visible[index]
+    if (!item) return
+    // Shift-click: from the item clicked before, found again by id (items before it may have been
+    // deleted or moved since); a plain toggle when it's gone.
+    const from = mode === 'range' && selectAnchor.current ? visible.findIndex((it) => it.id === selectAnchor.current) : -1
+    const range = from >= 0 ? visible.slice(Math.min(from, index), Math.max(from, index) + 1).map((it) => it.id) : null
     setSelection((prev) => {
       const next = new Set(prev)
-      if (mode === 'range' && anchor !== null) {
-        for (let i = Math.min(anchor, index); i <= Math.max(anchor, index); i++) next.add(visible[i].id)
-      } else {
-        const id = visible[index].id
-        if (next.has(id)) next.delete(id)
-        else next.add(id)
-      }
+      if (range) for (const id of range) next.add(id)
+      else if (next.has(item.id)) next.delete(item.id)
+      else next.add(item.id)
       return next
     })
-    selectAnchor.current = index
+    selectAnchor.current = item.id
   }
 
   const selectRange = (start: number, end: number, value: boolean) => {
+    const ids = visible.slice(start, end).map((it) => it.id)
     setSelection((prev) => {
       const next = new Set(prev)
-      for (let i = start; i < end; i++) {
-        if (value) next.add(visible[i].id)
-        else next.delete(visible[i].id)
+      for (const id of ids) {
+        if (value) next.add(id)
+        else next.delete(id)
       }
       return next
     })
@@ -1330,9 +1475,9 @@ export default function App() {
       searchRef.current?.select()
       return
     }
-    if ((e.ctrlKey || e.metaKey) && key === 'z' && sessionMoves.length && !typing) {
+    if ((e.ctrlKey || e.metaKey) && key === 'z' && undoableMove && !typing) {
       e.preventDefault()
-      undoMove()
+      undoMove(undoableMove)
       return
     }
     if ((e.ctrlKey || e.metaKey) && key === 'r' && view.kind === 'cleanup') {
@@ -1845,6 +1990,7 @@ export default function App() {
         onAddFolder={() => addFolders()}
         onToast={toast}
         onConfirm={setConfirm}
+        unreachable={status.unreachable}
       />
     )
   } else if (settings.folders.length === 0) {
@@ -1977,17 +2123,19 @@ export default function App() {
         settings={settings}
         isProtected={isProtected}
         query={query}
-        canUndo={sessionMoves.length > 0}
+        canUndo={!!undoableMove}
         onCompare={(groups, index, focusId) => setCompare({ mode: 'groups', groups, index, focus: focusId })}
         onPreview={(list, index) => setCompare({ mode: 'items', items: list, index })}
         onMove={moveToFolder}
         onRecycle={recycle}
-        onUndo={() => undoMove()}
+        onUndo={() => undoableMove && undoMove(undoableMove)}
         onProtectFolder={protectFolder}
         onExport={exportReport}
         onToast={toast}
         onDismiss={(ids) => {
           api.dismissDuplicates(ids)
+          // keeping all of them: none stays selected for removal (in Large files, Organize…)
+          setMarks((prev) => (ids.some((id) => prev.has(id)) ? new Set([...prev].filter((id) => !ids.includes(id))) : prev))
           toast("Got it — they won't be suggested again")
         }}
       />
@@ -2005,6 +2153,7 @@ export default function App() {
         destinationOutside={!!settings?.importDestination && !settings.folders.some((f) => isUnder(settings.importDestination!, f))}
         originalsDir={settings?.originalsDir}
         progress={importProgress}
+        starting={importStarting}
         result={importResult}
         thumb={(c) => (importScan?.thumbs ? `gallery://import/${c.id}` : null)}
         onRefresh={refreshImportSources}
@@ -2038,11 +2187,22 @@ export default function App() {
           refreshImportSources()
         }}
         onOpenFolder={(dir) => api.revealFolder(dir)}
-        onUndo={async (entryId) => {
-          const res = await api.restoreHistory(entryId)
-          toast(res.restored ? `Moved ${plural(res.restored, 'imported file')} to the ${BIN}` : 'Nothing could be undone: the files were moved or renamed since.', { error: !res.restored })
-          setImportResult(null)
-          setImportScan(null)
+        onUndo={(entryId) => {
+          const entry = history.find((h) => h.id === entryId)
+          setConfirm({
+            ...importUndoConfirm(
+              entry
+                ? { files: entry.files.filter((f) => !f.restored).length, removedOriginals: removedOriginalsOf(entry), source: entry.source?.name }
+                : { files: importResult?.imported ?? 0, removedOriginals: importResult?.removed, source: importScan?.source.name },
+            ),
+            onConfirm: async () => {
+              setSessionMoves([])
+              const res = await api.restoreHistory(entryId)
+              toast(importUndoneText(res), { error: !res.restored && !res.kept })
+              setImportResult(null)
+              setImportScan(null)
+            },
+          })
         }}
       />
     )
@@ -2084,14 +2244,29 @@ export default function App() {
       <HistoryView
         entries={history}
         onRestore={async (e) => {
-          const res = await api.restoreHistory(e.id)
-          setSessionMoves((m) => m.filter((x) => x !== e.id))
-          toast(
-            res.restored
-              ? `Put back ${formatCount(res.restored)} file${res.restored === 1 ? '' : 's'} (${historyTitle(e).toLowerCase()})`
-              : 'Nothing could be restored: the files were moved or renamed since, or their original spot is taken.',
-            { error: !res.restored },
-          )
+          const restore = async () => {
+            const res = await api.restoreHistory(e.id)
+            // putting something back is a change too: Ctrl+Z no longer undoes an earlier move
+            setSessionMoves([])
+            if (e.kind === 'imported') return toast(importUndoneText(res), { error: !res.restored && !res.kept })
+            // (an edit's original that came back under a new name: a different photo has the old one now)
+            const renamed = res.renamed
+              ? `; ${formatCount(res.renamed)} came back under a new name because another photo has the old one`
+              : ''
+            toast(
+              res.restored
+                ? `Put back ${formatCount(res.restored)} file${res.restored === 1 ? '' : 's'} (${historyTitle(e).toLowerCase()})${renamed}`
+                : 'Nothing could be restored: the files were moved or renamed since, or their original spot is taken.',
+              { error: !res.restored },
+            )
+          }
+          // undoing an import sends its files to the Recycle Bin: asked first
+          if (e.kind === 'imported') {
+            setConfirm({
+              ...importUndoConfirm({ files: e.files.filter((f) => !f.restored).length, removedOriginals: removedOriginalsOf(e), source: e.source?.name }),
+              onConfirm: restore,
+            })
+          } else await restore()
         }}
         onClear={() =>
           setConfirm({
@@ -2099,7 +2274,10 @@ export default function App() {
             message: 'This only forgets the list. No files are touched, but moved files can no longer be put back from here.',
             confirmLabel: 'Clear history',
             danger: true,
-            onConfirm: () => api.clearHistory(),
+            onConfirm: () => {
+              setSessionMoves([])
+              api.clearHistory()
+            },
           })
         }
       />
@@ -2159,6 +2337,7 @@ export default function App() {
         onZoom={zoomGrid}
         onDragItems={(ids) => (draggingIds.current = ids)}
         live={live}
+        grouped={view.kind !== 'similar'}
       />
     )
   }
@@ -2186,6 +2365,9 @@ export default function App() {
         query={query}
         onQuery={(q) => {
           setQuery(q)
+          setTypingSearch(true)
+          clearTimeout(typingTimer.current)
+          typingTimer.current = window.setTimeout(() => setTypingSearch(false), 1000)
           if (view.kind === 'settings' || view.kind === 'history' || view.kind === 'organize') setView({ kind: 'photos' })
         }}
         placeholder={
@@ -2311,6 +2493,7 @@ export default function App() {
           placeOf={(itemId) => placeById.get(places.byItem[itemId])}
           liveOf={(itemId) => live.get(itemId)}
           onEdited={(original, id, name) => {
+            setSessionMoves([])
             toast(`Saved as “${name}” next to the original`)
             setPendingEdit({ from: original.id, id })
           }}
@@ -2332,7 +2515,7 @@ export default function App() {
       {pinDialog && <PinDialog bridge={privateBridge} hasPin={!!privStatus?.hasPin} onClose={() => setPinDialog(false)} onDone={() => toast('PIN saved')} />}
       {movie && (
         <MovieDialog
-          items={movie.ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it)}
+          items={movieItems}
           title={movie.title}
           subtitle={movie.subtitle}
           progress={movieProgress}
@@ -2350,16 +2533,9 @@ export default function App() {
       )}
       {exporting && (
         <ExportDialog
-          items={exporting.ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it)}
+          items={exportItems}
           label={exporting.label}
-          bridge={{
-            defaults: api.exportDefaults,
-            pick: api.exportPick,
-            start: api.exportStart,
-            cancel: api.exportCancel,
-            onProgress: api.onExportProgress,
-            reveal: api.exportReveal,
-          }}
+          bridge={exportBridge}
           onClose={() => setExporting(null)}
           onDone={(res) => {
             const t = exportResultText(res)
@@ -2374,7 +2550,7 @@ export default function App() {
             <p>Tags are words you choose, like “Family” or “Beach”. Search for them, or filter by them with the button next to Photos / Videos.</p>
             <TagEditor
               autoFocus
-              values={tagging.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it).map((it) => marksOf(it, tagsData).tags)}
+              values={taggingValues}
               suggestions={allTags}
               onAdd={(list) => api.editTags(tagging, { add: list })}
               onRemove={(tag) => api.editTags(tagging, { remove: [tag] })}
@@ -2389,13 +2565,14 @@ export default function App() {
       )}
       {locating && (
         <LocationDialog
-          items={locating.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it)}
+          items={locatingItems}
           byId={byId}
           suggest={(hours) => api.suggestLocations(locating, hours)}
           search={api.searchPlaces}
           describe={api.describePlace}
           onSave={async (assignments, label) => {
             setLocating(null)
+            setSessionMoves([])
             const res = await api.setLocations(assignments, label)
             if (res.errors.length) toast(`Couldn't set the place of ${plural(res.errors.length, 'file')}: ${res.errors[0]}`, { error: true })
             else if (res.done) toast(`Location set${label ? ` to ${label}` : ''} for ${plural(res.done, 'item')}. Undo it from History if needed.`)
@@ -2486,6 +2663,8 @@ export default function App() {
           keepRule={keepRule}
           isProtected={isProtected}
           setMarks={setMarks}
+          groupOf={(id) => groupOf.get(id)}
+          paused={!!viewer}
           onClose={() => setCompare(null)}
           onFullScreen={(ids, index) => setViewer({ ids, index })}
           onToast={toast}

@@ -8,6 +8,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const ort = require('onnxruntime-node')
 const sharp = require('sharp')
+const { writeAtomicSync } = require('./safe-file.cjs')
 
 sharp.cache(false)
 ort.env.logLevel = 'error'
@@ -22,6 +23,8 @@ const PUNCTUATION = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g
 let vision = null
 let text = null
 let tokenizer = null
+let modelDir = null // (for switching to the CPU)
+let onCpu = false
 const port = process.parentPort
 
 /** SentencePiece unigram tokenizer (Viterbi over the vocabulary's log-probabilities). */
@@ -112,26 +115,29 @@ const readAdapter = (file) => {
 }
 
 /**
- * Loads the models on the fastest GPU. The adapter picked for faces (or for this engine before) is
- * tried first; otherwise every DirectML adapter is timed.
+ * Loads the models on the fastest GPU. The adapter picked for this engine before (or for faces) is
+ * tried first; otherwise every DirectML adapter is timed. `cpu`: straight to the CPU (the GPU
+ * stalled earlier this session); `skipCache`: time every adapter again (the remembered one is gone).
  */
-async function init({ modelsDir, cacheFile, hintFile }) {
+async function init({ modelsDir, cacheFile, hintFile, cpu = false, skipCache = false }) {
   const dir = path.join(modelsDir, 'siglip')
   for (const f of ['vision_model_fp16.onnx', 'text_model_fp16.onnx', 'tokenizer.json']) {
     if (!fs.existsSync(path.join(dir, f))) throw new Error(`Search model missing: ${f}`)
   }
   tokenizer = new Unigram(path.join(dir, 'tokenizer.json'))
+  modelDir = dir
 
   const candidates = []
-  if (process.platform === 'win32') {
-    const known = readAdapter(cacheFile) ?? readAdapter(hintFile)
+  if (process.platform === 'win32' && !cpu) {
+    const known = skipCache ? null : (readAdapter(cacheFile) ?? readAdapter(hintFile))
     const ids = known !== null ? [known] : [0, 1, 2, 3]
     for (const deviceId of ids) {
       try {
         const s = await createSessions(dir, [{ name: 'dml', deviceId }])
         candidates.push({ ...s, adapter: deviceId, ms: await timeVision(s.v) })
       } catch {
-        if (ids.length === 1) return init({ modelsDir, cacheFile: null, hintFile: null }) // adapter gone
+        // adapter gone: pick again (and remember the new choice)
+        if (ids.length === 1) return init({ modelsDir, cacheFile, hintFile, skipCache: true })
         break
       }
     }
@@ -144,19 +150,40 @@ async function init({ modelsDir, cacheFile, hintFile }) {
   const best = candidates[0]
   vision = best.v
   text = best.t
+  onCpu = best.adapter === null
   for (const c of candidates.slice(1)) {
     c.v.release?.()
     c.t.release?.()
   }
   if (cacheFile && best.adapter !== null) {
     try {
-      fs.writeFileSync(cacheFile, JSON.stringify({ adapter: best.adapter }))
+      writeAtomicSync(cacheFile, JSON.stringify({ adapter: best.adapter }))
     } catch {}
   }
   return {
     device: best.adapter === null ? 'cpu' : 'gpu',
     adapter: best.adapter,
     timings: candidates.map((c) => [c.adapter === null ? 'cpu' : `gpu${c.adapter}`, Math.round(c.ms * 10) / 10]),
+  }
+}
+
+/**
+ * Runs the vision or text model. If the GPU fails mid-session (a driver reset, the adapter
+ * removed), both models move to the CPU and the run is tried there once (as the eraser does).
+ */
+async function infer(which, feeds) {
+  try {
+    return await (which === 'vision' ? vision : text).run(feeds)
+  } catch (err) {
+    if (onCpu) throw err
+    const old = [vision, text]
+    const s = await createSessions(modelDir, ['cpu'])
+    vision = s.v
+    text = s.t
+    onCpu = true
+    for (const o of old) o.release?.()
+    port.postMessage({ type: 'device', device: 'cpu', adapter: null, reason: String(err?.message || err) })
+    return (which === 'vision' ? vision : text).run(feeds)
   }
 }
 
@@ -188,13 +215,13 @@ async function pixels(image) {
 }
 
 async function embedImage(input) {
-  const out = await vision.run({ pixel_values: new ort.Tensor('float32', input, [1, 3, SIZE, SIZE]) })
+  const out = await infer('vision', { pixel_values: new ort.Tensor('float32', input, [1, 3, SIZE, SIZE]) })
   return normalize(out.pooler_output.data)
 }
 
 async function embedText(query) {
   const ids = BigInt64Array.from(tokenizer.encode(query), (n) => BigInt(n))
-  const out = await text.run({ input_ids: new ort.Tensor('int64', ids, [1, MAX_TOKENS]) })
+  const out = await infer('text', { input_ids: new ort.Tensor('int64', ids, [1, MAX_TOKENS]) })
   return normalize(out.pooler_output.data)
 }
 
@@ -209,11 +236,19 @@ async function drain() {
   busy = true
   while (textJobs.length || imageJobs.length) {
     const job = textJobs.shift() ?? imageJobs.shift()
+    // stage: 'decode' (this picture can't be read) or 'run' (the model failed, even on the CPU)
+    let input = null
     try {
-      const vec = job.type === 'text' ? await embedText(job.text) : await embedImage(await job.input)
+      if (job.type !== 'text') input = await job.input
+    } catch (err) {
+      port.postMessage({ type: 'result', seq: job.seq, ok: false, stage: 'decode', error: String(err?.message || err) })
+      continue
+    }
+    try {
+      const vec = job.type === 'text' ? await embedText(job.text) : await embedImage(input)
       port.postMessage({ type: 'result', seq: job.seq, ok: true, vec })
     } catch (err) {
-      port.postMessage({ type: 'result', seq: job.seq, ok: false, error: String(err?.message || err) })
+      port.postMessage({ type: 'result', seq: job.seq, ok: false, stage: 'run', error: String(err?.message || err) })
     }
   }
   busy = false

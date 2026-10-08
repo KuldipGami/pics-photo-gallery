@@ -10,7 +10,7 @@ export function MemoryCards({ memories, byId, onOpen }: { memories: Memory[]; by
   return (
     <div className="memory-row">
       {memories.map((m) => (
-        <button key={m.year} className="memory-card" onClick={() => onOpen(m)} title={formatLongDate(m.date)}>
+        <button key={m.label} className="memory-card" onClick={() => onOpen(m)} title={formatLongDate(m.date)}>
           <CoverImage item={byId.get(m.cover)} fallback={<Sparkles size={28} />} />
           <span className="memory-shade" />
           <span className="memory-text">

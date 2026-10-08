@@ -1,8 +1,7 @@
-const fsp = require('node:fs/promises')
-const path = require('node:path')
 const { EventEmitter } = require('node:events')
 const { isJpeg, validGps } = require('./jpeg-exif.cjs')
 const edits = require('./edits.cjs')
+const { writeAtomic, writeAtomicSync, serial, readJson } = require('./safe-file.cjs')
 
 /**
  * Locations the user gave to photos and videos whose files can't take one without being re-saved
@@ -26,36 +25,91 @@ class Locations extends EventEmitter {
     this.version = 0
     this.cache = null
     this.timer = null
+    // Saving (safe-file.cjs): one save at a time, each to a temp file of its own renamed over
+    // locations.json. A damaged file is kept aside; one that can't be read yet (locked) isn't saved
+    // over until it can be read and merged.
+    this.loadError = null
+    this.dirty = false
+    this.writing = 0
+    this.queue = serial(() => this.write())
+  }
+
+  /** Adds the records of a locations.json (those this session hasn't set itself). Returns how many. */
+  merge(data) {
+    let n = 0
+    if (data?.version !== 1 || !Array.isArray(data.items)) return n
+    for (const e of data.items) {
+      const gps = validGps(e)
+      if (!gps || typeof e.path !== 'string' || this.map.has(keyOf(e.path))) continue
+      this.map.set(keyOf(e.path), { path: e.path, ...gps, at: Number(e.at) || 0 })
+      n++
+    }
+    this.version++
+    return n
   }
 
   async load() {
-    try {
-      const data = JSON.parse(await fsp.readFile(this.file, 'utf8'))
-      if (data.version === 1 && Array.isArray(data.items)) {
-        for (const e of data.items) {
-          const gps = validGps(e)
-          if (gps && typeof e.path === 'string') this.map.set(keyOf(e.path), { path: e.path, ...gps, at: Number(e.at) || 0 })
-        }
-        this.version++
-      }
-    } catch {}
-  }
-
-  async save() {
-    clearTimeout(this.timer)
-    this.timer = null
-    try {
-      await fsp.mkdir(path.dirname(this.file), { recursive: true })
-      const tmp = `${this.file}.tmp`
-      await fsp.writeFile(tmp, JSON.stringify({ version: 1, items: [...this.map.values()] }))
-      await fsp.rename(tmp, this.file)
-    } catch (err) {
-      console.error('Failed to save locations', err)
+    const res = await readJson(this.file)
+    if (res.data) this.merge(res.data)
+    else if (res.corrupt) console.error(`locations.json was damaged; kept as ${res.keptAs ?? '(could not move it)'}`)
+    else if (res.error) {
+      this.loadError = res.error
+      console.error("Couldn't read locations.json; it will be read again before saving", res.error)
     }
   }
 
+  async write() {
+    if (this.loadError) {
+      const res = await readJson(this.file)
+      if (res.error) return
+      this.loadError = null
+      if (res.data && this.merge(res.data)) this.emit('changed')
+    }
+    this.dirty = false
+    this.writing++
+    try {
+      await writeAtomic(this.file, this.serialize())
+    } finally {
+      this.writing--
+    }
+  }
+
+  serialize() {
+    return JSON.stringify({ version: 1, items: [...this.map.values()] })
+  }
+
+  /** Saves after the current save (if any); resolves once the newest locations are written. */
+  save() {
+    clearTimeout(this.timer)
+    this.timer = null
+    this.dirty = true
+    return this.queue().catch((err) => console.error('Failed to save locations', err))
+  }
+
   saveSoon() {
+    this.dirty = true
     if (!this.timer) this.timer = setTimeout(() => this.save(), 500)
+  }
+
+  /** At quit: saves what's waiting and resolves when it's written. */
+  flush() {
+    return this.dirty || this.writing ? this.save() : Promise.resolve()
+  }
+
+  /**
+   * At quit, after flush() was awaited: writes what's still unsaved, at once (a location set just
+   * before quitting isn't lost). Does nothing while a save is writing.
+   */
+  saveNow() {
+    clearTimeout(this.timer)
+    this.timer = null
+    if (!this.dirty || this.writing || this.loadError) return
+    this.dirty = false
+    try {
+      writeAtomicSync(this.file, this.serialize())
+    } catch (err) {
+      console.error('Failed to save locations', err)
+    }
   }
 
   changed() {
@@ -139,9 +193,10 @@ class Locations extends EventEmitter {
     for (const f of files ?? []) {
       if (!f?.from) continue
       if (f.to) {
-        // a JPEG backup (edits.restoreBackups put the file back)
+        // a JPEG backup (edits.restoreBackups put the file back; under a new name, `restoredAs`,
+        // when another photo has its place now: that one keeps whatever it has)
         if (f.restored && f.prevStored) {
-          this.set(f.from, f.prevStored, { silent: true })
+          this.set(typeof f.restoredAs === 'string' && f.restoredAs ? f.restoredAs : f.from, f.prevStored, { silent: true })
           f.prevStored = null
           n++
         }

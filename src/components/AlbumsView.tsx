@@ -141,7 +141,8 @@ export function AlbumPicker({
     () => [...albums].filter((a) => !a.query && (!q || fold(a.name).includes(q))).sort((a, b) => b.updated - a.updated),
     [albums, q],
   )
-  const exact = list.some((a) => fold(a.name) === q)
+  const exactAlbum = q ? list.find((a) => fold(a.name) === q) : undefined
+  const exact = !!exactAlbum
 
   useEffect(() => inputRef.current?.focus(), [])
   useDialogKeys((e) => {
@@ -170,8 +171,9 @@ export function AlbumPicker({
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key !== 'Enter') return
-              if (list.length === 1 && q) onPick(list[0])
-              else if (query.trim() && !exact) onCreate(query.trim())
+              // an existing album only when its name is typed in full; otherwise the new album the top row offers
+              if (exactAlbum) onPick(exactAlbum)
+              else if (query.trim()) onCreate(query.trim())
             }}
           />
         </div>

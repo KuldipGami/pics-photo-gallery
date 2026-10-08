@@ -58,9 +58,11 @@ interface Props {
   onAddFolder(): void
   onToast(text: string): void
   onConfirm(options: ConfirmOptions): void
+  /** Library folders the last scan couldn't read (drive not connected…). */
+  unreachable?: string[]
 }
 
-export function SettingsView({ settings, items, version, people, peopleProgress, smartProgress, onAddFolder, onToast, onConfirm }: Props) {
+export function SettingsView({ settings, items, version, people, peopleProgress, smartProgress, onAddFolder, onToast, onConfirm, unreachable }: Props) {
   const engine = peopleProgress.engine
   const smartEngine = smartProgress.engine
   const [cache, setCache] = useState<{ bytes: number; files: number } | null>(null)
@@ -81,6 +83,9 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
     }
     return counts
   }, [items, settings.folders])
+
+  const folderKey = (f: string) => f.toLowerCase().replace(/[\\/]+$/, '')
+  const offline = useMemo(() => new Set((unreachable ?? []).map(folderKey)), [unreachable])
 
   const themes: [Theme, string, ReactNode][] = [
     ['system', 'System', <Monitor size={16} />],
@@ -113,7 +118,10 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
                 <FolderOpen size={18} />
                 <div className="folder-row-text">
                   <div className="folder-row-path">{f}</div>
-                  <div className="folder-row-count">{formatCount(perFolder.get(f) ?? 0)} items</div>
+                  <div className="folder-row-count">
+                    {formatCount(perFolder.get(f) ?? 0)} items
+                    {offline.has(folderKey(f)) && <span className="folder-row-warn"> · Not connected — its photos are kept</span>}
+                  </div>
                 </div>
                 <button className="icon-btn" title="Open in Explorer" onClick={() => api.revealFolder(f)}>
                   <FolderOpen size={16} />

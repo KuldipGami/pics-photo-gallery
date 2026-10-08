@@ -26,20 +26,22 @@ interface Props {
   onDragItems?(ids: string[]): void
   /** Live Photos: photo id → its motion clip. */
   live?: Map<string, MediaItem>
+  /** False for lists that aren't in date order (Find similar): no day headers. */
+  grouped?: boolean
 }
 
 const OVERSCAN = 800
 const FLING_PX_PER_MS = 2.5
 
 export function Gallery(props: Props) {
-  const { items, dateField, thumbSize, favorites, selection } = props
+  const { items, dateField, thumbSize, favorites, selection, grouped = true } = props
   const scrollRef = useRef<HTMLDivElement>(null)
   const { width, height } = useElementSize(scrollRef)
   const [scrollTop, setScrollTop] = useState(0)
 
   const layout = useMemo(
-    () => buildLayout(items, dateField, Math.max(0, width - PAD_LEFT - PAD_RIGHT), thumbSize),
-    [items, dateField, width, thumbSize],
+    () => buildLayout(items, dateField, Math.max(0, width - PAD_LEFT - PAD_RIGHT), thumbSize, grouped),
+    [items, dateField, width, thumbSize, grouped],
   )
   const layoutRef = useRef(layout)
   layoutRef.current = layout
@@ -164,7 +166,7 @@ export function Gallery(props: Props) {
     return true
   }
 
-  const showScrubber = layout.total > height * 2.5
+  const showScrubber = layout.total > height * 2.5 && layout.headers.length > 0
 
   return (
     <div className="gallery">

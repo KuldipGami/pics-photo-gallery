@@ -217,6 +217,8 @@ export interface HistoryEntry {
   destination?: string
   /** Imported: where from. */
   source?: { id: string; name: string; kind: string }
+  /** Imported: how many of the originals were removed from the card/source after copying (undoing keeps those files). */
+  removedOriginals?: number
   note?: string
   files: HistoryFile[]
   dateChanges?: { path: string; oldMtime: number; restored?: boolean }[]
@@ -311,6 +313,8 @@ export interface GpuInfo {
 export interface ScanStatus {
   scanning: boolean
   found: number
+  /** Library folders that couldn't be read in the last scan (drive not connected…); their photos are kept. */
+  unreachable?: string[]
 }
 
 /** Background thumbnail pre-generation. */

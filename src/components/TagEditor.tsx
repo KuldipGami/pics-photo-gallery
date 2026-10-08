@@ -40,7 +40,8 @@ type Option = { kind: 'tag'; tag: string; count: number } | { kind: 'new'; tag: 
 export function TagEditor({ values, suggestions, onAdd, onRemove, dark = false, placeholder, autoFocus, inputRef, className = '' }: Props) {
   const [text, setText] = useState('')
   const [open, setOpen] = useState(false)
-  const [active, setActive] = useState(0)
+  /** The highlighted option once moved with the arrow keys (or the mouse); null = the typed text. */
+  const [active, setActive] = useState<number | null>(null)
   const [armed, setArmed] = useState<string | null>(null) // Backspace once arms the last chip, twice removes it
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null)
   const box = useRef<HTMLDivElement>(null)
@@ -72,22 +73,30 @@ export function TagEditor({ values, suggestions, onAdd, onRemove, dark = false, 
     const q = fold(clean(text))
     const free = suggestions.filter((s) => !onAll.has(s.tag.toLowerCase()))
     if (!q) return free.slice(0, MAX_OPTIONS).map((s) => ({ kind: 'tag', ...s }))
+    const exact: TagCount[] = []
     const starts: TagCount[] = []
     const contains: TagCount[] = []
     for (const s of free) {
       const f = fold(s.tag)
-      if (f.startsWith(q) || f.split(/\s+/).some((w) => w.startsWith(q))) starts.push(s)
-      else if (f.includes(q)) contains.push(s)
-      if (starts.length >= MAX_OPTIONS) break
+      if (f === q) exact.push(s)
+      else if (f.startsWith(q) || f.split(/\s+/).some((w) => w.startsWith(q))) {
+        if (starts.length < MAX_OPTIONS) starts.push(s)
+      } else if (f.includes(q)) contains.push(s)
+      if (exact.length && starts.length >= MAX_OPTIONS) break
     }
-    const list: Option[] = [...starts, ...contains].slice(0, MAX_OPTIONS).map((s) => ({ kind: 'tag', ...s }))
+    // the tag spelled as typed comes first ("Trip" before "Goa trip")
+    const list: Option[] = [...exact, ...starts, ...contains].slice(0, MAX_OPTIONS).map((s) => ({ kind: 'tag', ...s }))
     const typed = clean(text)
     if (!spelling.has(typed.toLowerCase()) && !onAll.has(typed.toLowerCase())) list.push({ kind: 'new', tag: typed })
     return list
   }, [text, suggestions, onAll, spelling])
 
-  useEffect(() => setActive(0), [text])
+  useEffect(() => setActive(null), [text])
   const showMenu = open && options.length > 0
+  // Until the highlight is moved, Enter adds what was typed: the tag spelled that way, else a new one.
+  const typed = fold(clean(text))
+  const typedIndex = typed ? options.findIndex((o) => o.kind === 'new' || fold(o.tag) === typed) : -1
+  const current = active !== null && active < options.length ? active : typedIndex
 
   useLayoutEffect(() => {
     if (!showMenu || !box.current) return setPos(null)
@@ -137,9 +146,9 @@ export function TagEditor({ values, suggestions, onAdd, onRemove, dark = false, 
       e.preventDefault()
       if (!open) return setOpen(true)
       const n = options.length
-      if (n) setActive((a) => (a + (e.key === 'ArrowDown' ? 1 : n - 1)) % n)
+      if (n) setActive(current < 0 ? (e.key === 'ArrowDown' ? 0 : n - 1) : (current + (e.key === 'ArrowDown' ? 1 : n - 1)) % n)
     } else if (e.key === 'Enter' || (e.key === 'Tab' && showMenu && text.trim())) {
-      const pick = showMenu ? options[active] : null
+      const pick = showMenu && current >= 0 ? options[current] : null
       if (!pick && !text.trim()) return
       e.preventDefault()
       commit([pick ? pick.tag : text])
@@ -256,9 +265,9 @@ export function TagEditor({ values, suggestions, onAdd, onRemove, dark = false, 
                 key={`${o.kind}:${o.tag}`}
                 type="button"
                 role="option"
-                aria-selected={i === active}
-                className={`tag-option${i === active ? ' active' : ''}`}
-                onMouseEnter={() => setActive(i)}
+                aria-selected={i === current}
+                className={`tag-option${i === current ? ' active' : ''}`}
+                onMouseMove={() => i !== current && setActive(i)}
                 onClick={() => commit([o.tag])}
               >
                 {o.kind === 'new' ? <Plus size={14} /> : <Tag size={14} />}

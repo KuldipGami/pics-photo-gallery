@@ -326,14 +326,15 @@ export function MapView(props: MapViewProps) {
     })
     setMapReady((n) => n + 1)
 
-    const known = markers.current
     return () => {
       clearTimeout(viewTimer)
       map.remove()
       mapRef.current = null
       groupRef.current = null
       popupRef.current = null
-      known.clear()
+      // the pins went with the map: forget them (markers.current is replaced on every update, so
+      // the Map from when the map was made would be the wrong one to clear)
+      markers.current = new Map()
       fitted.current = undefined
     }
     // created once; later prop changes are read through refs

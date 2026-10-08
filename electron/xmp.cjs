@@ -1,7 +1,7 @@
 const fsp = require('node:fs/promises')
 const path = require('node:path')
 const crypto = require('node:crypto')
-const { replaceWithTemp } = require('./jpeg-exif.cjs')
+const { replaceFile } = require('./jpeg-exif.cjs')
 
 // Star ratings and tags (keywords) inside JPEG photos, written the way Windows File Explorer writes
 // them so Explorer, Lightroom, digiKam… all see the same values. Lossless: only header segments
@@ -950,21 +950,8 @@ async function readJpegFile(file) {
   }
 }
 
-/** Writes bytes to "<file>.lumen-tags.tmp" and swaps it in (retrying while another program has it open). */
-async function replaceFile(file, bytes) {
-  const temp = `${file}.lumen-tags.tmp`
-  const fh = await fsp.open(temp, 'w')
-  try {
-    await fh.writeFile(bytes)
-    await fh.sync()
-  } catch (err) {
-    await fh.close().catch(() => {})
-    await fsp.unlink(temp).catch(() => {})
-    throw err
-  }
-  await fh.close()
-  await replaceWithTemp(temp, file)
-}
+// Rewritten JPEGs are swapped in by jpeg-exif.cjs' replaceFile: a temp file and an old copy of
+// their own per swap, listed in the swap journal until done, and read-only files are refused.
 
 /**
  * Saves the rating and/or tags inside a JPEG (lossless, atomic, keeps the file's modified date

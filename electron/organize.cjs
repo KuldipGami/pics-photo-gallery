@@ -2,7 +2,7 @@ const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const path = require('node:path')
 const { fromFileName } = require('./datetools.cjs')
-const { uniquePath, moveFile, setFileDate, restoreMoves } = require('./cleanup.cjs')
+const { uniquePath, moveFile, transferFiles, sidecarFinder, setFileDate, restoreMoves } = require('./cleanup.cjs')
 
 /**
  * Organize (ported from DupeLens' OrganizeService + the Organize tab's fixes): fix file dates from
@@ -102,6 +102,33 @@ function bestDateInfo(item) {
 }
 
 const bestDate = (item) => bestDateInfo(item).date
+
+// ── Live Photos ────────────────────────────────────────────────────────────
+
+// The same rule as src/lib/live.ts pairLivePhotos: a still and a short clip side by side, same name.
+const LIVE_STILLS = new Set(['heic', 'heif', 'jpg', 'jpeg'])
+const LIVE_CLIPS = new Set(['mov', 'mp4'])
+const LIVE_MAX_SECONDS = 6
+const LIVE_MAX_BYTES = 12 * 1024 * 1024
+const liveKey = (it) => `${it.dir}|${it.name.replace(/\.[^.]+$/, '')}`.toLowerCase()
+
+/** Live Photo pairs among `items`: Map(clip → its still), so Organize keeps them together. */
+function livePairs(items) {
+  const stills = new Map()
+  for (const it of items) if (it.type === 'image' && LIVE_STILLS.has(it.ext)) stills.set(liveKey(it), it)
+  const stillOf = new Map()
+  const paired = new Set()
+  for (const it of items) {
+    if (it.type !== 'video' || !LIVE_CLIPS.has(it.ext)) continue
+    const short = it.duration ? it.duration <= LIVE_MAX_SECONDS : it.size <= LIVE_MAX_BYTES
+    if (!short) continue
+    const still = stills.get(liveKey(it))
+    if (!still || paired.has(still)) continue
+    paired.add(still)
+    stillOf.set(it, still)
+  }
+  return stillOf
+}
 
 const startOfDay = (ms) => {
   const d = new Date(ms)
@@ -226,13 +253,18 @@ function folderFor(root, date, pattern, locale) {
   return path.join(root, ...parts)
 }
 
-/** Planned moves [{ item, to }] into dated folders under `root`; files already in place are left out. */
+/**
+ * Planned moves [{ item, to, liveOf? }] into dated folders under `root`; files already in place are
+ * left out. A Live Photo's clip goes where its still goes (`liveOf`: the still), whatever its own date.
+ */
 function planFolders(items, root, pattern, { locale } = {}) {
   const plan = []
   if (!root) return plan
+  const stillOf = livePairs(items)
   const folders = new Map() // formatted date → [absolute folder, its lower-case form]
   for (const item of items) {
-    const date = bestDate(item)
+    const still = stillOf.get(item)
+    const date = bestDate(still ?? item)
     const key = formatDate(date, pattern, locale)
     let folder = folders.get(key)
     if (!folder) {
@@ -241,7 +273,7 @@ function planFolders(items, root, pattern, { locale } = {}) {
       folders.set(key, folder)
     }
     if (trimSep(item.dir).toLowerCase() === folder[1]) continue // already in place
-    plan.push({ item, to: joinName(folder[0], item.name) })
+    plan.push(still ? { item, to: joinName(folder[0], item.name), liveOf: still } : { item, to: joinName(folder[0], item.name) })
   }
   return plan
 }
@@ -284,17 +316,22 @@ function dirLister() {
 }
 
 /**
- * Planned renames [{ item, to }]. Files are named from their best date; when only the day is known
- * (e.g. WhatsApp) the original counter is kept instead of inventing a time. Clashes with existing
- * files or other planned names get " (2)", " (3)"…
+ * Planned renames [{ item, to, liveOf? }]. Files are named from their best date; when only the day
+ * is known (e.g. WhatsApp) the original counter is kept instead of inventing a time. Clashes with
+ * existing files or other planned names get " (2)", " (3)"… A Live Photo's clip gets its still's new
+ * name (with its own extension and the same " (n)"; `liveOf`: the still), and is left as it is
+ * when the still is.
  */
 function planRenames(items, pattern, deviceNamesOnly, { exists: fileExists = dirLister() } = {}) {
   const plan = []
   const taken = new Set()
   const withName = pattern.includes('{name}')
   const compact = pattern.startsWith('yyyyMMdd')
+  const stillOf = livePairs(items)
+  const clipOf = new Map([...stillOf].map(([clip, still]) => [still, clip]))
   const dated = items.map((item) => ({ item, info: bestDateInfo(item) })).sort((a, b) => a.info.date - b.info.date)
   for (const { item, info } of dated) {
+    if (stillOf.has(item)) continue // a Live Photo's clip is renamed with its still
     const ext = path.extname(item.name)
     const stem = path.basename(item.name, ext)
     if (deviceNamesOnly && !isDeviceName(item.name)) continue
@@ -313,13 +350,22 @@ function planRenames(items, pattern, deviceNamesOnly, { exists: fileExists = dir
     if (newStem.toLowerCase() === stem.toLowerCase()) continue
     if (withName && stem.startsWith(formatDate(date, 'yyyy-MM-dd'))) continue
 
-    const newExt = item.ext ? `.${item.ext}` : ext.toLowerCase()
-    let candidate = joinName(item.dir, newStem + newExt)
-    const self = item.path.toLowerCase()
-    for (let n = 2; taken.has(candidate.toLowerCase()) || (candidate.toLowerCase() !== self && fileExists(candidate)); n++)
-      candidate = joinName(item.dir, `${newStem} (${n})${newExt}`)
+    const extOf = (it) => (it.ext ? `.${it.ext}` : path.extname(it.name).toLowerCase())
+    const nameAt = (n, newExt) => joinName(item.dir, n === 1 ? newStem + newExt : `${newStem} (${n})${newExt}`)
+    // free: not planned for another file, and not on disk (unless it's the file's own name)
+    const free = (p, own) => !taken.has(p.toLowerCase()) && (p.toLowerCase() === own.path.toLowerCase() || !fileExists(p))
+    const clip = clipOf.get(item)
+    let n = 1
+    while (!free(nameAt(n, extOf(item)), item) || (clip && !free(nameAt(n, extOf(clip)), clip))) n++
+    const candidate = nameAt(n, extOf(item))
+    const clipTo = clip ? nameAt(n, extOf(clip)) : null
     taken.add(candidate.toLowerCase())
+    if (clipTo) taken.add(clipTo.toLowerCase())
+    // Already named that (e.g. "<date> (2)" next to "<date>"): renaming it to itself would make it
+    // "<date> (2) (2)", then back again, on every run.
+    if (candidate.toLowerCase() === item.path.toLowerCase()) continue
     plan.push({ item, to: candidate })
+    if (clipTo && clipTo.toLowerCase() !== clip.path.toLowerCase()) plan.push({ item: clip, to: clipTo, liveOf: item })
   }
   return plan
 }
@@ -327,26 +373,45 @@ function planRenames(items, pattern, deviceNamesOnly, { exists: fileExists = dir
 // ── Carry out a plan ───────────────────────────────────────────────────────
 
 /**
- * Moves (or copies) files to their planned paths, never overwriting anything.
- * Resolves to { files: [{ id, from, to, size }], errors: ["name: reason"] }.
+ * Moves (or copies) files to their planned paths, never overwriting anything; an XMP sidecar
+ * ("IMG_1.xmp" / "IMG_1.HEIC.xmp") goes along and is renamed to match, and a Live Photo's clip
+ * (a move with `liveOf`) goes in the same step as its still, so both get the same " (n)" when the
+ * name is taken. `signal` (AbortSignal) stops before the next file; what was done by then is
+ * returned as usual.
+ * Resolves to { files: [{ id, from, to, size, sidecar?: { from, to } }], errors: ["name: reason"] }
+ * (a file that moved but whose sidecar couldn't is in `files`, with a note in `errors`).
  */
-async function executePlan(moves, { copy = false } = {}) {
+async function executePlan(moves, { copy = false, signal } = {}) {
   const files = []
   const errors = []
-  for (const { item, to } of moves) {
+  const sidecars = sidecarFinder()
+  // A Live Photo's clip (`liveOf`) moves in the same step as its still, with the same " (n)".
+  const planned = new Set(moves.map((m) => m.item))
+  const clipMove = new Map() // still → its clip's move
+  for (const m of moves) if (m.liveOf && planned.has(m.liveOf) && !clipMove.has(m.liveOf)) clipMove.set(m.liveOf, m)
+  const record = (item, res) => {
+    const rec = { id: item.id, from: item.path, to: res.to, size: item.size }
+    if (res.sidecar) rec.sidecar = res.sidecar
+    if (res.note) errors.push(res.note)
+    files.push(rec)
+  }
+  for (const m of moves) {
+    if (signal?.aborted) break
+    if (m.liveOf && clipMove.get(m.liveOf) === m) continue // goes with its still
+    const { item, to } = m
+    const clip = clipMove.get(item)
     try {
       await fsp.mkdir(path.dirname(to), { recursive: true })
-      const target = uniquePath(to)
-      if (copy) {
-        await fsp.copyFile(item.path, target, fs.constants.COPYFILE_EXCL)
-        const st = await fsp.stat(item.path)
-        await fsp.utimes(target, st.atime, st.mtime)
-      } else {
-        await moveFile(item.path, target)
-      }
-      files.push({ id: item.id, from: item.path, to: target, size: item.size })
+      if (clip) await fsp.mkdir(path.dirname(clip.to), { recursive: true })
+      const list = [{ from: item.path, wanted: to }]
+      if (clip) list.push({ from: clip.item.path, wanted: clip.to })
+      const [res, clipRes] = await transferFiles(list, { copy, sidecars })
+      record(item, res)
+      if (clipRes?.error) errors.push(`${clip.item.name}: ${clipRes.error.message} (its photo ${item.name} was done without it)`)
+      else if (clipRes) record(clip.item, clipRes)
     } catch (err) {
       errors.push(`${item.name}: ${err.message}`)
+      if (clip) errors.push(`${clip.item.name}: left with its photo ${item.name}`)
     }
   }
   return { files, errors }
@@ -424,14 +489,36 @@ function originalTarget(item, originalsDir, roots) {
 }
 
 /**
+ * The HEIC's own picture size ({ width, height }) from its header (workers.cjs' heifSize), else from
+ * its EXIF; null when neither can tell.
+ */
+async function heicSize(file) {
+  try {
+    const size = await require('./workers.cjs').heifSize(file)
+    if (size?.width && size?.height) return size
+  } catch {}
+  try {
+    const d = await require('exifr').parse(file, { tiff: true, exif: true, gps: false, xmp: false, icc: false, iptc: false, ifd1: false })
+    const width = d?.ExifImageWidth ?? d?.ImageWidth
+    const height = d?.ExifImageHeight ?? d?.ImageHeight
+    if (width > 0 && height > 0) return { width, height }
+  } catch {}
+  return null
+}
+
+/**
  * Converts one HEIC photo to a JPG next to it (same name, .jpg; " (2)" if taken). `source` is the
  * full-size picture: a file path sharp can read or a JPEG/PNG buffer (thumbs.source(item) — Windows
  * renders HEIC). The JPG is upright, keeps the date taken, camera, exposure and place, and gets the
  * original's file dates. With `originalsDir`, the HEIC then moves there, keeping its folder
  * structure relative to its library folder (`roots`).
  *
- * Resolves to { file: { from, to, size }, moved: { from, to, size } | null, moveError: string | null }.
- * Throws when the JPG can't be made (nothing changed then).
+ * Windows renders at most 8192 px, so a bigger HEIC (a panorama) gives a smaller JPG; when the JPG
+ * is smaller than the HEIC (or its size can't be checked), the HEIC stays where it is and
+ * `keptOriginal` says why — callers must not move or delete it then.
+ *
+ * Resolves to { file: { from, to, size }, moved: { from, to, size } | null, moveError: string | null,
+ * keptOriginal: string | null }. Throws when the JPG can't be made (nothing changed then).
  */
 async function convertHeicToJpeg(item, source, { quality = DEFAULTS.jpegQuality, originalsDir = null, roots = [] } = {}) {
   if (!source) throw new Error("This photo can't be opened")
@@ -441,8 +528,9 @@ async function convertHeicToJpeg(item, source, { quality = DEFAULTS.jpegQuality,
   const target = claim(path.join(item.dir, `${path.basename(item.name, ext)}.jpg`))
   const temp = `${target}.lumen.tmp`
   let file
+  let made
   try {
-    await sharp(source, { failOn: 'none' })
+    made = await sharp(source, { failOn: 'none' })
       .rotate() // upright pixels (EXIF orientation, if the source has one)
       .keepIccProfile()
       .withExif(exifFor(item))
@@ -459,41 +547,121 @@ async function convertHeicToJpeg(item, source, { quality = DEFAULTS.jpegQuality,
     claimed.delete(target.toLowerCase())
   }
 
-  if (!originalsDir) return { file, moved: null, moveError: null }
+  // Is the JPG the whole picture? (long sides compared, so either orientation of the sizes works)
+  const real = await heicSize(item.path)
+  const jpgLong = Math.max(made?.width || 0, made?.height || 0)
+  let keptOriginal = null
+  if (!real) keptOriginal = `${item.name}: converted, but the HEIC was kept where it is (Lumen couldn't check that the JPG has its full size)`
+  else if (jpgLong + 1 < Math.max(real.width, real.height))
+    keptOriginal = `${item.name}: the JPG is smaller (${made.width} × ${made.height}) than the HEIC (${real.width} × ${real.height}), so the HEIC was kept where it is`
+  if (keptOriginal) return { file, moved: null, moveError: null, keptOriginal }
+
+  if (!originalsDir) return { file, moved: null, moveError: null, keptOriginal: null }
   let to = null
   try {
     const wanted = originalTarget(item, originalsDir, roots)
     await fsp.mkdir(path.dirname(wanted), { recursive: true })
     to = claim(wanted)
     await moveFile(item.path, to)
-    return { file, moved: { from: item.path, to, size: item.size }, moveError: null }
+    return { file, moved: { from: item.path, to, size: item.size }, moveError: null, keptOriginal: null }
   } catch (err) {
-    return { file, moved: null, moveError: `${item.name} was converted but not moved: ${err.message}` }
+    return { file, moved: null, moveError: `${item.name} was converted but not moved: ${err.message}`, keptOriginal: null }
   } finally {
     if (to) claimed.delete(to.toLowerCase())
   }
 }
 
+const near = (a, b, ms = 2000) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= ms
+
+/**
+ * A JPG next to the HEIC with its name that is the same photo (same date taken; without dates, the
+ * same file date — a converted JPG gets the HEIC's): it was converted before (e.g. with "Keep next
+ * to the JPGs"). `jpgs`: { taken, mtime } of such JPGs.
+ */
+const sameShot = (heic, jpgs) =>
+  jpgs.some((j) => (Number.isFinite(heic.taken) && Number.isFinite(j.taken) ? near(heic.taken, j.taken) : near(heic.mtime, j.mtime)))
+
+/** "IMG_1 (2).jpg" → "img_1": the name a JPG had before " (2)" was added to make it free. */
+const baseStem = (name) => path.basename(name, path.extname(name)).replace(/ \(\d+\)$/, '').toLowerCase()
+const isJpgName = (name) => /\.jpe?g$/i.test(name)
+
+/** A folder's JPGs by lower-case name stem, each also under its stem without " (2)": Map(stem → [names]). */
+async function jpgIndex(dir) {
+  const index = new Map()
+  for (const name of await fsp.readdir(dir).catch(() => [])) {
+    if (!isJpgName(name)) continue
+    for (const stem of new Set([path.basename(name, path.extname(name)).toLowerCase(), baseStem(name)])) {
+      let list = index.get(stem)
+      if (!list) index.set(stem, (list = []))
+      list.push(name)
+    }
+  }
+  return index
+}
+
+/**
+ * Has this HEIC been converted already (a matching JPG — "IMG_1.jpg", or "IMG_1 (2).jpg" when the
+ * name was taken — sits next to it on disk)? `indexOf(dir)` → jpgIndex(dir), read once per run.
+ */
+async function convertedBefore(item, indexOf) {
+  const stem = path.basename(item.name, path.extname(item.name)).toLowerCase()
+  const jpgs = []
+  for (const name of (await indexOf(item.dir)).get(stem) ?? []) {
+    const p = joinName(item.dir, name)
+    let st
+    try {
+      st = await fsp.stat(p)
+    } catch {
+      continue
+    }
+    let taken = null
+    if (Number.isFinite(item.taken)) {
+      try {
+        const d = await require('exifr').parse(p, { pick: ['DateTimeOriginal', 'CreateDate'] })
+        const t = d?.DateTimeOriginal ?? d?.CreateDate
+        if (t instanceof Date && Number.isFinite(t.getTime())) taken = t.getTime()
+      } catch {}
+    }
+    jpgs.push({ taken, mtime: st.mtimeMs })
+  }
+  return jpgs.length > 0 && sameShot(item, jpgs)
+}
+
 /**
  * Converts many HEIC photos. `getSource(item)` resolves to the full-size picture (thumbs.source).
- * Resolves to { files, movedOriginals, errors, entry } where `entry` is the History entry to add
- * (null when nothing was converted).
+ * HEICs that already have their JPG next to them are skipped. `signal` (AbortSignal) stops before
+ * the next photo; what was converted by then is returned as usual.
+ * Resolves to { files, movedOriginals, errors, skipped, entry } where `entry` is the History entry to
+ * add (null when nothing was converted).
  */
-async function convertHeicFiles(items, getSource, { quality, originalsDir = null, roots = [], concurrency = 4, onProgress } = {}) {
+async function convertHeicFiles(items, getSource, { quality, originalsDir = null, roots = [], concurrency = 4, onProgress, signal } = {}) {
   const files = []
   const movedOriginals = []
   const errors = []
+  let skipped = 0
   let next = 0
   let started = 0
+  // each folder's JPGs, listed once
+  const indexes = new Map()
+  const indexOf = (dir) => {
+    const key = dir.toLowerCase()
+    if (!indexes.has(key)) indexes.set(key, jpgIndex(dir))
+    return indexes.get(key)
+  }
   const worker = async () => {
-    while (next < items.length) {
+    while (next < items.length && !signal?.aborted) {
       const item = items[next++]
       onProgress?.(++started, items.length)
       try {
+        if (await convertedBefore(item, indexOf)) {
+          skipped++
+          continue
+        }
         const res = await convertHeicToJpeg(item, await getSource(item), { quality, originalsDir, roots })
         files.push(res.file)
         if (res.moved) movedOriginals.push(res.moved)
         if (res.moveError) errors.push(res.moveError)
+        if (res.keptOriginal) errors.push(res.keptOriginal)
       } catch (err) {
         errors.push(`${item.name}: ${err?.message ?? err}`)
       }
@@ -503,7 +671,7 @@ async function convertHeicFiles(items, getSource, { quality, originalsDir = null
   const entry = files.length
     ? { kind: 'converted', destination: movedOriginals.length ? originalsDir : undefined, files, movedOriginals }
     : null
-  return { files, movedOriginals, errors, entry }
+  return { files, movedOriginals, errors, skipped, entry }
 }
 
 /**
@@ -543,7 +711,26 @@ function summarize(items, opts = {}) {
   const renames = planRenames(kept, o.renamePattern, o.deviceNamesOnly)
   const heic = items.filter(isHeic)
   const unreadable = o.isUnreadable ? heic.filter((it) => o.isUnreadable(it)).length : 0
-  const convertible = heic.filter((it) => !skip.has(it.id) && !(o.isUnreadable && o.isUnreadable(it)))
+  // JPGs by folder + name ("IMG_1 (2).jpg" also as IMG_1's), so HEICs converted before (their JPG
+  // kept next to them) aren't offered again
+  const jpgs = new Map()
+  if (heic.length) {
+    for (const it of items) {
+      if (it.ext !== 'jpg' && it.ext !== 'jpeg') continue
+      const dir = trimSep(it.dir).toLowerCase()
+      const own = path.basename(it.name, path.extname(it.name)).toLowerCase()
+      for (const stem of new Set([own, baseStem(it.name)])) {
+        let list = jpgs.get(`${dir}|${stem}`)
+        if (!list) jpgs.set(`${dir}|${stem}`, (list = []))
+        list.push(it)
+      }
+    }
+  }
+  const converted = (it) => {
+    const list = jpgs.get(`${trimSep(it.dir).toLowerCase()}|${path.basename(it.name, path.extname(it.name)).toLowerCase()}`)
+    return !!list && sameShot(it, list)
+  }
+  const convertible = heic.filter((it) => !skip.has(it.id) && !(o.isUnreadable && o.isUnreadable(it)) && !converted(it))
 
   return {
     dateFixes: {

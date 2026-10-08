@@ -1,7 +1,7 @@
 import { ChevronLeft, ChevronRight, Columns2, ExternalLink, FolderOpen, Maximize2, Minus, Plus, ShieldCheck, SplitSquareHorizontal, X } from 'lucide-react'
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { api, fullImageUrl, mediaUrl, thumbUrl } from '../api'
-import { kindText, matchText, needsReview, ruleMarks, type Facts } from '../lib/cleanup'
+import { isLastCopy, kindText, matchText, needsReview, ruleMarks, type Facts } from '../lib/cleanup'
 import { formatBytes, formatCount, formatDuration } from '../lib/format'
 import type { DupGroup, KeepRule, MediaItem } from '../types'
 import { SyncedVideos, type SyncedVideosHandle } from './SyncedVideos'
@@ -30,12 +30,20 @@ interface Props {
   keepRule: KeepRule
   isProtected(id: string): boolean
   setMarks(update: (prev: Set<string>) => Set<string>): void
+  /** A file's duplicate group (single files too can have copies elsewhere). */
+  groupOf?(id: string): DupGroup | undefined
+  /** The viewer is open on top ("View full screen"): its keys are its own. */
+  paused?: boolean
   onClose(): void
   onFullScreen(ids: string[], index: number): void
   onToast(text: string): void
 }
 
-export function CompareView({ source, byId, facts, marks, keepRule, isProtected, setMarks, onClose, onFullScreen, onToast }: Props) {
+/** Text boxes keep their keys; anything else (a slider, a select left focused behind) doesn't. */
+const isTextInput = (el: EventTarget | null) =>
+  el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button', 'submit', 'color'].includes(el.type))
+
+export function CompareView({ source, byId, facts, marks, keepRule, isProtected, setMarks, groupOf, paused, onClose, onFullScreen, onToast }: Props) {
   const [index, setIndex] = useState(source.index)
   const count = source.mode === 'groups' ? source.groups.length : source.items.length
   const group = source.mode === 'groups' ? source.groups[Math.min(index, count - 1)] : null
@@ -64,14 +72,26 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
   const leftIdx = refIdx
   const rightIdx = right ?? (focus !== leftIdx ? focus : ids.findIndex((_, i) => i !== leftIdx))
 
+  const present = (id: string) => byId.has(id)
+  /** False when it can't be selected (protected, or the last copy left). */
   const setMark = (id: string, value: boolean) => {
-    if (value && isProtected(id)) return onToast('Files in protected folders are always kept')
+    if (value && isProtected(id)) {
+      onToast('Files in protected folders are always kept')
+      return false
+    }
+    // never the last copy left unselected in its group (like the Select menu)
+    const g = group ?? groupOf?.(id)
+    if (value && g && isLastCopy(g, id, marks, present)) {
+      onToast(LAST_COPY)
+      return false
+    }
     setMarks((prev) => {
       const next = new Set(prev)
       if (value) next.add(id)
       else next.delete(id)
       return next
     })
+    return true
   }
   const keepOnly = (keep: string) =>
     setMarks((prev) => {
@@ -85,7 +105,7 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
     setMarks((prev) => {
       const next = new Set(prev)
       for (const id of group.ids) next.delete(id)
-      for (const id of ruleMarks(group, keepRule, isProtected)) next.add(id)
+      for (const id of ruleMarks(group, keepRule, isProtected, present)) next.add(id)
       return next
     })
   }
@@ -101,7 +121,7 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
   }, [focus])
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {})
   keyRef.current = (e: KeyboardEvent) => {
-    if (e.ctrlKey || e.altKey || e.metaKey || (e.target as HTMLElement)?.closest?.('input, select, textarea')) return
+    if (paused || e.ctrlKey || e.altKey || e.metaKey || isTextInput(e.target)) return
     const k = e.key
     const id = ids[focus]
     let handled = true
@@ -120,8 +140,7 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
     } else if (k === 'd' || k === 'D' || k === 'Delete') {
       if (!id) return
       const value = !marks.has(id)
-      setMark(id, value)
-      if (!group && value) next()
+      if (setMark(id, value) && !group && value) next()
     } else if ((k === 'a' || k === 'A') && group) applyRule()
     else if ((k === 's' || k === 'S') && ids.length >= 2) setSwipe((s) => !s)
     else if (k === 'f' || k === 'F' || k === '0') setView(FIT)
@@ -138,6 +157,14 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
     window.addEventListener('keydown', h, true)
     return () => window.removeEventListener('keydown', h, true)
   }, [])
+  // Focus moves in here, so a search box or select left focused behind doesn't keep the keys.
+  const rootRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = rootRef.current
+    if (el && !el.contains(document.activeElement)) el.focus({ preventScroll: true })
+  }, [])
+  /** Copies turned here: their button goes (the group's facts are from before the turn). */
+  const [turned, setTurned] = useState<Set<string>>(() => new Set())
 
   const items = ids.map((id) => byId.get(id)!).filter(Boolean)
   const nMarked = ids.filter((id) => marks.has(id)).length
@@ -242,13 +269,20 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
             </label>
           )}
           <div className="spacer" />
-          {group && turnToMatch(group, group.ids.indexOf(id), it) > 0 && (
+          {group && !turned.has(id) && turnToMatch(group, group.ids.indexOf(id), it) > 0 && (
             <button
               className="btn ghost"
               title="Turn this copy the same way as the best copy (lossless: only the orientation tag changes)"
               onClick={async () => {
                 const turns = turnToMatch(group, group.ids.indexOf(id), it)
+                setTurned((t) => new Set(t).add(id)) // one click, one turn
                 const res = await api.rotateLossless([id], turns)
+                if (!res.done)
+                  setTurned((t) => {
+                    const next = new Set(t)
+                    next.delete(id)
+                    return next
+                  })
                 onToast(res.done ? `Turned ${it.name}. Undo it from History if needed.` : `Couldn't turn ${it.name}: ${res.errors[0] ?? ''}`)
               }}
             >
@@ -272,7 +306,7 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
   }
 
   return (
-    <div className="compare" role="dialog" aria-label="Compare">
+    <div className="compare" role="dialog" aria-label="Compare" ref={rootRef} tabIndex={-1}>
       <div className="compare-head">
         <span className={`kind-pill${group?.exact ? ' exact' : group && needsReview(group) ? ' review' : ''}`}>
           {group ? kindText(group) : items[0]?.ext.toUpperCase()}
@@ -384,6 +418,8 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
     </div>
   )
 }
+
+const LAST_COPY = 'Every other copy is selected already, so this one is kept. Unselect another copy first to keep that one instead.'
 
 const JPEG = new Set(['jpg', 'jpeg', 'jpe', 'jfif'])
 /** Clockwise quarter turns that make a rotated JPEG copy match its group's best copy (0 = none). */

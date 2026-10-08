@@ -1,5 +1,5 @@
-import { FolderPlus } from 'lucide-react'
-import { useEffect, useRef, type ReactNode } from 'react'
+import { FolderPlus, TriangleAlert } from 'lucide-react'
+import { Component, useEffect, useRef, type ReactNode } from 'react'
 import type { Toast } from '../hooks'
 
 export interface ConfirmOptions {
@@ -16,26 +16,41 @@ export interface ConfirmOptions {
 
 export function ConfirmDialog({ options, onClose }: { options: ConfirmOptions; onClose(): void }) {
   const confirmRef = useRef<HTMLButtonElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  // The latest props, so the key listener isn't re-installed (and focus isn't moved) on every App render.
+  const latest = useRef({ options, onClose })
+  latest.current = { options, onClose }
 
+  // Focus the confirm button once, when the dialog opens.
   useEffect(() => {
     confirmRef.current?.focus()
+  }, [])
+
+  useEffect(() => {
     // Capture phase so the viewer / grid shortcuts don't also react.
     const onKey = (e: KeyboardEvent) => {
       e.stopPropagation()
+      const { options, onClose } = latest.current
+      const target = e.target as HTMLElement | null
+      const inside = !!target && !!dialogRef.current?.contains(target)
       if (e.key === 'Escape') onClose()
-      if (e.key === 'Enter') {
+      else if (e.key === 'Enter') {
+        // a held Enter (from whatever opened the dialog) answers nothing
+        if (e.repeat) return e.preventDefault()
+        // A focused button in the dialog (Cancel, "Change…") does its own thing
+        if (inside && target?.closest('button')) return
         e.preventDefault()
         options.onConfirm()
         onClose()
-      }
+      } else if (e.key === ' ' && !inside) e.preventDefault() // never a button behind the dialog
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [options, onClose])
+  }, [])
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} className="modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
         <h3>{options.title}</h3>
         <p>{options.message}</p>
         {options.extra}
@@ -102,6 +117,38 @@ export function EmptyState({
       {action}
     </div>
   )
+}
+
+/** A short message with Reload instead of a blank window, should the page hit an error it can't get past. */
+export class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  componentDidCatch(error: Error) {
+    console.error(error)
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children
+    return (
+      <div className="crash">
+        <div className="crash-drag" />
+        <EmptyState
+          icon={<TriangleAlert size={40} strokeWidth={1.5} />}
+          title="Something went wrong"
+          text="Lumen ran into a problem showing this page. Your photos and files are fine: reload to carry on."
+          action={
+            <button className="btn primary large" onClick={() => window.location.reload()}>
+              Reload
+            </button>
+          }
+        />
+      </div>
+    )
+  }
 }
 
 export function DropOverlay() {

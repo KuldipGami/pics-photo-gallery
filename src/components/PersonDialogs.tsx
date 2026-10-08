@@ -246,6 +246,8 @@ export function SuggestionsReview({
   useDialogKeys((e) => {
     const k = e.key.toLowerCase()
     if (e.ctrlKey || e.metaKey || e.altKey) return
+    // a held key repeats: only the first press answers (holding Y mustn't merge pairs you haven't seen)
+    if (e.repeat && k !== 'escape') return
     if (k === 'escape') onClose()
     else if (k === 'y') same()
     else if (k === 'n') different()

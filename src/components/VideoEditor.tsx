@@ -309,12 +309,12 @@ export function VideoEditor({ item, info, progress, onSave, onSaveFrame, onAbort
         e.preventDefault()
         if (confirmClose) setConfirmClose(false)
         else close()
-      } else if (mod && key.toLowerCase() === 's') {
+      } else if (mod && (key.toLowerCase() === 's' || key.toLowerCase() === 'z')) {
         e.preventDefault()
-        save()
-      } else if (mod && key.toLowerCase() === 'z') {
-        e.preventDefault()
-        reset()
+        // not while a copy or frame is being saved (the save uses what's set now), nor behind the question
+        if (busy || confirmClose) return
+        if (key.toLowerCase() === 's') save()
+        else reset()
       } else if (busy || confirmClose) {
         return
       } else if (key === ' ' || key === 'k') {

@@ -50,7 +50,8 @@ export function itemText(item: MediaItem) {
   return text
 }
 
-export const searchTokens = (query: string) => fold(query).split(/\s+/).filter(Boolean).slice(0, 8)
+/** Words split the same way as the known names, places and tags ("Goa, beach" = "goa" + "beach"). */
+export const searchTokens = (query: string) => fold(query).split(/[^\p{L}\p{N}]+/u).filter(Boolean).slice(0, 8)
 
 /** Bit i is set when token i appears in the item's text, its people's names or its place. */
 export function tokenMask(item: MediaItem, tokens: string[], names?: string, place?: string) {

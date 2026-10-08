@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('lumen', {
   createSmartAlbum: (name, query) => ipcRenderer.invoke('albums:create-smart', name, query),
   findSimilar: (id) => ipcRenderer.invoke('smart:similar', id),
   privateStatus: () => ipcRenderer.invoke('private:status'),
+  privateRecheckHello: () => ipcRenderer.invoke('private:recheck-hello'),
   privateUnlockHello: () => ipcRenderer.invoke('private:unlock-hello'),
   privateUnlockPin: (pin) => ipcRenderer.invoke('private:unlock-pin', pin),
   privateSetPin: (pin) => ipcRenderer.invoke('private:set-pin', pin),

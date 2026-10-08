@@ -56,8 +56,10 @@ export interface ExportResult {
   errors: string[]
   /** HEIC / RAW / PNG… photos saved as JPG. */
   converted: number
-  /** Videos whose details couldn't be removed (not MP4 / MOV). */
+  /** Videos whose details couldn't be removed (not MP4 / MOV, or one whose movie data couldn't be read). */
   keptVideoDetails: number
+  /** Videos with a GPS / telemetry track (GoPro, DJI, camm…) that can't be taken out: their route stays in. */
+  keptVideoTracks?: number
   ms: number
 }
 
@@ -230,10 +232,16 @@ export function ExportDialog({ items, label = '', bridge, onClose, onDone }: Exp
   const [progress, setProgress] = useState<ExportProgress | null>(null)
   const [showErrors, setShowErrors] = useState(false)
   const startRef = useRef<HTMLButtonElement>(null)
+  // The saved choices are loaded once per opening: re-loading them (the bridge can be a new object
+  // on every render of the window) would undo what was changed here, "Remove location" included.
+  const bridgeRef = useRef(bridge)
+  bridgeRef.current = bridge
+  const labelRef = useRef(label)
 
   useEffect(() => {
     let live = true
-    bridge.defaults(label).then((d) => {
+    const label = labelRef.current
+    bridgeRef.current.defaults(label).then((d) => {
       if (!live) return
       setDest({ folder: d.folder, zip: d.zip })
       if (d.options) setO((cur) => ({ ...cur, ...d.options, baseName: label || d.options?.baseName || '', folder: undefined, zipPath: undefined }))
@@ -241,10 +249,17 @@ export function ExportDialog({ items, label = '', bridge, onClose, onDone }: Exp
     return () => {
       live = false
     }
-  }, [bridge, label])
+  }, [])
 
-  useEffect(() => bridge.onProgress((p) => p && setProgress(p)), [bridge])
-  useEffect(() => startRef.current?.focus(), [dest])
+  useEffect(() => bridgeRef.current.onProgress((p) => p && setProgress(p)), [])
+  // Export gets the focus once the destination is known (not again later: Space while typing a name
+  // must not start the export).
+  const focused = useRef(false)
+  useEffect(() => {
+    if (!dest || focused.current) return
+    focused.current = true
+    if (!(document.activeElement as HTMLElement | null)?.closest?.('input, select, textarea')) startRef.current?.focus()
+  }, [dest])
 
   const set = (patch: Partial<ExportOptions>) => setO((cur) => ({ ...cur, ...patch }))
   const est = useMemo(() => estimateExport(items, o), [items, o])
@@ -481,11 +496,19 @@ export function ExportDialog({ items, label = '', bridge, onClose, onDone }: Exp
               <p className="exp-note">
                 {[
                   phase.result.converted ? `${plural(phase.result.converted, 'photo was', 'photos were')} saved as JPG.` : '',
-                  phase.result.keptVideoDetails ? `${plural(phase.result.keptVideoDetails, 'video')} kept ${phase.result.keptVideoDetails === 1 ? 'its' : 'their'} details (only MP4 and MOV videos can have them removed).` : '',
+                  phase.result.keptVideoDetails
+                    ? `${plural(phase.result.keptVideoDetails, 'video')} kept ${phase.result.keptVideoDetails === 1 ? 'its' : 'their'} details: they can only be removed from MP4 and MOV videos Lumen can read.`
+                    : '',
                 ]
                   .filter(Boolean)
                   .join(' ')}
               </p>
+            )}
+            {phase.result.count > 0 && (phase.result.keptVideoTracks ?? 0) > 0 && (
+              <div className="modal-warning">
+                {plural(phase.result.keptVideoTracks!, 'video has', 'videos have')} a location track (recorded by action cams and drones) that can't be removed:
+                where {phase.result.keptVideoTracks === 1 ? 'it was' : 'they were'} filmed can still be seen.
+              </div>
             )}
             {phase.result.kind === 'zip' && phase.result.ok && phase.result.bytes > EMAIL_LIMIT && (
               <p className="exp-note">This .zip is larger than most email services accept (about 25 MB). A cloud drive link works better for it.</p>

@@ -30,16 +30,68 @@ export function shortLocation(dir: string, roots: string[]) {
 
 export const makeProtected = (folders: string[]) => (item: MediaItem) => folders.some((f) => isUnder(item.path, f))
 
-/** Keep order for a group: protected files first, then the rule's ranking (computed in the main process). */
-export function rank(group: DupGroup, rule: KeepRule, isProtected: (id: string) => boolean): number[] {
-  const order = group.orders[RULE_INDEX[rule]] ?? group.orders[0]
+const always = () => true
+
+/**
+ * Keep order for a group: protected files first, then the rule's ranking (computed in the main
+ * process). Only files `present` (still in the library) are ranked: the best copy may be gone.
+ */
+export function rank(group: DupGroup, rule: KeepRule, isProtected: (id: string) => boolean, present: (id: string) => boolean = always): number[] {
+  const order = (group.orders[RULE_INDEX[rule]] ?? group.orders[0]).filter((i) => present(group.ids[i]))
   return [...order.filter((i) => isProtected(group.ids[i])), ...order.filter((i) => !isProtected(group.ids[i]))]
 }
 
-/** Marks for a group under a rule: everything except the first in rank (protected files are never marked). */
-export function ruleMarks(group: DupGroup, rule: KeepRule, isProtected: (id: string) => boolean): string[] {
-  const keep = rank(group, rule, isProtected)[0]
-  return group.ids.filter((id, i) => i !== keep && !isProtected(id))
+/** Marks for a group under a rule: every present file except the first in rank (protected files are never marked). */
+export function ruleMarks(group: DupGroup, rule: KeepRule, isProtected: (id: string) => boolean, present: (id: string) => boolean = always): string[] {
+  const keep = rank(group, rule, isProtected, present)[0]
+  return group.ids.filter((id, i) => i !== keep && present(id) && !isProtected(id))
+}
+
+/**
+ * Would selecting `id` leave nothing of its group? True when every other copy still in the library
+ * is selected already (a group with one file left doesn't count: that file is no longer a copy).
+ */
+export function isLastCopy(group: DupGroup, id: string, marks: Set<string>, present: (id: string) => boolean = always) {
+  const live = group.ids.filter(present)
+  return live.length > 1 && live.includes(id) && live.every((x) => x === id || marks.has(x))
+}
+
+/**
+ * The files of duplicate groups the keep rule hasn't decided on yet. `seen` holds every file it has
+ * decided on; the new ones are added to it here.
+ */
+export function newFiles(groups: DupGroup[], present: (id: string) => boolean, seen: Set<string>) {
+  const fresh = new Set<string>()
+  for (const g of groups) {
+    for (const id of g.ids) {
+      if (!present(id) || seen.has(id)) continue
+      seen.add(id)
+      fresh.add(id)
+    }
+  }
+  return fresh
+}
+
+/**
+ * The keep rule for new files only (DupeLens selects by the rule after a scan): files it decided on
+ * before keep whatever the user chose since, and a group is never left with every copy selected.
+ * Returns the marks to add and remove.
+ */
+export function ruleNewFiles(groups: DupGroup[], rule: KeepRule, isProtected: (id: string) => boolean, present: (id: string) => boolean, fresh: Set<string>, marks: Set<string>) {
+  const add = new Set<string>()
+  const remove = new Set<string>()
+  for (const g of groups) {
+    if (!g.ids.some((id) => fresh.has(id))) continue
+    const ruled = new Set(ruleMarks(g, rule, isProtected, present))
+    for (const id of g.ids) if (fresh.has(id) && ruled.has(id)) add.add(id)
+    const live = g.ids.filter(present)
+    if (live.length > 1 && live.every((id) => (marks.has(id) || add.has(id)) && !remove.has(id))) {
+      const keep = g.ids[rank(g, rule, isProtected, present)[0]]
+      add.delete(keep)
+      remove.add(keep)
+    }
+  }
+  return { add: [...add], remove: [...remove] }
 }
 
 /** Identifies a group by its members (in any order). */

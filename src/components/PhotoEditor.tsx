@@ -90,6 +90,8 @@ export function PhotoEditor({ item, onClose, onSaved, onToast }: Props) {
   const [aspect, setAspect] = useState<string>('free')
   const [saving, setSaving] = useState(false)
   const [confirmClose, setConfirmClose] = useState(false)
+  /** "Reset" (or Ctrl+Z) with magic eraser steps, which take a while to redo: asked first. */
+  const [confirmReset, setConfirmReset] = useState(false)
   const stageRef = useRef<HTMLDivElement>(null)
   const stage = useElementSize(stageRef)
 
@@ -108,6 +110,7 @@ export function PhotoEditor({ item, onClose, onSaved, onToast }: Props) {
   // Everything except the crop is rendered by the main process (same code as the saved copy);
   // the crop is drawn on top so it can be dragged freely.
   const renderKey = JSON.stringify({ ...recipe, crop: null })
+  const previewUrl = useRef<string | null>(null)
   useEffect(() => {
     let live = true
     setBusy(true)
@@ -117,6 +120,7 @@ export function PhotoEditor({ item, onClose, onSaved, onToast }: Props) {
       setBusy(false)
       if ('error' in res) return setError(res.error)
       const url = URL.createObjectURL(new Blob([res.data as BlobPart], { type: 'image/jpeg' }))
+      previewUrl.current = url
       setPreview((old) => {
         if (old) URL.revokeObjectURL(old.url)
         return { url, w: res.width, h: res.height }
@@ -127,7 +131,14 @@ export function PhotoEditor({ item, onClose, onSaved, onToast }: Props) {
       clearTimeout(t)
     }
   }, [renderKey, item.id])
-  useEffect(() => () => void api.editClose(), [])
+  // the last preview's picture is let go when the editor closes
+  useEffect(
+    () => () => {
+      if (previewUrl.current) URL.revokeObjectURL(previewUrl.current)
+      void api.editClose()
+    },
+    [],
+  )
 
   const set = (patch: Partial<Recipe>) => setRecipe((r) => ({ ...r, ...patch }))
   const pw = preview?.w ?? 1
@@ -328,7 +339,8 @@ export function PhotoEditor({ item, onClose, onSaved, onToast }: Props) {
 
   // ---------- saving / closing ----------
   const save = async () => {
-    if (!changed(recipe) || saving) return
+    // (Ctrl+S too: not while an erase is still being filled in, or after the photo failed to open)
+    if (!changed(recipe) || saving || erasing || error) return
     setSaving(true)
     const res = await api.editSave(item.id, recipe)
     setSaving(false)
@@ -336,12 +348,27 @@ export function PhotoEditor({ item, onClose, onSaved, onToast }: Props) {
     onSaved(res.id, res.name)
   }
   const close = () => (changed(recipe) ? setConfirmClose(true) : onClose())
+  const resetAll = () => {
+    setRecipe(EMPTY)
+    setAspect('free')
+    setStrokes([])
+    setConfirmReset(false)
+  }
+  const reset = () => (recipe.erase.length ? setConfirmReset(true) : resetAll())
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.closest?.('input[type="text"], textarea')) return
       e.stopPropagation()
       const erase = tool === 'erase' && !confirmClose
+      if (confirmReset) {
+        // only the question's own keys
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          setConfirmReset(false)
+        }
+        return
+      }
       if (e.key === 'Escape') {
         e.preventDefault()
         if (confirmClose) setConfirmClose(false)
@@ -355,10 +382,7 @@ export function PhotoEditor({ item, onClose, onSaved, onToast }: Props) {
         e.preventDefault()
         if (erase && strokes.length) setStrokes((list) => list.slice(0, -1))
         else if (erase && recipe.erase.length) undoErase()
-        else if (!erase) {
-          setRecipe(EMPTY)
-          setAspect('free')
-        }
+        else if (!erase && !confirmClose && changed(recipe)) reset()
       } else if (erase && e.key === 'Enter') {
         e.preventDefault()
         runErase()
@@ -583,12 +607,8 @@ export function PhotoEditor({ item, onClose, onSaved, onToast }: Props) {
         <div className="editor-foot">
           <button
             className="btn ghost"
-            disabled={!changed(recipe)}
-            onClick={() => {
-              setRecipe(EMPTY)
-              setAspect('free')
-              setStrokes([])
-            }}
+            disabled={!changed(recipe) || erasing}
+            onClick={reset}
             title="Undo all changes (Ctrl+Z)"
           >
             <Undo2 size={15} /> Reset
@@ -601,6 +621,24 @@ export function PhotoEditor({ item, onClose, onSaved, onToast }: Props) {
         <p className="edit-note">Saved as a new file next to the original — your original is never changed.</p>
       </aside>
 
+      {confirmReset && (
+        <div className="modal-backdrop" onMouseDown={() => setConfirmReset(false)}>
+          <div className="modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
+            <h3>Undo all changes?</h3>
+            <p>
+              Every change goes, including {recipe.erase.length === 1 ? 'the magic eraser step' : `all ${recipe.erase.length} magic eraser steps`}. To take back only the last erase, use Undo erase.
+            </p>
+            <div className="modal-actions">
+              <button className="btn ghost" onClick={() => setConfirmReset(false)} autoFocus>
+                Keep editing
+              </button>
+              <button className="btn danger" onClick={resetAll}>
+                Undo all
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {confirmClose && (
         <div className="modal-backdrop" onMouseDown={() => setConfirmClose(false)}>
           <div className="modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>

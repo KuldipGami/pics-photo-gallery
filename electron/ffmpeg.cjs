@@ -1,9 +1,14 @@
+const fs = require('node:fs')
+const fsp = require('node:fs/promises')
+const os = require('node:os')
+const path = require('node:path')
 const { spawn } = require('node:child_process')
 
 /**
  * The bundled ffmpeg (ffmpeg-static): finding it, running it with progress and cancel, reading a
  * video's facts from its banner (ffprobe isn't bundled), and choosing a working H.264 / HEVC
- * encoder — the graphics card's when it has one (NVIDIA → Intel → AMD), else the CPU.
+ * encoder — the graphics card's when it has one (NVIDIA → Intel → AMD), else the CPU. It also
+ * keeps the list of the video jobs' temporary files, so quitting mid-job doesn't leave them behind.
  */
 
 class FfmpegError extends Error {
@@ -65,7 +70,10 @@ const tail = (stderr) =>
  *   signal       AbortSignal: kills ffmpeg and rejects with Canceled
  *   stdout       'buffer' collects stdout (e.g. an image piped out); 'stream' leaves it to `onSpawn`
  *   stdin        true keeps stdin open for the caller (raw frames in) — see onSpawn
- *   onSpawn      (child) right after starting, e.g. to write to child.stdin
+ *   onSpawn      (child, { poke, hold }) right after starting, e.g. to write to child.stdin. With
+ *                stdout 'stream' only the caller sees the output: it calls poke() as output
+ *                arrives, and hold() while it keeps the stream paused (ffmpeg waiting for the
+ *                reader isn't a hang; the next poke() starts the idle clock again)
  *   idleTimeout  ms without any output before giving up (default 120 s)
  *   allowFail    resolve instead of rejecting on a non-zero exit (probing)
  * Resolves to { code, stderr, stdout?: Buffer }.
@@ -87,14 +95,26 @@ function run(args, opts = {}) {
     let canceled = false
     let timedOut = false
     let timer = null
+    let held = false // the caller isn't reading the stream for now (see onSpawn)
     const poke = () => {
       clearTimeout(timer)
-      if (idleTimeout) {
+      timer = null
+      if (idleTimeout && !held) {
         timer = setTimeout(() => {
           timedOut = true
           child.kill()
         }, idleTimeout)
       }
+    }
+    const activity = {
+      poke: () => {
+        held = false
+        poke()
+      },
+      hold: () => {
+        held = true
+        poke()
+      },
     }
     poke()
     const onAbort = () => {
@@ -148,8 +168,60 @@ function run(args, opts = {}) {
       if (code !== 0 && !allowFail) return reject(new FfmpegError(explain(stderr), tail(stderr)))
       resolve({ code, stderr, stdout: stdout === 'buffer' ? Buffer.concat(chunks) : undefined })
     })
-    onSpawn?.(child)
+    onSpawn?.(child, activity)
   })
+}
+
+// ---------- temporary files ----------
+
+// Work files of video jobs in progress (a memory movie's work folder and its output's .part, a
+// video edit's .part). The jobs delete them when they end; cleanupTempsSync() deletes whatever is
+// left when the app quits mid-job.
+const temps = new Set()
+
+function trackTemp(p) {
+  if (p) temps.add(p)
+}
+
+function untrackTemp(p) {
+  temps.delete(p)
+}
+
+/** Deletes every tracked temp file and folder, synchronously (at quit, after the jobs were stopped). */
+function cleanupTempsSync() {
+  for (const p of temps) {
+    try {
+      fs.rmSync(p, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+      temps.delete(p)
+    } catch {}
+  }
+}
+
+/**
+ * Memory-movie work folders (%TEMP%\lumen-movie-*) left behind by a crash or a forced exit. Only
+ * folders older than an hour are removed: never one a movie is being made in.
+ */
+async function sweepStaleTemps() {
+  const dir = os.tmpdir()
+  let names
+  try {
+    names = await fsp.readdir(dir)
+  } catch {
+    return
+  }
+  const cutoff = Date.now() - 60 * 60_000
+  await Promise.all(
+    names
+      .filter((n) => n.startsWith('lumen-movie-'))
+      .map(async (n) => {
+        const p = path.join(dir, n)
+        if (temps.has(p)) return
+        try {
+          const st = await fsp.stat(p)
+          if (st.isDirectory() && st.mtimeMs < cutoff) await fsp.rm(p, { recursive: true, force: true })
+        } catch {}
+      }),
+  )
 }
 
 // ---------- probing ----------
@@ -247,7 +319,10 @@ function parseVideo(desc) {
     if (/^bt|^smpte|^fcc|^ycgco/.test(one[1] || '')) colorSpace = colorPrimaries = colorTransfer = one[1]
   }
   const size = /, (\d{2,5})x(\d{2,5})/.exec(desc)
-  const fps = /, ([\d.]+)(k?) fps/.exec(desc) || /, ([\d.]+)(k?) tbr/.exec(desc)
+  // The frame rate, else the guessed one (tbr). Variable-rate WebM / MKV often show only "1k tbr"
+  // (the container's millisecond clock, not a frame rate): 1000 or more counts as unknown (0).
+  const rate = (m) => (m ? Number(m[1]) * (m[2] ? 1000 : 1) : 0)
+  const fps = [rate(/, ([\d.]+)(k?) fps/.exec(desc)), rate(/, ([\d.]+)(k?) tbr/.exec(desc))].find((v) => v > 0 && v < 1000) ?? 0
   const bitrate = /, (\d+) kb\/s/.exec(desc)
   const hdr = colorTransfer === 'arib-std-b67' ? 'hlg' : colorTransfer === 'smpte2084' ? 'pq' : null
   return {
@@ -257,7 +332,7 @@ function parseVideo(desc) {
     tenBit: /10|12/.test(pixFmt),
     width: size ? Number(size[1]) : 0,
     height: size ? Number(size[2]) : 0,
-    fps: fps ? Number(fps[1]) * (fps[2] ? 1000 : 1) : 0,
+    fps,
     bitrate: bitrate ? Number(bitrate[1]) * 1000 : 0,
     colorSpace,
     colorPrimaries,
@@ -356,4 +431,20 @@ function encoderArgs(encoder, { bitrate, tenBit = false, gop = 0, fast = false, 
 /** HDR (HLG / PQ) → ordinary colours, for stills and movie clips. */
 const TONEMAP = 'zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv'
 
-module.exports = { ffmpegPath, run, probe, parseProbe, encoders, encoderArgs, explain, FfmpegError, Canceled, TONEMAP, HARDWARE }
+module.exports = {
+  ffmpegPath,
+  run,
+  probe,
+  parseProbe,
+  encoders,
+  encoderArgs,
+  explain,
+  FfmpegError,
+  Canceled,
+  TONEMAP,
+  HARDWARE,
+  trackTemp,
+  untrackTemp,
+  cleanupTempsSync,
+  sweepStaleTemps,
+}
