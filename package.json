@@ -1,7 +1,7 @@
 {
-  "name": "lumen",
-  "productName": "Lumen",
-  "version": "1.15.1",
+  "name": "pics",
+  "productName": "Pics",
+  "version": "1.16.0",
   "description": "A modern photo & video gallery for your desktop",
   "private": true,
   "type": "module",
@@ -17,7 +17,7 @@
   },
   "build": {
     "appId": "app.lumen.gallery",
-    "productName": "Lumen",
+    "productName": "Pics",
     "directories": {
       "output": "release"
     },
