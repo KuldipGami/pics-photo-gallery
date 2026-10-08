@@ -21,9 +21,20 @@ function isBlank(img) {
   return Math.sqrt(Math.max(0, sumSq / n - mean * mean)) < 3
 }
 
-async function shellThumb({ path, size, video, quality = 85 }) {
-  const img = await nativeImage.createThumbnailFromPath(path, { width: size, height: size })
+/**
+ * `native`: the picture's own long side when known (HEIC). Windows is slow to scale a big rendition
+ * (12 MP HEIC at 2560: ~3.5 s) but quick at the picture's own size (~2 s), so big renditions are
+ * decoded at full size and scaled down here (~0.1 s).
+ */
+async function shellThumb({ path, size, video, quality = 85, native = 0 }) {
+  const full = native > size && size > 1024
+  let img = await nativeImage.createThumbnailFromPath(path, { width: full ? native : size, height: full ? native : size })
   if (img.isEmpty() || (video && isBlank(img))) return null
+  if (full) {
+    const { width, height } = img.getSize()
+    const scale = size / Math.max(width, height)
+    if (scale < 1) img = img.resize({ width: Math.round(width * scale), height: Math.round(height * scale), quality: 'best' })
+  }
   return img.toJPEG(quality)
 }
 

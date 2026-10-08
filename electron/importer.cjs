@@ -955,9 +955,11 @@ class Importer {
           } else c.check = true
         }
       }
-      // a HEIC converted to JPG by an earlier import: same name, same date taken
-      if (c.status === 'new' && isHeicExt(c.ext) && Number.isFinite(c.taken)) {
-        const lib = byStem.get(stemOf(c.name))?.find((l) => near(l.taken, c.taken))
+      // a HEIC converted to JPG by an earlier import: same name, same date taken (without one, the
+      // same file date: the JPG gets the HEIC's)
+      if (c.status === 'new' && isHeicExt(c.ext)) {
+        const dated = Number.isFinite(c.taken)
+        const lib = byStem.get(stemOf(c.name))?.find((l) => (dated ? near(l.taken, c.taken) : !Number.isFinite(l.taken) && near(l.mtime, c.mtime)))
         if (lib) {
           c.status = 'library'
           c.match = lib.path
