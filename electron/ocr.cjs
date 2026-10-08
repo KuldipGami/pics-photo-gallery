@@ -119,6 +119,10 @@ class OcrEngine {
     })
     this.child = child
     this.served = 0
+    // Reading text uses several cores for an hour on a first run: it gives way to everything else.
+    try {
+      if (child.pid) os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL)
+    } catch {}
     let stderr = ''
     child.stderr.on('data', (d) => (stderr = (stderr + d).slice(-4000)))
     child.stdin.on('error', () => {}) // it went away mid-write: 'exit' handles it

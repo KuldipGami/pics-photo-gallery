@@ -25,7 +25,10 @@ export const formatMonthHeader = (ts: number) => monthFmt.format(ts)
 export const formatShortMonth = (ts: number) => shortMonthFmt.format(ts)
 export const formatLongDate = (ts: number) => longDateFmt.format(ts)
 export const formatTime = (ts: number) => timeFmt.format(ts)
-export const formatCount = (n: number) => n.toLocaleString()
+// One formatter for every count: n.toLocaleString() builds a new one per call, which showed up as
+// the single most expensive function while the window re-renders.
+const countFmt = new Intl.NumberFormat()
+export const formatCount = (n: number) => countFmt.format(n)
 
 export function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`

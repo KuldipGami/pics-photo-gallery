@@ -434,6 +434,18 @@ class Library extends EventEmitter {
     }
   }
 
+  /** Does this file differ (size or date) from its library entry? True for files not in the library. */
+  async changedOnDisk(full) {
+    const prev = this.items.get(keyOf(full))
+    if (!prev) return true
+    try {
+      const st = await fsp.stat(full)
+      return st.size !== prev.size || Math.round(st.mtimeMs) !== prev.mtime
+    } catch {
+      return true // gone
+    }
+  }
+
   /** Would walk() (from library folder `root`, lower-cased) pick up this media file? */
   wouldScan(full, root) {
     const segments = path.relative(root, full.toLowerCase()).split(path.sep)
@@ -452,18 +464,29 @@ class Library extends EventEmitter {
   watch(folders, onChange) {
     for (const w of this.watchers) w.close()
     this.watchers = []
+    const rescanSoon = () => {
+      clearTimeout(this.watchTimer)
+      this.watchTimer = setTimeout(onChange, 1500)
+    }
     for (const folder of folders) {
       try {
         const root = normFolder(folder)
         const watcher = fs.watch(folder, { recursive: true }, (event, filename) => {
           if (filename && extOf(filename) && !isMedia(filename)) return
           if (filename && this.skip.exts.has(extOf(filename))) return // a skipped file type: nothing to rescan
-          if (filename && isMedia(filename)) {
-            const full = path.join(folder, filename)
+          const full = filename ? path.join(folder, filename) : null
+          if (full && isMedia(filename)) {
             if (this.wouldScan(full, root)) this.emit('file', full, event)
           }
-          clearTimeout(this.watchTimer)
-          this.watchTimer = setTimeout(onChange, 1500)
+          // Windows reports reading a file (previews, text, video frames, the viewer…) as a change
+          // of the file and its folder, because its last-access time moves. Only a new size or date
+          // is worth a rescan; files that come, go or are renamed arrive as 'rename'.
+          if (event === 'change' && full) {
+            if (!isMedia(filename) || !this.wouldScan(full, root)) return
+            this.changedOnDisk(full).then((changed) => changed && rescanSoon())
+            return
+          }
+          rescanSoon()
         })
         watcher.on('error', () => {})
         this.watchers.push(watcher)

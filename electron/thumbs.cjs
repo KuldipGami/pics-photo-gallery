@@ -6,7 +6,7 @@ const { pathToFileURL } = require('node:url')
 const { EventEmitter } = require('node:events')
 const sharp = require('sharp')
 const exifr = require('exifr')
-const { WorkerPool } = require('./workers.cjs')
+const { WorkerPool, heifSize } = require('./workers.cjs')
 
 // One libvips thread per image and many images in parallel scales far better for
 // thumbnails than one image using every core. No cache, so files are never held open.
@@ -43,6 +43,11 @@ function migrateLegacyCache(dir) {
 /** The long side in pixels of a photo libvips can't open (HEIC, RAW, BMP…), from its header. */
 async function longSide(item) {
   try {
+    // a HEIC's own header knows its size (EXIF may not have it)
+    if (item.ext === 'heic' || item.ext === 'heif') {
+      const size = await heifSize(item.path)
+      if (size) return Math.max(size.width, size.height)
+    }
     if (item.ext === 'bmp') {
       const fh = await fsp.open(item.path, 'r')
       const b = Buffer.alloc(26)

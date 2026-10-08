@@ -307,7 +307,7 @@ function startServices() {
   }
   registerPrivateIpc({ ipcMain, priv, getWindow: () => win, send, privateItems: () => userLocations.apply(priv.split(library.list).hidden) })
   priv.on('changed', () => {
-    send('library:changed', { items: listed() })
+    send('library:changed', { items: listedJson() })
     send('private:changed')
     updatePlaces()
     const shown = visibleLibrary()
@@ -319,11 +319,16 @@ function startServices() {
   powerMonitor.on('lock-screen', () => priv.lock())
   powerMonitor.on('suspend', () => priv.lock())
   userLocations.on('changed', () => {
-    send('library:changed', { items: listed() })
+    send('library:changed', { items: listedJson() })
     updatePlaces()
   })
+  // The analyses follow the library after a scan. One that found nothing new (with no other change
+  // since the last one) leaves them alone: re-syncing them re-forms every duplicate group, which
+  // holds up this process for about a second.
+  let indexesStale = false
   library.on('changed', () => {
-    send('library:changed', { items: listed() })
+    indexesStale = true
+    send('library:changed', { items: listedJson() })
     thumbs.warmUp(library.list)
     updatePlaces()
   })
@@ -331,6 +336,11 @@ function startServices() {
   library.on('scanned', async () => {
     tags.reconcile(library.list)
     tags.prune(library.list)
+    if (!indexesStale) {
+      thumbs.prefetch(visibleLibrary()) // previews that failed earlier get another try
+      return
+    }
+    indexesStale = false
     await thumbs.prune(library.list)
     thumbs.prefetch(visibleLibrary())
     faces.sync(visibleLibrary())
@@ -348,12 +358,12 @@ function startServices() {
     }
   })
   thumbs.on('duration', (id, seconds) => library.patch(id, { duration: seconds }))
-  faces.on('changed', () => send('people:changed', faces.snapshot()))
+  faces.on('changed', () => send('people:changed', JSON.stringify(faces.snapshot())))
   faces.on('progress', (progress) => send('people:progress', progress))
   smart.on('progress', (progress) => send('smart:progress', progress))
   ocr.on('progress', (progress) => send('ocr:progress', progress))
   ocr.on('changed', () => send('ocr:changed'))
-  dupes.on('changed', () => send('dupes:changed', dupes.snapshot()))
+  dupes.on('changed', () => send('dupes:changed', JSON.stringify(dupes.snapshot())))
   dupes.on('progress', (progress) => send('dupes:progress', progress))
   albums.on('changed', () => send('albums:changed', albums.snapshot()))
 
@@ -721,20 +731,27 @@ ipcMain.handle('app:state', async () => {
 
 /** The library as the UI sees it: with the places the user set for files that can't hold one. */
 const listed = () => userLocations.apply(visibleLibrary())
+/**
+ * The same as JSON text, which is how it goes to the window (so do the people and duplicates
+ * snapshots): ~15,000 items copied into the page (and across the preload bridge) as a structure
+ * took several times longer than parsing text, up to ~0.3 s with the page frozen.
+ */
+const listedJson = () => JSON.stringify(listed())
 /** The library without private items (all of it while nothing is private). */
 function visibleLibrary() {
   return priv ? priv.split(library.list).shown : library.list
 }
 
+// (the big parts, items, people and duplicates, go as JSON text: see listedJson)
 const appState = () => ({
-  items: listed(),
+  items: listedJson(),
   status: library.status(),
   settings: settingsPayload(),
-  people: faces.snapshot(),
+  people: JSON.stringify(faces.snapshot()),
   peopleProgress: faces.progressInfo(),
   albums: albums.snapshot(),
   places: placesData,
-  dupes: dupes.snapshot(),
+  dupes: JSON.stringify(dupes.snapshot()),
   history: history.list(),
   tags: tags.snapshot(),
   dupesProgress: dupes.progressInfo(),
@@ -1840,7 +1857,8 @@ app.whenReady().then(async () => {
     },
     () => {},
   )
-  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), history.load(), userLocations.load(), tags.load(), priv.load()])
+  // (ocr.load: without it every launch read the text of every photo again, for an hour or more)
+  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), ocr.load(), history.load(), userLocations.load(), tags.load(), priv.load()])
   placesData = places.group(listed())
   if (launchArgs.folder) await openFolder(launchArgs.folder)
   if (launchArgs.autoscan) showDuplicates()

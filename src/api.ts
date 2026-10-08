@@ -43,27 +43,35 @@ export interface RemoveResult {
   destination?: string
 }
 
+/** Everything the window shows, as it opens. */
+export interface AppState {
+  items: MediaItem[]
+  status: ScanStatus
+  settings: Settings
+  version: string
+  people: PeopleData
+  peopleProgress: PeopleProgress
+  albums: Album[]
+  places: PlacesData
+  dupes: DuplicatesData
+  dupesProgress: DuplicatesProgress
+  videosProgress: VideosProgress
+  smartProgress: SmartProgress
+  ocrProgress: OcrProgress
+  history: HistoryEntry[]
+  /** Lumen was started for a folder or to review duplicates (taken once). */
+  launch: { folder?: string; duplicates?: boolean } | null
+  tags: TagsData
+}
+
+/** AppState with items, people and dupes as JSON text. */
+export type AppStateText = Omit<AppState, 'items' | 'people' | 'dupes'> & { items: string; people: string; dupes: string }
+
 export interface LumenApi {
   env: { platform: string; mica: boolean }
-  getState(): Promise<{
-    items: MediaItem[]
-    status: ScanStatus
-    settings: Settings
-    version: string
-    people: PeopleData
-    peopleProgress: PeopleProgress
-    albums: Album[]
-    places: PlacesData
-    dupes: DuplicatesData
-    dupesProgress: DuplicatesProgress
-    videosProgress: VideosProgress
-    smartProgress: SmartProgress
-    ocrProgress: OcrProgress
-    history: HistoryEntry[]
-    /** Lumen was started for a folder or to review duplicates (taken once). */
-    launch: { folder?: string; duplicates?: boolean } | null
-    tags: TagsData
-  }>
+  getState(): Promise<AppState>
+  /** The same, with the big parts as JSON text: what the window itself uses (much quicker, see parseItems). */
+  getStateText(): Promise<AppStateText>
   /** Resolves to the new album's id. */
   createAlbum(name: string, ids: string[]): Promise<string>
   /** A saved search that fills itself. Resolves to the new album's id. */
@@ -155,6 +163,8 @@ export interface LumenApi {
   onOpenFolder(cb: (dir: string) => void): Unsubscribe
   onShowDuplicates(cb: () => void): Unsubscribe
   onDuplicates(cb: (data: DuplicatesData) => void): Unsubscribe
+  /** The same as JSON text (quicker). */
+  onDuplicatesText(cb: (json: string) => void): Unsubscribe
   onDuplicatesProgress(cb: (progress: DuplicatesProgress) => void): Unsubscribe
   onVideosProgress(cb: (progress: VideosProgress) => void): Unsubscribe
   /** Items whose content matches the text, best first, with a 0–1 match score. */
@@ -209,6 +219,8 @@ export interface LumenApi {
   personMatches(id: string): Promise<PersonMatch[]>
   peopleSuggestions(): Promise<PairSuggestion[]>
   onPeople(cb: (data: PeopleData) => void): Unsubscribe
+  /** The same as JSON text (quicker). */
+  onPeopleText(cb: (json: string) => void): Unsubscribe
   onPeopleProgress(cb: (progress: PeopleProgress) => void): Unsubscribe
   getGpu(): Promise<GpuInfo>
   relaunch(): Promise<void>
@@ -268,6 +280,8 @@ export interface LumenApi {
   pathForFile(file: File): string
   setViewerMode(open: boolean): Promise<void>
   onLibrary(cb: (payload: { items: MediaItem[] }) => void): Unsubscribe
+  /** The same with the items as JSON text (quicker, see parseItems). */
+  onLibraryText(cb: (payload: { items: string }) => void): Unsubscribe
   onStatus(cb: (status: ScanStatus) => void): Unsubscribe
   onThumbProgress(cb: (progress: ThumbProgress) => void): Unsubscribe
   onSettings(cb: (settings: Settings) => void): Unsubscribe
@@ -281,6 +295,9 @@ declare global {
 }
 
 export const api = window.lumen
+
+/** The library's items arrive as JSON text: parsing it is several times quicker than receiving ~15,000 objects. */
+export const parseItems = (json: string) => JSON.parse(json) as MediaItem[]
 
 const version = (item: MediaItem) => item.mtime.toString(36)
 export const thumbUrl = (item: MediaItem, rev = 0) =>

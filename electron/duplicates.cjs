@@ -112,7 +112,51 @@ async function pool(list, limit, fn) {
   )
 }
 
-/** All pairs of fingerprints within `maxDist`, on several worker threads. */
+/** What findPairs is asked (the photos in order, their fingerprints, the settings) and how it answers. */
+function pairsKey(photos, flat, crops, maxDist, findCrops) {
+  const h = crypto.createHash('sha1')
+  h.update(WORKER_SRC)
+  h.update(`${maxDist}|${findCrops ? 1 : 0}|${photos.map((it) => it.id).join(',')}`)
+  h.update(new Uint8Array(flat.buffer, flat.byteOffset, flat.byteLength))
+  h.update(crops)
+  return h.digest('base64')
+}
+
+// The last photo pairs are kept on disk too (duplicates-pairs.bin: 'LDP1', key length, key, pairs as
+// int32), so a launch with no new photos doesn't compare them all again on every core for seconds.
+const PAIRS_MAGIC = 'LDP1'
+
+async function readPairs(file, key) {
+  try {
+    const buf = await fsp.readFile(file)
+    if (buf.toString('latin1', 0, 4) !== PAIRS_MAGIC) return null
+    const len = buf.readUInt32LE(4)
+    if (buf.toString('utf8', 8, 8 + len) !== key) return null
+    const start = 8 + len
+    const pairs = new Int32Array((buf.length - start) >> 2)
+    for (let i = 0; i < pairs.length; i++) pairs[i] = buf.readInt32LE(start + i * 4)
+    return [pairs]
+  } catch {
+    return null
+  }
+}
+
+async function writePairs(file, key, parts) {
+  const k = Buffer.from(key, 'utf8')
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const buf = Buffer.alloc(8 + k.length + total * 4)
+  buf.write(PAIRS_MAGIC, 0, 'latin1')
+  buf.writeUInt32LE(k.length, 4)
+  k.copy(buf, 8)
+  let at = 8 + k.length
+  for (const p of parts) for (const v of p) at = buf.writeInt32LE(v, at)
+  try {
+    await fsp.writeFile(`${file}.tmp`, buf)
+    await fsp.rename(`${file}.tmp`, file)
+  } catch {}
+}
+
+/** All pairs of fingerprints within `maxDist`, on several worker threads (null for a part whose worker failed). */
 function findPairs(words, crops, n, maxDist, findCrops) {
   if (n < 2) return Promise.resolve([])
   const threads = Math.min(THREADS, Math.max(1, Math.floor(n / 200)))
@@ -126,7 +170,7 @@ function findPairs(words, crops, n, maxDist, findCrops) {
             resolve(pairs)
             worker.terminate()
           })
-          worker.once('error', () => resolve(new Int32Array(0)))
+          worker.once('error', () => resolve(null))
           worker.postMessage({ words, crops, n, maxDist, findCrops, start, step: threads })
         }),
     ),
@@ -165,6 +209,9 @@ class Duplicates extends EventEmitter {
     this.memo = new Map() // video alignments for describe(), keyed by both files' versions
     videoFrames?.on('changed', () => this.regroupSoon())
     this.records = new Map() // id -> { m, z, x?, s?, c, lo, sh, br, a, d? }
+    this.decoded = new Map() // id -> { s, w }: a record's fingerprint, decoded
+    this.photoPairs = null // { key, parts }: the last findPairs answer and what it was for
+    this.pairsFile = file.replace(/\.json$/i, '') + '-pairs.bin'
     this.dismissed = new Set()
     this.items = []
     this.settings = { sensitivity: 90, findCrops: true, folders: [] }
@@ -358,19 +405,38 @@ class Duplicates extends EventEmitter {
     // look-alike photos (not blank ones: those would match everything)
     const words = new Map()
     const photos = []
+    const decoded = new Map() // fingerprints decoded once, not on every regroup
     for (const it of items) {
       const r = this.records.get(it.id)
       if (!r?.s || r.lo) continue
-      words.set(it.id, sig.fromBase64(r.s))
+      let d = this.decoded.get(it.id)
+      if (d?.s !== r.s) d = { s: r.s, w: sig.fromBase64(r.s) }
+      decoded.set(it.id, d)
+      words.set(it.id, d.w)
       if (it.type === 'image') photos.push(it)
     }
+    this.decoded = decoded
     const flat = new Uint32Array(photos.length * sig.WORDS)
     const crops = new Uint8Array(photos.length)
     photos.forEach((it, i) => {
       flat.set(words.get(it.id), i * sig.WORDS)
       crops[i] = this.records.get(it.id).c ? 1 : 0
     })
-    for (const part of await findPairs(flat, crops, photos.length, maxDist, this.settings.findCrops)) {
+    // Comparing every photo with every other takes several seconds on all cores; while only videos
+    // change (their frames are read for hours on a first run), the photos' pairs are the same.
+    const key = pairsKey(photos, flat, crops, maxDist, this.settings.findCrops)
+    let parts = this.photoPairs?.key === key ? this.photoPairs.parts : await readPairs(this.pairsFile, key)
+    if (parts) this.photoPairs = { key, parts }
+    else {
+      parts = await findPairs(flat, crops, photos.length, maxDist, this.settings.findCrops)
+      // (a failed worker: try again next time)
+      if (parts.every(Boolean)) {
+        this.photoPairs = { key, parts }
+        if (!this.disposed) writePairs(this.pairsFile, key, parts)
+      }
+      parts = parts.filter(Boolean)
+    }
+    for (const part of parts) {
       for (let k = 0; k < part.length; k += 2) uf.union(index.get(photos[part[k]].id), index.get(photos[part[k + 1]].id))
     }
 
@@ -395,19 +461,31 @@ class Duplicates extends EventEmitter {
       for (const [a, b] of pairs) uf.union(index.get(analysed[a].id), index.get(analysed[b].id))
     }
     // Not read yet: for now the preview frame stands in (same length only), as before.
+    // (Lengths and the four compared words are looked up once per video, not once per pair:
+    // with thousands of videos waiting that's millions of lookups.)
     const previewed = [...waiting, ...analysed.filter((it) => words.has(it.id))]
     const length = (it) => this.videoFrames?.get(it)?.d || it.duration
+    const n = previewed.length
+    const lens = new Float64Array(n)
+    const w0 = new Uint32Array(n)
+    const w1 = new Uint32Array(n)
+    const w16 = new Uint32Array(n)
+    const w17 = new Uint32Array(n)
+    previewed.forEach((it, j) => {
+      const w = words.get(it.id)
+      lens[j] = length(it) || 0
+      w0[j] = w[0]
+      w1[j] = w[1]
+      w16[j] = w[16]
+      w17[j] = w[17]
+    })
     for (let i = 0; i < waiting.length; i++) {
-      const a = waiting[i]
-      for (let j = i + 1; j < previewed.length; j++) {
-        const b = previewed[j]
-        const la = length(a)
-        const lb = length(b)
+      const la = lens[i]
+      for (let j = i + 1; j < n; j++) {
+        const lb = lens[j]
         if (la && lb && !sameLength(la, lb)) continue
-        const wa = words.get(a.id)
-        const wb = words.get(b.id)
-        const d = sig.popcount(wa[0] ^ wb[0]) + sig.popcount(wa[1] ^ wb[1]) + sig.popcount(wa[16] ^ wb[16]) + sig.popcount(wa[17] ^ wb[17])
-        if (d <= maxDist) uf.union(index.get(a.id), index.get(b.id))
+        const d = sig.popcount(w0[i] ^ w0[j]) + sig.popcount(w1[i] ^ w1[j]) + sig.popcount(w16[i] ^ w16[j]) + sig.popcount(w17[i] ^ w17[j])
+        if (d <= maxDist) uf.union(index.get(waiting[i].id), index.get(previewed[j].id))
       }
     }
 

@@ -6,12 +6,18 @@ const on = (channel, cb) => {
   return () => ipcRenderer.removeListener(channel, handler)
 }
 
+// The library's big parts (items, people, duplicates) arrive as JSON text, which the window parses
+// itself (…Text below): much quicker than copying ~15,000 objects across this bridge. getState()
+// and onLibrary/onPeople/onDuplicates still hand out objects, for scripts and tests.
+const parseState = (s) => ({ ...s, items: JSON.parse(s.items), people: JSON.parse(s.people), dupes: JSON.parse(s.dupes) })
+
 contextBridge.exposeInMainWorld('lumen', {
   env: {
     platform: process.platform,
     mica: process.argv.includes('--lumen-mica=1'),
   },
-  getState: () => ipcRenderer.invoke('app:state'),
+  getState: () => ipcRenderer.invoke('app:state').then(parseState),
+  getStateText: () => ipcRenderer.invoke('app:state'),
   getGpu: () => ipcRenderer.invoke('app:gpu'),
   relaunch: () => ipcRenderer.invoke('app:relaunch'),
   renamePerson: (id, name) => ipcRenderer.invoke('people:rename', id, name),
@@ -27,7 +33,8 @@ contextBridge.exposeInMainWorld('lumen', {
   hidePeople: (ids, hidden) => ipcRenderer.invoke('people:hide-many', ids, hidden),
   personMatches: (id) => ipcRenderer.invoke('people:matches', id),
   peopleSuggestions: () => ipcRenderer.invoke('people:suggestions'),
-  onPeople: (cb) => on('people:changed', cb),
+  onPeople: (cb) => on('people:changed', (json) => cb(JSON.parse(json))),
+  onPeopleText: (cb) => on('people:changed', cb),
   onPeopleProgress: (cb) => on('people:progress', cb),
   createAlbum: (name, ids) => ipcRenderer.invoke('albums:create', name, ids),
   createSmartAlbum: (name, query) => ipcRenderer.invoke('albums:create-smart', name, query),
@@ -99,7 +106,8 @@ contextBridge.exposeInMainWorld('lumen', {
   onWatchStatus: (cb) => on('watch:status', cb),
   onOpenFolder: (cb) => on('app:open-folder', cb),
   onShowDuplicates: (cb) => on('app:show-duplicates', cb),
-  onDuplicates: (cb) => on('dupes:changed', cb),
+  onDuplicates: (cb) => on('dupes:changed', (json) => cb(JSON.parse(json))),
+  onDuplicatesText: (cb) => on('dupes:changed', cb),
   onDuplicatesProgress: (cb) => on('dupes:progress', cb),
   onVideosProgress: (cb) => on('dupes:videos', cb),
   smartSearch: (query) => ipcRenderer.invoke('smart:search', query),
@@ -143,7 +151,8 @@ contextBridge.exposeInMainWorld('lumen', {
   openUrl: (url) => ipcRenderer.invoke('shell:url', url),
   pathForFile: (file) => webUtils.getPathForFile(file),
   setViewerMode: (open) => ipcRenderer.invoke('window:viewer', open),
-  onLibrary: (cb) => on('library:changed', cb),
+  onLibrary: (cb) => on('library:changed', (p) => cb({ items: JSON.parse(p.items) })),
+  onLibraryText: (cb) => on('library:changed', cb),
   onStatus: (cb) => on('scan:status', cb),
   onThumbProgress: (cb) => on('thumbs:progress', cb),
   onSettings: (cb) => on('settings:changed', cb),

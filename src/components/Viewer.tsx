@@ -17,7 +17,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
-import { api, mediaUrl, thumbUrl } from '../api'
+import { api, fullImageUrl, mediaUrl, thumbUrl } from '../api'
 import { RatingStars } from './RatingStars'
 import { VideoEditor, type VideoInfo } from './VideoEditor'
 import type { TagCount } from './TagEditor'
@@ -151,13 +151,19 @@ export function Viewer({
     return () => clearTimeout(t)
   }, [slideshow, index, item?.type])
 
-  // Preload neighbours for instant navigation.
+  // Preload neighbours for instant navigation: their previews right away, their full pictures once
+  // this one is showing (a HEIC's full picture is made on demand and takes a second or more).
+  const showing = !!dims && dims.id === items[index]?.id
   useEffect(() => {
-    for (const i of [index + 1, index - 1]) {
-      const it = items[i]
-      if (it?.type === 'image') new Image().src = thumbUrl(it)
+    const near = [items[index + 1], items[index - 1]].filter((it): it is MediaItem => it?.type === 'image')
+    for (const it of near) new Image().src = thumbUrl(it)
+    if (!showing) return
+    for (const it of near) {
+      const img = new Image()
+      img.src = fullImageUrl(it)
+      img.decode().catch(() => {})
     }
-  }, [index, items])
+  }, [index, items, showing])
 
   const copyImage = async () => {
     if (item.type !== 'image') return

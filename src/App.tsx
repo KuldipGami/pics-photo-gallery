@@ -474,6 +474,11 @@ export default function App() {
     for (const it of visible) if ((search.masks.get(it.id) ?? 0) !== search.full) n++
     return n
   }, [visible, search, smart.matches])
+  /** "1,234 photos · 56 videos" and the date range under the title: worked out once per list, not on every render. */
+  const visibleSummary = useMemo(
+    () => (isGrid ? { text: summarize(visible), range: formatRange(visible, dateField) } : { text: '', range: '' }),
+    [isGrid, visible, dateField],
+  )
 
   const folders = useMemo(() => {
     const map = new Map<string, FolderInfo>()
@@ -1413,12 +1418,12 @@ export default function App() {
             : TITLES[view.kind]
   let subtitle = ''
   if (isGrid) {
-    subtitle = summarize(visible)
-    const range = formatRange(visible, dateField)
+    subtitle = visibleSummary.text
+    const range = visibleSummary.range
     if (range) subtitle += ` · ${range}`
     if (currentPlace) subtitle = `${[currentPlace.admin, currentPlace.country].filter(Boolean).join(', ')} · ${subtitle}`
-    if (currentTrip) subtitle = `${formatTripDates(currentTrip.start, currentTrip.end)} · ${currentTrip.where ? currentTrip.where + ' · ' : ''}${summarize(visible)}`
-    if (view.kind === 'similar') subtitle = `${summarize(visible)} · most alike first, by what's in them`
+    if (currentTrip) subtitle = `${formatTripDates(currentTrip.start, currentTrip.end)} · ${currentTrip.where ? currentTrip.where + ' · ' : ''}${visibleSummary.text}`
+    if (view.kind === 'similar') subtitle = `${visibleSummary.text} · most alike first, by what's in them`
     if (currentAlbum?.query) subtitle = `Smart album · “${currentAlbum.query}” · ${subtitle}`
     if (search && smart.pending) subtitle += ' · Looking inside photos…'
     else if (smartHits) subtitle += ` · ${formatCount(smartHits)} found by what's in them`

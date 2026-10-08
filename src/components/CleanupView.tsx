@@ -195,9 +195,10 @@ export function CleanupView(props: Props) {
     return { quality, shots, large }
   }, [items, facts, settings.blurThreshold, settings.largeFileMB])
   const pairs = useMemo(() => duplicateFolders(items, groups, byId), [items, groups, byId])
+  // only on its own tab: it goes through every file's path
   const backupRes = useMemo(
-    () => (main && backup && main !== backup ? backupCheck(items, main, backup, groupOf, byId) : null),
-    [items, main, backup, groupOf, byId],
+    () => (tab === 'backup' && main && backup && main !== backup ? backupCheck(items, main, backup, groupOf, byId) : null),
+    [tab, items, main, backup, groupOf, byId],
   )
 
   const flat: Listed[] | null =

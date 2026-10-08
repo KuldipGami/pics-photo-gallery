@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
-import { api } from './api'
+import { api, parseItems } from './api'
 import type { TagsData } from './components/RatingFilter'
 import type {
   Album,
@@ -33,6 +33,10 @@ export function useElementSize(ref: RefObject<HTMLElement | null>) {
 }
 
 const EMPTY_PEOPLE: PeopleData = { enabled: true, people: [], byItem: {}, analysed: 0, faces: 0 }
+/** How often background progress is shown at most (ms). */
+const PROGRESS_MS = 500
+/** Progress reports are small objects: equal JSON = nothing to show. */
+const sameJson = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b)
 const EMPTY_DUPES: DuplicatesData = { groups: [], facts: {}, sensitivity: 90, findCrops: true }
 
 /** Live view of the main-process library, settings, scan status, people, albums, places… */
@@ -66,34 +70,54 @@ export function useLibrary() {
   })
 
   useEffect(() => {
+    // Background jobs report progress several times a second each, and every report re-rendered
+    // the whole window. Reports are shown at most every PROGRESS_MS, all in one render, and a
+    // report that changes nothing doesn't render at all.
+    const pending = new Map<unknown, () => void>()
+    let timer = 0
+    const flush = () => {
+      timer = 0
+      const run = [...pending.values()]
+      pending.clear()
+      for (const fn of run) fn()
+    }
+    const later = (key: unknown, fn: () => void) => {
+      pending.set(key, fn)
+      if (!timer) timer = window.setTimeout(flush, PROGRESS_MS)
+    }
+    const progress =
+      <T,>(set: (update: (prev: T) => T) => void) =>
+      (next: T) =>
+        later(set, () => set((prev) => (sameJson(prev, next) ? prev : next)))
     const offs = [
-      api.onPeople(setPeople),
-      api.onPeopleProgress(setPeopleProgress),
-      api.onLibrary((p) => setItems(p.items)),
-      api.onStatus(setStatus),
-      api.onThumbProgress(setThumbProgress),
+      api.onPeopleText((json) => setPeople(JSON.parse(json))),
+      api.onPeopleProgress(progress(setPeopleProgress)),
+      api.onLibraryText((p) => setItems(parseItems(p.items))),
+      api.onStatus(setStatus), // (right away: "Looking for photos…" shouldn't wait)
+      api.onThumbProgress(progress(setThumbProgress)),
       api.onSettings(setSettings),
       api.onAlbums(setAlbums),
       api.onPlaces(setPlaces),
-      api.onDuplicates(setDupes),
-      api.onDuplicatesProgress(setDupesProgress),
-      api.onVideosProgress(setVideosProgress),
-      api.onSmartProgress(setSmartProgress),
-      api.onOcrProgress(setOcrProgress),
-      api.onOcrChanged(() => setOcrVersion((v) => v + 1)),
+      api.onDuplicatesText((json) => setDupes(JSON.parse(json))),
+      api.onDuplicatesProgress(progress(setDupesProgress)),
+      api.onVideosProgress(progress(setVideosProgress)),
+      api.onSmartProgress(progress(setSmartProgress)),
+      api.onOcrProgress(progress(setOcrProgress)),
+      api.onOcrChanged(() => later(setOcrVersion, () => setOcrVersion((v) => v + 1))),
       api.onHistory(setHistory),
       api.onTags(setTags),
     ]
-    api.getState().then((s) => {
-      setItems(s.items)
+    api.getStateText().then((s) => {
+      pending.clear() // reports that came in before this snapshot are older than it
+      setItems(parseItems(s.items))
       setStatus(s.status)
       setSettings(s.settings)
       setVersion(s.version)
-      setPeople(s.people)
+      setPeople(JSON.parse(s.people))
       setPeopleProgress(s.peopleProgress)
       setAlbums(s.albums)
       setPlaces(s.places)
-      setDupes(s.dupes)
+      setDupes(JSON.parse(s.dupes))
       setDupesProgress(s.dupesProgress)
       setVideosProgress(s.videosProgress)
       setSmartProgress(s.smartProgress)
@@ -102,7 +126,10 @@ export function useLibrary() {
       setLaunch(s.launch ?? null)
       setTags(s.tags ?? { byItem: {} })
     })
-    return () => offs.forEach((off) => off())
+    return () => {
+      offs.forEach((off) => off())
+      clearTimeout(timer)
+    }
   }, [])
 
   return {
