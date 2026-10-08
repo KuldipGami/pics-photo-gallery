@@ -17,6 +17,7 @@ import type {
   SmartProgress,
   Theme,
   ThumbProgress,
+  OcrProgress,
   VideosProgress,
   WatchAlert,
 } from './types'
@@ -51,6 +52,7 @@ export interface LumenApi {
     dupesProgress: DuplicatesProgress
     videosProgress: VideosProgress
     smartProgress: SmartProgress
+    ocrProgress: OcrProgress
     history: HistoryEntry[]
     /** Lumen was started for a folder or to review duplicates (taken once). */
     launch: { folder?: string; duplicates?: boolean } | null
@@ -140,6 +142,14 @@ export interface LumenApi {
   editSave(id: string, recipe: EditRecipe): Promise<{ id: string; name: string } | { error: string }>
   editClose(): Promise<void>
   onSmartProgress(cb: (progress: SmartProgress) => void): Unsubscribe
+  /** Items whose text (read from the picture) has every word, best first. */
+  ocrSearch(query: string): Promise<{ ids: string[]; snippets: string[]; scores: number[] }>
+  /** For each (folded) search word: the ids whose text has a word starting with it. */
+  ocrTokenHits(tokens: string[]): Promise<string[][]>
+  /** The text read in a photo (lines), or null. */
+  ocrText(id: string): Promise<string | null>
+  onOcrProgress(cb: (progress: OcrProgress) => void): Unsubscribe
+  onOcrChanged(cb: () => void): Unsubscribe
   renamePerson(id: string, name: string): Promise<void>
   hidePerson(id: string, hidden: boolean): Promise<void>
   mergePeople(fromIds: string[], intoId: string): Promise<void>
@@ -170,6 +180,7 @@ export interface LumenApi {
       highPerformanceGpu: boolean
       faceRecognition: boolean
       smartSearch: boolean
+      textSearch: boolean
       dupeSensitivity: number
       findCrops: boolean
       keepRule: KeepRule

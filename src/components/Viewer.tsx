@@ -54,6 +54,9 @@ interface Props {
   onRate?(item: MediaItem, rating: number): void
   onAddTags?(item: MediaItem, tags: string[]): void
   onRemoveTag?(item: MediaItem, tag: string): void
+  /** Changes when the text read in photos changes; the search (to highlight in that text). */
+  textVersion?: number
+  query?: string
 }
 
 const SLIDE_MS = 4000
@@ -96,6 +99,8 @@ export function Viewer({
   onRate,
   onAddTags,
   onRemoveTag,
+  textVersion,
+  query,
 }: Props) {
   const item = items[index]
   const [editing, setEditing] = useState(false)
@@ -435,6 +440,8 @@ export function Viewer({
             onRate={onRate && ((n) => onRate(item, n))}
             onAddTags={onAddTags && ((t) => onAddTags(item, t))}
             onRemoveTag={onRemoveTag && ((t) => onRemoveTag(item, t))}
+            textVersion={textVersion}
+            query={query}
           />
         )}
       </div>

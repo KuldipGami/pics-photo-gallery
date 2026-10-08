@@ -13,6 +13,7 @@ import type {
   ScanStatus,
   Settings,
   SmartProgress,
+  OcrProgress,
   ThumbProgress,
   VideosProgress,
 } from './types'
@@ -50,6 +51,9 @@ export function useLibrary() {
   const [launch, setLaunch] = useState<{ folder?: string; duplicates?: boolean } | null>(null)
   const [tags, setTags] = useState<TagsData>({ byItem: {} })
   const [dupesProgress, setDupesProgress] = useState<DuplicatesProgress>({ running: false, phase: 'idle', done: 0, total: 0 })
+  const [ocrProgress, setOcrProgress] = useState<OcrProgress>({ done: 0, total: 0, running: false, indexed: 0, withText: 0, available: true, error: null, lang: null })
+  /** Goes up whenever the text read in photos changes (to refresh searches and the details panel). */
+  const [ocrVersion, setOcrVersion] = useState(0)
   const [videosProgress, setVideosProgress] = useState<VideosProgress>({ running: false, done: 0, total: 0, current: null })
   const [smartProgress, setSmartProgress] = useState<SmartProgress>({
     done: 0,
@@ -75,6 +79,8 @@ export function useLibrary() {
       api.onDuplicatesProgress(setDupesProgress),
       api.onVideosProgress(setVideosProgress),
       api.onSmartProgress(setSmartProgress),
+      api.onOcrProgress(setOcrProgress),
+      api.onOcrChanged(() => setOcrVersion((v) => v + 1)),
       api.onHistory(setHistory),
       api.onTags(setTags),
     ]
@@ -91,6 +97,7 @@ export function useLibrary() {
       setDupesProgress(s.dupesProgress)
       setVideosProgress(s.videosProgress)
       setSmartProgress(s.smartProgress)
+      if (s.ocrProgress) setOcrProgress(s.ocrProgress)
       setHistory(s.history)
       setLaunch(s.launch ?? null)
       setTags(s.tags ?? { byItem: {} })
@@ -113,10 +120,34 @@ export function useLibrary() {
     dupesProgress,
     videosProgress,
     smartProgress,
+    ocrProgress,
+    ocrVersion,
     history,
     launch,
     tags,
   }
+}
+
+/**
+ * For each search word, the items whose text (read from the picture) has a word starting with it.
+ * Null until the answer for exactly these words is in.
+ */
+export function useTextHits(tokens: string[], version: number, enabled: boolean) {
+  const key = enabled ? tokens.join('\n') : ''
+  const [result, setResult] = useState<{ key: string; version: number; hits: Set<string>[] } | null>(null)
+  useEffect(() => {
+    if (!key) return
+    let live = true
+    const t = setTimeout(async () => {
+      const hits = await api.ocrTokenHits(key.split('\n'))
+      if (live) setResult({ key, version, hits: hits.map((ids) => new Set(ids)) })
+    }, 120)
+    return () => {
+      live = false
+      clearTimeout(t)
+    }
+  }, [key, version])
+  return key && result?.key === key ? result.hits : null
 }
 
 /**

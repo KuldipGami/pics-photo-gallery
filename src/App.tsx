@@ -76,7 +76,7 @@ import { SettingsView } from './components/SettingsView'
 import { Sidebar } from './components/Sidebar'
 import { TitleBar } from './components/TitleBar'
 import { Viewer } from './components/Viewer'
-import { useEvent, useLibrary, useSmartSearch, useToasts } from './hooks'
+import { useEvent, useLibrary, useSmartSearch, useTextHits, useToasts } from './hooks'
 import { baseName, formatBytes, formatCount, formatRange, summarize } from './lib/format'
 import { buildReports, groupKey, isUnder, largeList, lowQualityList, ruleMarks, screenshotList, type Facts } from './lib/cleanup'
 import { pairLivePhotos } from './lib/live'
@@ -140,6 +140,8 @@ export default function App() {
     history,
     launch,
     tags: tagsData,
+    ocrProgress,
+    ocrVersion,
   } = useLibrary()
   const [view, setView] = useState<View>({ kind: 'photos' })
   const [query, setQuery] = useState('')
@@ -394,6 +396,8 @@ export default function App() {
     return [...known]
   }, [people.people, places.places, items, tagsData])
   const smartOn = settings?.smartSearch !== false && smartProgress.available && smartProgress.indexed > 0
+  const textOn = settings?.textSearch !== false && ocrProgress.withText > 0
+  const textHits = useTextHits(tokens, ocrVersion, textOn && isGrid)
   const search = useMemo(() => {
     if (!tokens.length || !isGrid) return null
     const known = new Set(knownWords)
@@ -408,11 +412,17 @@ export default function App() {
       if (isKnown(t, i)) strict |= 1 << i
     })
     const masks = new Map<string, number>()
+    const byText = new Set<string>() // matched thanks to the text in the picture
     const phrases = new Map<number, number>() // mask -> how many items need it
     for (const it of baseList) {
       const tagged = tagText(it, tagsData)
       const names = namesByItem.get(it.id)
-      const mask = tokenMask(it, tokens, tagged ? `${names ?? ''} | ${tagged}` : names, placeTextByItem.get(it.id))
+      let mask = tokenMask(it, tokens, tagged ? `${names ?? ''} | ${tagged}` : names, placeTextByItem.get(it.id))
+      const own = mask
+      textHits?.forEach((ids, i) => {
+        if (ids.has(it.id)) mask |= 1 << i
+      })
+      if (mask !== own && mask === full) byText.add(it.id)
       masks.set(it.id, mask)
       if (mask === full || (mask & strict) !== strict) continue
       phrases.set(mask, (phrases.get(mask) ?? 0) + 1)
@@ -422,8 +432,8 @@ export default function App() {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 4)
       .map(([mask]) => phraseOf(mask))
-    return { masks, full, strict, lookups, phraseOf }
-  }, [tokens, query, isGrid, baseList, namesByItem, placeTextByItem, knownWords, tagsData])
+    return { masks, full, strict, lookups, phraseOf, byText }
+  }, [tokens, query, isGrid, baseList, namesByItem, placeTextByItem, knownWords, tagsData, textHits])
   const smart = useSmartSearch(smartOn && search ? search.lookups : [])
 
   const visible = useMemo(() => {
@@ -1317,6 +1327,7 @@ export default function App() {
     if (currentAlbum?.query) subtitle = `Smart album · “${currentAlbum.query}” · ${subtitle}`
     if (search && smart.pending) subtitle += ' · Looking inside photos…'
     else if (smartHits) subtitle += ` · ${formatCount(smartHits)} found by what's in them`
+    if (search?.byText.size) subtitle += ` · ${formatCount(search.byText.size)} by the text in them`
   } else if (view.kind === 'places') {
     subtitle = places.places.length
       ? `${formatCount(places.places.length)} places · from photo locations, worked out on this computer`
@@ -2083,6 +2094,7 @@ export default function App() {
         smartProgress={smartProgress}
         dupesProgress={dupesProgress}
         videosProgress={videosProgress}
+        ocrProgress={ocrProgress}
         onNewAlbum={() => setNewAlbum(true)}
         canDropItems={() => internalDrag.current && draggingIds.current.length > 0}
         onDropOnAlbum={(albumId) => {
@@ -2173,6 +2185,8 @@ export default function App() {
           }}
           onLocate={(item) => setLocating([item.id])}
           marksOf={(item) => marksOf(item, tagsData)}
+          textVersion={ocrVersion}
+          query={query}
           tagSuggestions={allTags}
           onRate={(item, n) => api.rateItems([item.id], n)}
           onAddTags={(item, list) => api.editTags([item.id], { add: list })}

@@ -2,7 +2,7 @@ import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, Impor
 import { useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
-import type { Album, DuplicatesProgress, MediaItem, PeopleProgress, ScanStatus, SmartProgress, ThumbProgress, VideosProgress, View } from '../types'
+import type { Album, DuplicatesProgress, MediaItem, PeopleProgress, ScanStatus, SmartProgress, ThumbProgress, VideosProgress, OcrProgress, View } from '../types'
 import { albumCover } from './AlbumsView'
 import { CoverImage } from './CoverImage'
 
@@ -19,6 +19,7 @@ interface Props {
   smartProgress: SmartProgress
   dupesProgress: DuplicatesProgress
   videosProgress?: VideosProgress
+  ocrProgress?: OcrProgress
   /** "Watching 2 folders for new duplicates" (empty when not watching). */
   watchStatus?: string
   onNewAlbum(): void
@@ -27,7 +28,7 @@ interface Props {
   onDropOnAlbum(albumId: string): void
 }
 
-const pct = (done: number, total: number) => (total ? Math.floor((done / total) * 100) : 0)
+const pct = (done: number, total: number) => (total ? Math.min(100, Math.floor((done / total) * 100)) : 0)
 
 export function Sidebar(props: Props) {
   const { view, onNavigate, counts, status, thumbProgress, peopleProgress, smartProgress, dupesProgress } = props
@@ -163,6 +164,14 @@ export function Sidebar(props: Props) {
             <LoaderCircle size={14} className="spin" />
             <span>Finding duplicates · {pct(dupesProgress.done, dupesProgress.total)}%</span>
             <span className="scan-progress" style={{ width: `${pct(dupesProgress.done, dupesProgress.total)}%` }} />
+          </>
+        ) : props.ocrProgress?.running ? (
+          <>
+            <LoaderCircle size={14} className="spin" />
+            <span title={`${formatCount(props.ocrProgress.done)} of ${formatCount(props.ocrProgress.total)} photos read, for searching their text`}>
+              Reading text in photos · {pct(props.ocrProgress.done, props.ocrProgress.total)}%
+            </span>
+            <span className="scan-progress" style={{ width: `${pct(props.ocrProgress.done, props.ocrProgress.total)}%` }} />
           </>
         ) : props.videosProgress?.running ? (
           <>

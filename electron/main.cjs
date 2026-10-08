@@ -40,6 +40,7 @@ const { Locations, assignLocations, historyNote } = require('./locations.cjs')
 const locSuggest = require('./location-suggest.cjs')
 const { Tags } = require('./tags.cjs')
 const { Importer } = require('./importer.cjs')
+const { OcrIndex } = require('./ocr.cjs')
 const bgx = require('./background.cjs')
 const { WatchAlerts } = require('./watch-alerts.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
@@ -134,6 +135,7 @@ const store = new Store(path.join(userData, 'settings.json'), {
   highPerformanceGpu: true,
   faceRecognition: true,
   smartSearch: true,
+  textSearch: true,
   // Clean up (from DupeLens)
   dupeSensitivity: 90,
   findCrops: true,
@@ -203,6 +205,8 @@ let userLocations
 let tags
 /** Import from phones, cameras, cards and folders. */
 let importer
+/** Text in photos (Windows' own OCR). */
+let ocr
 /** @type {WatchAlerts} */
 let alerts
 /** @type {import('./background.cjs').Background} */
@@ -235,6 +239,16 @@ function startServices() {
     hintFile: path.join(userData, 'face-engine.json'),
   })
   smart.enabled = store.get('smartSearch') !== false
+  ocr = new OcrIndex(path.join(userData, 'ocr.json'), {
+    canRun: idle,
+    // a HEIC's viewer preview, when there is one, reads ~2× quicker than the HEIC itself
+    image: (item) => {
+      const name = thumbs.name(item, 'preview')
+      return thumbs.cached.has(name) ? path.join(thumbs.dir, name) : null
+    },
+    render: (item) => thumbs.source(item), // only when Windows can't decode the file
+  })
+  ocr.enabled = store.get('textSearch') !== false
   // Look-alike videos: frames read from the videos themselves, one at a time in the background.
   // While the window is in use, frames are read by playing (smooth) rather than seeking.
   videoFrames = new VideoFrames(path.join(userData, 'video-frames.bin'), {
@@ -292,6 +306,7 @@ function startServices() {
     thumbs.prefetch(library.list)
     faces.sync(library.list)
     smart.sync(library.list)
+  ocr.sync(library.list)
     dupes.sync(library.list)
   })
   thumbs.on('progress', (progress) => {
@@ -299,6 +314,7 @@ function startServices() {
     if (progress.pending === 0) {
       faces.pump()
       smart.pump()
+      ocr.pump()
       dupes.pump()
     }
   })
@@ -306,6 +322,8 @@ function startServices() {
   faces.on('changed', () => send('people:changed', faces.snapshot()))
   faces.on('progress', (progress) => send('people:progress', progress))
   smart.on('progress', (progress) => send('smart:progress', progress))
+  ocr.on('progress', (progress) => send('ocr:progress', progress))
+  ocr.on('changed', () => send('ocr:changed'))
   dupes.on('changed', () => send('dupes:changed', dupes.snapshot()))
   dupes.on('progress', (progress) => send('dupes:progress', progress))
   albums.on('changed', () => send('albums:changed', albums.snapshot()))
@@ -418,6 +436,7 @@ const settingsPayload = () => ({
   highPerformanceGpu: store.get('highPerformanceGpu') !== false,
   faceRecognition: store.get('faceRecognition') !== false,
   smartSearch: store.get('smartSearch') !== false,
+  textSearch: store.get('textSearch') !== false,
   dupeSensitivity: store.get('dupeSensitivity'),
   findCrops: store.get('findCrops') !== false,
   keepRule: store.get('keepRule'),
@@ -683,6 +702,7 @@ const appState = () => ({
   dupesProgress: dupes.progressInfo(),
   videosProgress: videoFrames.progressInfo(),
   smartProgress: smart.progressInfo(),
+  ocrProgress: ocr.progressInfo(),
   version: app.getVersion(),
   launch: takeLaunchRequest(),
 })
@@ -828,6 +848,7 @@ async function refreshEdited(paths) {
     }
     dupes.records.delete(it.id)
     smart.vectors.delete(it.id)
+    ocr.records.delete(it.id)
     faces.removeItems([it.id])
     library.items.delete(keyOf(p)) // re-read on the next scan
   }
@@ -866,7 +887,7 @@ async function relocate(pairs) {
         } catch {}
       }
     }
-    for (const map of [dupes.records, smart.vectors, videoFrames.records]) {
+    for (const map of [dupes.records, smart.vectors, videoFrames.records, ocr.records]) {
       if (map.has(oldId)) {
         map.set(newId, map.get(oldId))
         map.delete(oldId)
@@ -890,6 +911,7 @@ async function relocate(pairs) {
   dupes.saveSoon(2000)
   smart.saveSoon(2000)
   videoFrames.saveSoon(2000)
+  ocr.saveSoon(2000)
   if (favChanged) {
     store.set({ favorites: [...favs.values()] })
     send('settings:changed', settingsPayload())
@@ -916,13 +938,14 @@ async function retime(changes) {
         thumbs.cached.add(after)
       } catch {}
     }
-    for (const r of [dupes.records.get(it.id), smart.vectors.get(it.id), videoFrames.records.get(it.id)]) if (r) r.m = next.mtime
+    for (const r of [dupes.records.get(it.id), smart.vectors.get(it.id), videoFrames.records.get(it.id), ocr.records.get(it.id)]) if (r) r.m = next.mtime
     faceChanges.push({ id: it.id, mtime: next.mtime })
   }
   library.setItems(items)
   library.emit('changed')
   library.save()
   faces.retime(faceChanges)
+  ocr.saveSoon(2000)
 }
 
 // ---------- organize (from DupeLens) ----------
@@ -1207,6 +1230,11 @@ ipcMain.handle('locations:set', async (_e, assignments, label) => {
   return { done: res.written.length + res.stored.length, kept: res.kept, errors: res.errors }
 })
 
+ipcMain.handle('ocr:search', (_e, q) => (typeof q === 'string' ? ocr.search(q.slice(0, 200)) : { ids: [], snippets: [], scores: [] }))
+ipcMain.handle('ocr:hits', (_e, tokens) =>
+  Array.isArray(tokens) ? ocr.tokenHits(tokens.filter((t) => typeof t === 'string').map((t) => t.slice(0, 64))) : [],
+)
+ipcMain.handle('ocr:text', (_e, id) => (typeof id === 'string' ? ocr.text(id) : null))
 ipcMain.handle('smart:similar', (_e, id) => (typeof id === 'string' ? smart.similar(id) : { ids: [], scores: [] }))
 ipcMain.handle('smart:search', (_e, query) => (typeof query === 'string' ? smart.search(query.slice(0, 200)) : { ids: [], scores: [] }))
 
@@ -1237,6 +1265,10 @@ ipcMain.handle('settings:set', (_e, patch) => {
   if (typeof patch.smartSearch === 'boolean') {
     allowed.smartSearch = patch.smartSearch
     smart.setEnabled(patch.smartSearch)
+  }
+  if (typeof patch.textSearch === 'boolean') {
+    allowed.textSearch = patch.textSearch
+    ocr.setEnabled(patch.textSearch)
   }
   if (Number.isFinite(patch.dupeSensitivity)) allowed.dupeSensitivity = Math.round(Math.min(99, Math.max(80, patch.dupeSensitivity)))
   if (typeof patch.findCrops === 'boolean') allowed.findCrops = patch.findCrops
@@ -1315,6 +1347,7 @@ function forgetItems(ids) {
   albums.forget(ids)
   tags.forget(ids)
   smart.sync(library.list)
+  ocr.sync(library.list)
   dupes.sync(library.list)
 }
 
@@ -1592,6 +1625,7 @@ app.whenReady().then(async () => {
   thumbs.prefetch(library.list)
   faces.sync(library.list)
   smart.sync(library.list)
+  ocr.sync(library.list)
   dupes.sync(library.list)
   watchFolders()
   scan()
@@ -1619,6 +1653,7 @@ app.on('before-quit', () => {
   thumbs?.dispose()
   faces?.dispose()
   smart?.dispose()
+  ocr?.dispose()
   dupes?.dispose()
   tags?.saveNow()
   importer?.dispose()

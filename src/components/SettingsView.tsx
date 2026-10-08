@@ -402,6 +402,19 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
         </section>
 
         <section className="card">
+          <h2>Text in photos</h2>
+          <div className="setting-row">
+            <div>
+              <div>Search the text in photos</div>
+              <div className="setting-hint">
+                Find screenshots, receipts, tickets and signs by the words in them — “invoice”, “boarding pass”, a phone number. Windows reads the text on this computer — nothing is uploaded.
+              </div>
+            </div>
+            <Toggle on={settings.textSearch} onChange={() => api.setSettings({ textSearch: !settings.textSearch })} />
+          </div>
+        </section>
+
+        <section className="card">
           <h2>Ratings & tags</h2>
           <div className="setting-row">
             <div>

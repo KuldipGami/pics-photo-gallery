@@ -49,6 +49,8 @@ export interface Settings {
   highPerformanceGpu: boolean
   faceRecognition: boolean
   smartSearch: boolean
+  /** Find photos by the text in them (Windows OCR). */
+  textSearch: boolean
   /** Clean up: match threshold 80–99 %. */
   dupeSensitivity: number
   findCrops: boolean
@@ -171,6 +173,18 @@ export interface DupGroup {
   sharpest: number
   /** Video groups: where each clip starts on the longest clip's timeline (s), indexed like ids. */
   offsets?: number[]
+}
+
+/** Reading the text in photos (Windows OCR, background). */
+export interface OcrProgress {
+  done: number
+  total: number
+  running: boolean
+  indexed: number
+  withText: number
+  available: boolean
+  error: string | null
+  lang: string | null
 }
 
 /** Reading videos' frames for look-alike videos (background). */

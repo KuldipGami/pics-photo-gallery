@@ -1,6 +1,7 @@
 import { Aperture, Calendar, CalendarClock, ExternalLink, FileImage, Film, Folder, MapPin, RotateCcw, RotateCw, Star, Tag, UserRoundPen, UserRoundSearch, UserX, Users, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { PhotoText } from './PhotoText'
 import { RatingStars } from './RatingStars'
 import { TagEditor, type TagCount } from './TagEditor'
 import { baseName, formatBytes, formatDuration, formatExposure, formatLongDate, formatTime } from '../lib/format'
@@ -40,6 +41,8 @@ interface Props {
   onRate?(rating: number): void
   onAddTags?(tags: string[]): void
   onRemoveTag?(tag: string): void
+  textVersion?: number
+  query?: string
 }
 
 const JPEG = new Set(['jpg', 'jpeg', 'jpe', 'jfif'])
@@ -63,7 +66,17 @@ function parseDate(text: string): number | null {
   return date.getMonth() === +mo - 1 && date.getDate() === +d ? date.getTime() : null
 }
 
-export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson, onAssignFace, onRemoveFace, onHighlight, onClose, onToast, onLocate, marks, tagSuggestions, onRate, onAddTags, onRemoveTag }: Props) {
+export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson, onAssignFace, onRemoveFace, onHighlight, onClose, onToast, onLocate, marks, tagSuggestions, onRate, onAddTags, onRemoveTag, textVersion, query }: Props) {
+  // the text Windows read in the picture (Text search)
+  const [text, setText] = useState<string | null>(null)
+  useEffect(() => {
+    let live = true
+    setText(null)
+    api.ocrText(item.id).then((t) => live && setText(t))
+    return () => {
+      live = false
+    }
+  }, [item.id, textVersion])
   const m = item.meta ?? {}
   const jpeg = item.type === 'image' && JPEG.has(item.ext)
   const [dateText, setDateText] = useState(() => editText(item.taken ?? item.date))
@@ -180,6 +193,8 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
           <div className="info-secondary break">{item.dir}</div>
         </div>
       </button>
+
+      <PhotoText text={text} query={query} onToast={onToast} />
 
       {marks && onRate && (
         <div className="info-row">
