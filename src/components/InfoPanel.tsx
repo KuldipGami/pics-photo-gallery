@@ -1,6 +1,8 @@
-import { Aperture, Calendar, CalendarClock, ExternalLink, FileImage, Film, Folder, MapPin, RotateCcw, RotateCw, UserRoundPen, UserRoundSearch, UserX, Users, X } from 'lucide-react'
+import { Aperture, Calendar, CalendarClock, ExternalLink, FileImage, Film, Folder, MapPin, RotateCcw, RotateCw, Star, Tag, UserRoundPen, UserRoundSearch, UserX, Users, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { RatingStars } from './RatingStars'
+import { TagEditor, type TagCount } from './TagEditor'
 import { baseName, formatBytes, formatDuration, formatExposure, formatLongDate, formatTime } from '../lib/format'
 import { fileNameDate } from '../lib/insights'
 import type { FaceBox, MediaItem, Place } from '../types'
@@ -32,6 +34,12 @@ interface Props {
   onToast(text: string): void
   /** Add or change where it was taken. */
   onLocate?(item: MediaItem): void
+  /** Rating & tags (Lumen's own, else the file's). */
+  marks?: { rating: number; tags: string[] }
+  tagSuggestions?: TagCount[]
+  onRate?(rating: number): void
+  onAddTags?(tags: string[]): void
+  onRemoveTag?(tag: string): void
 }
 
 const JPEG = new Set(['jpg', 'jpeg', 'jpe', 'jfif'])
@@ -55,7 +63,7 @@ function parseDate(text: string): number | null {
   return date.getMonth() === +mo - 1 && date.getDate() === +d ? date.getTime() : null
 }
 
-export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson, onAssignFace, onRemoveFace, onHighlight, onClose, onToast, onLocate }: Props) {
+export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson, onAssignFace, onRemoveFace, onHighlight, onClose, onToast, onLocate, marks, tagSuggestions, onRate, onAddTags, onRemoveTag }: Props) {
   const m = item.meta ?? {}
   const jpeg = item.type === 'image' && JPEG.has(item.ext)
   const [dateText, setDateText] = useState(() => editText(item.taken ?? item.date))
@@ -172,6 +180,23 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
           <div className="info-secondary break">{item.dir}</div>
         </div>
       </button>
+
+      {marks && onRate && (
+        <div className="info-row">
+          <Star size={18} />
+          <div className="info-grow">
+            <RatingStars dark value={marks.rating} onChange={onRate} size={20} />
+          </div>
+        </div>
+      )}
+      {marks && onAddTags && onRemoveTag && (
+        <div className="info-row">
+          <Tag size={18} />
+          <div className="info-grow">
+            <TagEditor dark values={[marks.tags]} suggestions={tagSuggestions ?? []} onAdd={onAddTags} onRemove={onRemoveTag} placeholder="Add a tag…" />
+          </div>
+        </div>
+      )}
 
       {m.lat !== undefined && m.lon !== undefined && (
         <div className="info-row">

@@ -1,0 +1,347 @@
+const fs = require('node:fs')
+const fsp = require('node:fs/promises')
+const path = require('node:path')
+const { EventEmitter } = require('node:events')
+const { idOf, keyOf } = require('./library.cjs')
+const xmp = require('./xmp.cjs')
+
+const RATING = 1
+const TAGS = 2
+const RETRIES = 3
+
+/**
+ * Star ratings and tags set in Lumen (tags.json), keyed by file path like favorites and albums.
+ * A library item carries what its file says (item.rating / item.tags, read during scans); a value
+ * set here wins over the file's until the file changes on disk after Lumen wrote it. JPEGs also get
+ * the values written inside them (xmp.cjs), one file at a time in the background; other formats
+ * stay in this store, plus an XMP sidecar when that setting is on.
+ *
+ * Events: 'changed' (snapshot), 'writing' (path) just before a file is rewritten,
+ * 'written' ({ id, path, size, mtime, rating?, tags? }) after a photo was updated (its size
+ * changed, its modified date didn't), 'write-error' ({ id, path, name, message }).
+ */
+class Tags extends EventEmitter {
+  constructor(file, { writeFiles = true, sidecars = false } = {}) {
+    super()
+    this.file = file
+    this.writeFiles = writeFiles
+    this.sidecars = sidecars
+    // key(path) → { path, rating?, tags?, edited, stamp?: [size, mtime], dirty?: RATING | TAGS }
+    this.entries = new Map()
+    this.timer = null
+    this.queue = new Set()
+    this.pumping = false
+    this.holds = 0
+    this.idleWaiters = []
+    this.started = false
+  }
+
+  async load() {
+    try {
+      const data = JSON.parse(await fsp.readFile(this.file, 'utf8'))
+      if (data.version === 1 && Array.isArray(data.items)) {
+        for (const e of data.items) {
+          if (!e || typeof e.path !== 'string') continue
+          const entry = { path: e.path, edited: Number(e.edited) || 0 }
+          if (e.rating !== undefined) entry.rating = xmp.cleanRating(e.rating)
+          if (Array.isArray(e.tags)) entry.tags = xmp.cleanTags(e.tags)
+          if (Array.isArray(e.stamp) && e.stamp.length === 2) entry.stamp = e.stamp.map(Number)
+          if (e.dirty) entry.dirty = e.dirty & (RATING | TAGS)
+          this.entries.set(keyOf(e.path), entry)
+        }
+      }
+    } catch {}
+  }
+
+  serialize() {
+    return JSON.stringify({ version: 1, items: [...this.entries.values()].map(({ gen, tries, ...e }) => e) })
+  }
+
+  saveSoon() {
+    clearTimeout(this.timer)
+    this.timer = setTimeout(() => this.save(), 500)
+  }
+
+  async save() {
+    clearTimeout(this.timer)
+    this.timer = null
+    try {
+      const tmp = `${this.file}.tmp`
+      await fsp.writeFile(tmp, this.serialize())
+      await fsp.rename(tmp, this.file)
+    } catch (err) {
+      console.error('Failed to save tags', err)
+    }
+  }
+
+  /** On quit (sync). Pending file writes stay marked and are retried by resume() next time. */
+  saveNow() {
+    if (!this.timer) return
+    clearTimeout(this.timer)
+    this.timer = null
+    try {
+      fs.writeFileSync(this.file, this.serialize())
+    } catch {}
+  }
+
+  changed() {
+    this.saveSoon()
+    this.emit('changed', this.snapshot())
+  }
+
+  /** Settings: write inside JPEGs (default on), XMP sidecars for other formats (default off). */
+  configure({ writeFiles, sidecars } = {}) {
+    if (writeFiles !== undefined) this.writeFiles = !!writeFiles
+    if (sidecars !== undefined) this.sidecars = !!sidecars
+  }
+
+  /** For the UI: { byItem: { [itemId]: { rating?, tags? } } } — only values set in Lumen. */
+  snapshot() {
+    const byItem = {}
+    for (const e of this.entries.values()) {
+      const v = {}
+      if (e.rating !== undefined) v.rating = e.rating
+      if (e.tags !== undefined) v.tags = e.tags
+      if (v.rating !== undefined || v.tags !== undefined) byItem[idOf(e.path)] = v
+    }
+    return { byItem }
+  }
+
+  /** What to show for a library item: Lumen's value when set, else the file's. */
+  valuesOf(item) {
+    const e = this.entries.get(keyOf(item.path))
+    return {
+      rating: e?.rating ?? xmp.cleanRating(item.rating),
+      tags: e?.tags ?? (Array.isArray(item.tags) ? item.tags : []),
+    }
+  }
+
+  entryFor(item) {
+    const key = keyOf(item.path)
+    let e = this.entries.get(key)
+    if (!e) this.entries.set(key, (e = { path: item.path, edited: 0 }))
+    return e
+  }
+
+  mark(item, e, bit) {
+    e.edited = Date.now()
+    e.dirty = (e.dirty ?? 0) | bit
+    e.gen = (e.gen ?? 0) + 1
+    e.tries = 0
+    this.queueWrite(keyOf(item.path))
+  }
+
+  /** Sets the star rating (0 clears) of library items. Returns how many changed. */
+  setRating(items, rating) {
+    const r = xmp.cleanRating(rating)
+    let n = 0
+    for (const it of items) {
+      if (!it?.path || this.valuesOf(it).rating === r) continue
+      const e = this.entryFor(it)
+      e.rating = r
+      this.mark(it, e, RATING)
+      n++
+    }
+    if (n) this.changed()
+    return n
+  }
+
+  /**
+   * Adds and/or removes tags on library items: { add?: string[], remove?: string[] }, or
+   * { set: string[] } to replace them. Tags already on an item keep their spelling. Returns how
+   * many items changed.
+   */
+  editTags(items, { add = [], remove = [], set } = {}) {
+    const adding = xmp.cleanTags(add)
+    const dropping = new Set(xmp.cleanTags(remove).map((t) => t.toLowerCase()))
+    let n = 0
+    for (const it of items) {
+      if (!it?.path) continue
+      const current = this.valuesOf(it).tags
+      const next = Array.isArray(set)
+        ? xmp.cleanTags(set)
+        : xmp.cleanTags([...current.filter((t) => !dropping.has(t.toLowerCase())), ...adding.filter((t) => !dropping.has(t.toLowerCase()))])
+      if (xmp.sameTags(next, current)) continue
+      const e = this.entryFor(it)
+      e.tags = next
+      this.mark(it, e, TAGS)
+      n++
+    }
+    if (n) this.changed()
+    return n
+  }
+
+  /** Every tag in use among `items` with how many items have it, most used first. */
+  allTags(items) {
+    const counts = new Map() // lower → { tag, count }
+    for (const it of items) {
+      for (const t of this.valuesOf(it).tags) {
+        const k = t.toLowerCase()
+        const c = counts.get(k)
+        if (c) c.count++
+        else counts.set(k, { tag: t, count: 1 })
+      }
+    }
+    return [...counts.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
+  }
+
+  /** Files Lumen moved or renamed keep their rating and tags: Map(old key → new path). */
+  remapPaths(map) {
+    let changed = false
+    for (const [key, e] of [...this.entries]) {
+      const to = map.get(key)
+      if (!to) continue
+      this.entries.delete(key)
+      this.queue.delete(key)
+      e.path = to
+      this.entries.set(keyOf(to), e)
+      if (e.dirty) this.queueWrite(keyOf(to))
+      changed = true
+    }
+    if (changed) this.changed()
+  }
+
+  /** Files that left the library (recycled / moved away by Lumen). */
+  forget(itemIds) {
+    const drop = new Set(itemIds)
+    let changed = false
+    for (const [key, e] of [...this.entries]) {
+      if (!drop.has(idOf(e.path))) continue
+      this.entries.delete(key)
+      this.queue.delete(key)
+      changed = true
+    }
+    if (changed) this.changed()
+  }
+
+  /**
+   * After a scan: a photo Lumen wrote whose file changed since (Explorer, Lightroom…) goes back
+   * to the file's values; one whose library item now shows the same values needs no entry.
+   */
+  reconcile(items) {
+    let changed = false
+    const byKey = new Map(items.map((it) => [keyOf(it.path), it]))
+    for (const [key, e] of [...this.entries]) {
+      if (!e.stamp || e.dirty) continue
+      const it = byKey.get(key)
+      if (!it) continue
+      const moved = it.size !== e.stamp[0] || it.mtime !== e.stamp[1]
+      const fileRating = xmp.cleanRating(it.rating)
+      const fileTags = Array.isArray(it.tags) ? it.tags : []
+      const same = (e.rating === undefined || e.rating === fileRating) && (e.tags === undefined || xmp.sameTags(e.tags, fileTags))
+      if (moved || same) {
+        this.entries.delete(key)
+        changed = true
+      }
+    }
+    if (changed) this.changed()
+  }
+
+  /** Drops entries whose files no longer exist (deleted outside Lumen). */
+  async prune(items) {
+    const known = new Set(items.map((it) => keyOf(it.path)))
+    let changed = false
+    for (const [key, e] of [...this.entries]) {
+      if (known.has(key)) continue
+      try {
+        await fsp.access(e.path)
+      } catch (err) {
+        if (err.code !== 'ENOENT') continue
+        this.entries.delete(key)
+        this.queue.delete(key)
+        changed = true
+      }
+    }
+    if (changed) this.changed()
+  }
+
+  // ── writing into files ──
+
+  /** Starts writing (call once the library is loaded); also retries writes left from last time. */
+  resume() {
+    this.started = true
+    for (const [key, e] of this.entries) if (e.dirty) this.queue.add(key)
+    this.pump()
+  }
+
+  queueWrite(key) {
+    this.queue.add(key)
+    this.pump()
+  }
+
+  /**
+   * Runs `fn` while no file is being written (e.g. Lumen moving, rotating or re-dating photos),
+   * then carries on. Resolves to fn's result.
+   */
+  async hold(fn) {
+    this.holds++
+    try {
+      await this.current
+      return await fn()
+    } finally {
+      this.holds--
+      this.pump()
+    }
+  }
+
+  /** Resolves once every queued write has been done (e.g. before quitting). */
+  flush() {
+    if ((!this.queue.size && !this.pumping) || !this.started) return Promise.resolve()
+    return new Promise((resolve) => this.idleWaiters.push(resolve))
+  }
+
+  async pump() {
+    if (this.pumping || !this.started) return
+    this.pumping = true
+    try {
+      while (this.queue.size && !this.holds) {
+        const key = this.queue.values().next().value
+        this.queue.delete(key)
+        this.current = this.writeOne(key)
+        await this.current
+      }
+    } finally {
+      this.current = null
+      this.pumping = false
+      if (!this.queue.size) for (const resolve of this.idleWaiters.splice(0)) resolve()
+    }
+  }
+
+  async writeOne(key) {
+    const e = this.entries.get(key)
+    if (!e?.dirty) return
+    const embed = this.writeFiles && xmp.canEmbed(e.path)
+    if (!embed && !this.sidecars) {
+      e.dirty = 0 // kept in Lumen only
+      this.saveSoon()
+      return
+    }
+    const gen = e.gen
+    const fields = {}
+    if (e.dirty & RATING) fields.rating = e.rating ?? 0
+    if (e.dirty & TAGS) fields.tags = e.tags ?? []
+    this.emit('writing', e.path)
+    const res = embed ? await xmp.writeJpeg(e.path, fields) : await xmp.writeSidecar(e.path, fields)
+    if (this.entries.get(key) !== e) return // moved or forgotten meanwhile (remapPaths re-queues)
+    if (res.ok) {
+      if (e.gen === gen) e.dirty = 0
+      else this.queue.add(key) // changed again while writing
+      if (embed) {
+        e.stamp = [res.size, res.mtime]
+        this.emit('written', { id: idOf(e.path), path: e.path, size: res.size, mtime: res.mtime, ...fields })
+      }
+      this.saveSoon()
+      return
+    }
+    if (res.busy && (e.tries = (e.tries ?? 0) + 1) < RETRIES) {
+      setTimeout(() => this.queueWrite(key), 4000 * e.tries) // open in another program: try again shortly
+      return
+    }
+    // Gone (moved or deleted outside Lumen): nothing to report. Otherwise Lumen keeps the value.
+    e.dirty = 0
+    if (!/ENOENT|no such file/i.test(res.error ?? '')) this.emit('write-error', { id: idOf(e.path), path: e.path, name: path.basename(e.path), message: res.error })
+    this.saveSoon()
+  }
+}
+
+module.exports = { Tags }

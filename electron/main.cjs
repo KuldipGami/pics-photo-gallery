@@ -38,6 +38,7 @@ const { isJpeg } = require('./jpeg-exif.cjs')
 const organize = require('./organize.cjs')
 const { Locations, assignLocations, historyNote } = require('./locations.cjs')
 const locSuggest = require('./location-suggest.cjs')
+const { Tags } = require('./tags.cjs')
 const bgx = require('./background.cjs')
 const { WatchAlerts } = require('./watch-alerts.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
@@ -139,6 +140,8 @@ const store = new Store(path.join(userData, 'settings.json'), {
   protectedFolders: [],
   moveDestination: null,
   carryDates: true,
+  tagsInFiles: true,
+  xmpSidecars: false,
   blurThreshold: 30,
   largeFileMB: 10,
   // Organize (from DupeLens)
@@ -189,6 +192,8 @@ let editor
 let history
 /** User-set places for files that can't store one (HEIC, PNG, videos). */
 let userLocations
+/** Ratings & tags set in Lumen (written into JPEGs in the background). */
+let tags
 /** @type {WatchAlerts} */
 let alerts
 /** @type {import('./background.cjs').Background} */
@@ -235,6 +240,20 @@ function startServices() {
   history.on('changed', () => send('history:changed', history.list()))
   albums = new Albums(path.join(userData, 'albums.json'))
   userLocations = new Locations(path.join(userData, 'locations.json'))
+  tags = new Tags(path.join(userData, 'tags.json'), { writeFiles: store.get('tagsInFiles') !== false, sidecars: !!store.get('xmpSidecars') })
+  tags.on('changed', (snapshot) => send('tags:changed', snapshot))
+  tags.on('writing', (file) => ownFiles([file]))
+  tags.on('written', ({ id, size, rating, tags: list }) => {
+    // the date is kept, so previews, faces and search vectors stay valid: only the size changed
+    library.patch(id, { size, ...(rating !== undefined && { rating }), ...(list && { tags: list }) })
+    const r = dupes.records.get(id)
+    if (r) {
+      r.z = size
+      delete r.x // no longer byte-identical to its copies
+      dupes.saveSoon()
+    }
+  })
+  tags.on('write-error', ({ name, message }) => send('tags:error', `Couldn't save the rating or tags inside ${name}: ${message} Lumen keeps them anyway.`))
   places = new Places(path.join(MODELS_DIR, 'places.json.gz'))
   editor = new Editor({ thumbs })
 
@@ -257,6 +276,8 @@ function startServices() {
   })
   library.on('status', (status) => send('scan:status', status))
   library.on('scanned', async () => {
+    tags.reconcile(library.list)
+    tags.prune(library.list)
     await thumbs.prune(library.list)
     thumbs.prefetch(library.list)
     faces.sync(library.list)
@@ -394,6 +415,8 @@ const settingsPayload = () => ({
   moveDestination: store.get('moveDestination'),
   defaultMoveDestination: defaultMoveDestination(),
   carryDates: store.get('carryDates') !== false,
+  tagsInFiles: store.get('tagsInFiles') !== false,
+  xmpSidecars: !!store.get('xmpSidecars'),
   blurThreshold: store.get('blurThreshold'),
   largeFileMB: store.get('largeFileMB'),
   organizeRoot: store.get('organizeRoot'),
@@ -488,7 +511,7 @@ async function withScansHeld(task) {
   scanHolds++
   try {
     for (let i = 0; library.scanning && i < 600; i++) await new Promise((r) => setTimeout(r, 100))
-    return await task()
+    return await tags.hold(task)
   } finally {
     if (--scanHolds === 0) {
       scanWanted = false
@@ -641,6 +664,7 @@ const appState = () => ({
   places: placesData,
   dupes: dupes.snapshot(),
   history: history.list(),
+  tags: tags.snapshot(),
   dupesProgress: dupes.progressInfo(),
   videosProgress: videoFrames.progressInfo(),
   smartProgress: smart.progressInfo(),
@@ -846,6 +870,7 @@ async function relocate(pairs) {
   library.save()
   faces.remapIds(ids)
   albums.remapPaths(paths)
+  tags.remapPaths(paths)
   userLocations.remap(pairs)
   dupes.saveSoon(2000)
   smart.saveSoon(2000)
@@ -999,11 +1024,13 @@ ipcMain.handle('edit:rotate', async (_e, ids, turns) => {
   const q = Math.round(Number(turns)) || 0
   const files = []
   const errors = []
-  for (const it of items) {
-    const res = await edits.rotate(it, q, backupsDir())
-    if (res.error) errors.push(`${it.name}: ${res.error}`)
-    else files.push(res.file)
-  }
+  await tags.hold(async () => {
+    for (const it of items) {
+      const res = await edits.rotate(it, q, backupsDir())
+      if (res.error) errors.push(`${it.name}: ${res.error}`)
+      else files.push(res.file)
+    }
+  })
   if (files.length) {
     const how = ((q % 4) + 4) % 4 === 1 ? '90° right' : ((q % 4) + 4) % 4 === 3 ? '90° left' : '180°'
     history.add({
@@ -1022,7 +1049,7 @@ ipcMain.handle('edit:date', async (_e, id, ms) => {
   if (!it || !isJpeg(it.ext)) return { error: 'Only JPEG photos can be changed without re-saving them.' }
   const date = Number(ms)
   if (!Number.isFinite(date) || new Date(date).getFullYear() < 1900 || date > Date.now() + 86_400_000) return { error: 'That date looks wrong.' }
-  const res = await edits.setDateTaken(it, date, backupsDir())
+  const res = await tags.hold(() => edits.setDateTaken(it, date, backupsDir()))
   if (res.error) return { error: res.error }
   history.add({ kind: 'edited', note: `Date taken of ${it.name} set to ${new Date(date).toLocaleString()}`, files: [res.file] })
   await refreshEdited([it.path])
@@ -1032,6 +1059,14 @@ ipcMain.handle('edit:date', async (_e, id, ms) => {
 // ---------- duplicates & search ----------
 
 ipcMain.handle('dupes:dismiss', (_e, ids) => dupes.dismiss(idList(ids)))
+// ---------- ratings & tags ----------
+
+ipcMain.handle('tags:rate', (_e, ids, rating) => tags.setRating(itemsFor(idList(ids)), Number(rating)))
+ipcMain.handle('tags:edit', (_e, ids, change) => {
+  const list = (a) => (Array.isArray(a) ? a.filter((t) => typeof t === 'string').slice(0, 200) : undefined)
+  return tags.editTags(itemsFor(idList(ids)), { add: list(change?.add) ?? [], remove: list(change?.remove) ?? [], set: list(change?.set) })
+})
+
 // ---------- locations ----------
 
 ipcMain.handle('locations:suggest', (_e, ids, hours) =>
@@ -1106,6 +1141,8 @@ ipcMain.handle('settings:set', (_e, patch) => {
   if (typeof patch.moveOriginals === 'boolean') allowed.moveOriginals = patch.moveOriginals
   if (Number.isFinite(patch.jpegQuality)) allowed.jpegQuality = Math.min(100, Math.max(70, Math.round(patch.jpegQuality)))
   if (patch.organizeRoot === null) allowed.organizeRoot = null
+  if (typeof patch.tagsInFiles === 'boolean') allowed.tagsInFiles = patch.tagsInFiles
+  if (typeof patch.xmpSidecars === 'boolean') allowed.xmpSidecars = patch.xmpSidecars
   if (typeof patch.watchFolders === 'boolean') allowed.watchFolders = patch.watchFolders
   if (typeof patch.minimizeToTray === 'boolean') allowed.minimizeToTray = patch.minimizeToTray
   if (Array.isArray(patch.skippedFolders)) {
@@ -1120,6 +1157,7 @@ ipcMain.handle('settings:set', (_e, patch) => {
   if (Number.isFinite(patch.minFileKB)) allowed.minFileKB = Math.min(500, Math.max(0, Math.round(patch.minFileKB / 10) * 10))
   store.set(allowed)
   if ('watchFolders' in allowed) updateWatching()
+  if ('tagsInFiles' in allowed || 'xmpSidecars' in allowed) tags.configure({ writeFiles: store.get('tagsInFiles') !== false, sidecars: !!store.get('xmpSidecars') })
   if ('skippedFolders' in allowed || 'skippedTypes' in allowed || 'minFileKB' in allowed) scan()
   if ('dupeSensitivity' in allowed || 'findCrops' in allowed) configureDupes()
   if ('moveDestination' in allowed) scan()
@@ -1158,6 +1196,7 @@ function forgetItems(ids) {
   library.remove(ids)
   faces.removeItems(ids)
   albums.forget(ids)
+  tags.forget(ids)
   smart.sync(library.list)
   dupes.sync(library.list)
 }
@@ -1174,7 +1213,7 @@ async function removeItems(ids, how, dest) {
   const dateChanges = store.get('carryDates') !== false ? await cleanup.carryDates(dupes.groupsOf([...removing]), removing, byId) : []
   if (dateChanges.length) await retime(await newTimes(dateChanges.map((c) => c.path)))
   const destination = how === 'move' ? dest || moveDestination() : undefined
-  const res = how === 'move' ? await cleanup.moveTo(items, destination) : await cleanup.recycle(items)
+  const res = await tags.hold(() => (how === 'move' ? cleanup.moveTo(items, destination) : cleanup.recycle(items)))
   let entry = null
   if (res.files.length || dateChanges.length) {
     entry = history.add({
@@ -1424,11 +1463,12 @@ app.whenReady().then(async () => {
     },
     () => {},
   )
-  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), history.load(), userLocations.load()])
+  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), history.load(), userLocations.load(), tags.load()])
   placesData = places.group(listed())
   if (launchArgs.folder) await openFolder(launchArgs.folder)
   if (launchArgs.autoscan) showDuplicates()
   markServicesReady()
+  tags.resume() // writes left over from last time
   trace(`data loaded: ${library.list.length} items`)
   thumbs.prefetch(library.list)
   faces.sync(library.list)
@@ -1461,6 +1501,7 @@ app.on('before-quit', () => {
   faces?.dispose()
   smart?.dispose()
   dupes?.dispose()
+  tags?.saveNow()
   alerts?.dispose()
   background?.dispose()
   albums?.saveNow()

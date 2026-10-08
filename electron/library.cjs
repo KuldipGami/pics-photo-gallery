@@ -4,6 +4,7 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const { EventEmitter } = require('node:events')
 const exifr = require('exifr')
+const { EXIFR_OPTIONS: XMP_OPTIONS, fromExifr, fromMoov } = require('./xmp.cjs')
 
 const IMAGE_EXT = new Set([
   'jpg', 'jpeg', 'jfif', 'png', 'gif', 'webp', 'bmp', 'avif', 'ico',
@@ -110,10 +111,9 @@ async function readExif(file) {
       gps: true,
       ifd1: false,
       interop: false,
-      xmp: false,
       icc: false,
-      iptc: false,
       jfif: false,
+      ...XMP_OPTIONS, // ratings & tags (XMP, IPTC keywords)
       ihdr: false,
       translateValues: false,
     })
@@ -134,6 +134,7 @@ async function readExif(file) {
     return {
       date: taken instanceof Date ? taken.getTime() : NaN,
       meta: Object.keys(meta).length ? meta : undefined,
+      marks: fromExifr(d),
     }
   } catch {
     return null
@@ -192,6 +193,8 @@ async function readMp4(file) {
           if (childSize < 8) break
           child += childSize
         }
+        const marks = fromMoov(moov)
+        if (marks) out.marks = marks
         const gps = moov.toString('latin1').match(ISO6709)
         if (gps) {
           const lat = Number(gps[1])
@@ -208,6 +211,12 @@ async function readMp4(file) {
   } finally {
     await fh?.close().catch(() => {})
   }
+}
+
+/** A rating / keywords found in the file. */
+function applyMarks(item, marks) {
+  if (marks?.rating) item.rating = marks.rating
+  if (marks?.tags?.length) item.tags = marks.tags
 }
 
 async function buildItem(file, st) {
@@ -228,12 +237,15 @@ async function buildItem(file, st) {
     date: Math.min(mtime, birth),
     /** Capture date from the file itself (EXIF / video metadata), or null: not just a file date. */
     taken: null,
+    /** Stars saved in the file (0 = none); Lumen's own ratings live in tags.json. */
+    rating: 0,
   }
   if (type === 'image' && EXIF_EXT.has(ext)) {
     const exif = await readExif(file)
     if (exif) {
       if (validDate(exif.date)) item.date = item.taken = exif.date
       if (exif.meta) item.meta = exif.meta
+      applyMarks(item, exif.marks)
     }
   } else if (type === 'video' && MP4_EXT.has(ext)) {
     const mp4 = await readMp4(file)
@@ -241,6 +253,7 @@ async function buildItem(file, st) {
       if (mp4.duration) item.duration = mp4.duration
       if (mp4.created) item.date = item.taken = mp4.created
       if (mp4.gps) item.meta = { lat: mp4.gps.lat, lon: mp4.gps.lon }
+      applyMarks(item, mp4.marks)
     }
   }
   return item
@@ -381,7 +394,7 @@ class Library extends EventEmitter {
         if (st.size < skip.minBytes) return // "Skip tiny files" (stickers, icons, thumbnails)
         const prev = this.items.get(key)
         // (items cached by Lumen < 1.8 lack `taken`: read their metadata again once)
-        if (prev && prev.size === st.size && prev.mtime === Math.round(st.mtimeMs) && prev.taken !== undefined) {
+        if (prev && prev.size === st.size && prev.mtime === Math.round(st.mtimeMs) && prev.taken !== undefined && prev.rating !== undefined) {
           next.set(key, prev)
           return
         }

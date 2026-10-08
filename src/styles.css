@@ -3897,3 +3897,18 @@ html[data-platform='darwin'] .titlebar {
 .info-row-btn:hover .info-primary {
   color: var(--accent);
 }
+
+/* ---------- ratings & tags ---------- */
+.info-grow {
+  flex: 1;
+  min-width: 0;
+}
+.viewer-stars {
+  margin-left: 14px;
+}
+.tags-modal {
+  width: min(520px, calc(100vw - 32px));
+}
+.tags-modal .modal-actions {
+  margin-top: 16px;
+}

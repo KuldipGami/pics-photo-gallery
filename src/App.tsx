@@ -11,8 +11,8 @@ import {
   Heart,
   ImageMinus,
   ImagePlus,
-  ImageUp,
   Images,
+  ImageUp,
   LayoutGrid,
   LoaderCircle,
   Map as MapIcon,
@@ -21,6 +21,7 @@ import {
   Plus,
   Search,
   Sparkles,
+  Tag,
   Trash,
   UserRoundPen,
   UserX,
@@ -35,6 +36,9 @@ import { HistoryView, historyTitle } from './components/HistoryView'
 import { MemoriesView, MemoryStrip } from './components/MemoriesView'
 import { MapView, hasPosition, type MapViewState } from './components/MapView'
 import { LocationDialog } from './components/LocationDialog'
+import { RatingStars } from './components/RatingStars'
+import { TagEditor } from './components/TagEditor'
+import { filterActive, marksOf, matchesFilter, NO_FILTER, RatingFilter, tagCounts, tagText, type RatingFilterValue } from './components/RatingFilter'
 import {
   findSideways,
   organizeConfirm,
@@ -122,6 +126,7 @@ export default function App() {
     smartProgress,
     history,
     launch,
+    tags: tagsData,
   } = useLibrary()
   const [view, setView] = useState<View>({ kind: 'photos' })
   const [query, setQuery] = useState('')
@@ -150,6 +155,9 @@ export default function App() {
   const [savingSearch, setSavingSearch] = useState<string | null>(null)
   /** "Add location" for these items. */
   const [locating, setLocating] = useState<string[] | null>(null)
+  /** Gallery filter by stars / tags, and the "Tags" dialog for a selection. */
+  const [ratingFilter, setRatingFilter] = useState<RatingFilterValue>(NO_FILTER)
+  const [tagging, setTagging] = useState<string[] | null>(null)
   const mapView = useRef<MapViewState | null>(null)
   const [placeCountry, setPlaceCountry] = useState<string | null>(null)
   const { toasts, push: toast, dismiss: dismissToast } = useToasts()
@@ -359,9 +367,10 @@ export default function App() {
     for (const it of items) {
       add(it.meta?.make)
       add(it.meta?.model)
+      for (const t of marksOf(it, tagsData).tags) add(t)
     }
     return [...known]
-  }, [people.people, places.places, items])
+  }, [people.people, places.places, items, tagsData])
   const smartOn = settings?.smartSearch !== false && smartProgress.available && smartProgress.indexed > 0
   const search = useMemo(() => {
     if (!tokens.length || !isGrid) return null
@@ -379,7 +388,9 @@ export default function App() {
     const masks = new Map<string, number>()
     const phrases = new Map<number, number>() // mask -> how many items need it
     for (const it of baseList) {
-      const mask = tokenMask(it, tokens, namesByItem.get(it.id), placeTextByItem.get(it.id))
+      const tagged = tagText(it, tagsData)
+      const names = namesByItem.get(it.id)
+      const mask = tokenMask(it, tokens, tagged ? `${names ?? ''} | ${tagged}` : names, placeTextByItem.get(it.id))
       masks.set(it.id, mask)
       if (mask === full || (mask & strict) !== strict) continue
       phrases.set(mask, (phrases.get(mask) ?? 0) + 1)
@@ -390,7 +401,7 @@ export default function App() {
       .slice(0, 4)
       .map(([mask]) => phraseOf(mask))
     return { masks, full, strict, lookups, phraseOf }
-  }, [tokens, query, isGrid, baseList, namesByItem, placeTextByItem, knownWords])
+  }, [tokens, query, isGrid, baseList, namesByItem, placeTextByItem, knownWords, tagsData])
   const smart = useSmartSearch(smartOn && search ? search.lookups : [])
 
   const visible = useMemo(() => {
@@ -403,9 +414,10 @@ export default function App() {
         return (mask & strict) === strict && !!smart.matches?.get(phraseOf(mask))?.has(it.id)
       })
     }
+    if (filterActive(ratingFilter)) list = list.filter((it) => matchesFilter(it, ratingFilter, tagsData))
     if (view.kind === 'similar') return list // most alike first
     return [...list].sort((a, b) => (sortAsc ? a[dateField] - b[dateField] : b[dateField] - a[dateField]))
-  }, [baseList, search, smart.matches, sortAsc, dateField, view.kind])
+  }, [baseList, search, smart.matches, sortAsc, dateField, view.kind, ratingFilter, tagsData])
   const smartHits = useMemo(() => {
     if (!search || !smart.matches) return 0
     let n = 0
@@ -727,7 +739,7 @@ export default function App() {
   }, [viewer, viewerItems.length])
 
   const viewKey = view.kind === 'folder' ? view.dir : 'id' in view ? view.id : ''
-  const resetKey = `${view.kind}|${viewKey}|${typeFilter}|${query}|${sortAsc}`
+  const resetKey = `${view.kind}|${viewKey}|${typeFilter}|${query}|${sortAsc}|${ratingFilter.minRating}|${ratingFilter.tags.join(',')}`
 
   // A person can disappear (merged away, or their last photo removed): fall back to People.
   // Same for a deleted album, or a place whose last photo is gone.
@@ -1078,6 +1090,21 @@ export default function App() {
     return ranked.length > 1 ? `${name} and ${ranked.length - 1} more place${ranked.length > 2 ? 's' : ''}` : name
   }
   const located = useMemo(() => shownItems.filter(hasPosition).length, [shownItems])
+  const allTags = useMemo(() => tagCounts(shownItems, tagsData), [shownItems, tagsData])
+  const viewTags = useMemo(() => tagCounts(baseList, tagsData), [baseList, tagsData])
+  /** The selection's rating, or null when the selected items differ. */
+  const selectionRating = useMemo(() => {
+    let r: number | undefined
+    for (const id of selection) {
+      const it = byId.get(id)
+      if (!it) continue
+      const v = marksOf(it, tagsData).rating
+      if (r === undefined) r = v
+      else if (r !== v) return null
+    }
+    return r ?? 0
+  }, [selection, byId, tagsData])
+  useEffect(() => api.onTagsError((text) => toast(text, { error: true })), [])
   const findSimilar = async (id: string) => {
     const res = await api.findSimilar(id)
     if (res.ids.length <= 1) return toast('Nothing looks like this one yet. Lumen may still be preparing smart search.')
@@ -1103,7 +1130,7 @@ export default function App() {
 
   // ---------- keyboard ----------
   const onKey = useEvent((e: KeyboardEvent) => {
-    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum || compare) return
+    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum || compare || tagging || locating || savingSearch !== null) return
     const key = e.key.toLowerCase()
     const typing = !!(e.target as HTMLElement)?.closest?.('input, textarea')
     if ((e.ctrlKey || e.metaKey) && key === 'f') {
@@ -1147,6 +1174,11 @@ export default function App() {
       else if (faceSelection.size) setFaceSelection(new Set())
       else if (peopleSelection.size) setPeopleSelection(new Set())
       else if (query) setQuery('')
+    } else if (/^[0-5]$/.test(e.key) && selection.size && isGrid && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      api.rateItems([...selection], Number(e.key))
+    } else if (key === 't' && selection.size && isGrid && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault()
+      setTagging([...selection])
     } else if (e.key === 'Delete' && selection.size) {
       requestDelete([...selection])
     } else if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
@@ -1336,6 +1368,15 @@ export default function App() {
             )}
           </>
         )}
+        <RatingStars
+          value={selectionRating ?? 0}
+          mixed={selectionRating === null}
+          onChange={(n) => api.rateItems([...selection], n)}
+          label="Rating of the selected items"
+        />
+        <button className="btn ghost" title="Add or remove tags (T)" onClick={() => setTagging([...selection])}>
+          <Tag size={15} /> Tags…
+        </button>
         <button className="btn ghost" title="Add or change where these were taken" onClick={() => setLocating([...selection])}>
           <MapPin size={15} /> Location…
         </button>
@@ -1532,6 +1573,7 @@ export default function App() {
             )}
           />
         )}
+        {isGrid && <RatingFilter value={ratingFilter} onChange={setRatingFilter} tags={viewTags} />}
         {isGrid && view.kind !== 'videos' && view.kind !== 'person' && (
           <div className="segmented small">
             {(['all', 'image', 'video'] as TypeFilter[]).map((t) => (
@@ -1993,7 +2035,32 @@ export default function App() {
             navigate({ kind: 'place', id })
           }}
           onLocate={(item) => setLocating([item.id])}
+          marksOf={(item) => marksOf(item, tagsData)}
+          tagSuggestions={allTags}
+          onRate={(item, n) => api.rateItems([item.id], n)}
+          onAddTags={(item, list) => api.editTags([item.id], { add: list })}
+          onRemoveTag={(item, tag) => api.editTags([item.id], { remove: [tag] })}
         />
+      )}
+      {tagging && (
+        <div className="modal-backdrop" onMouseDown={() => setTagging(null)} onKeyDown={(e) => e.key === 'Escape' && setTagging(null)}>
+          <div className="modal tags-modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
+            <h3>Tags for {plural(tagging.length, 'item')}</h3>
+            <p>Tags are words you choose, like “Family” or “Beach”. Search for them, or filter by them with the button next to Photos / Videos.</p>
+            <TagEditor
+              autoFocus
+              values={tagging.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it).map((it) => marksOf(it, tagsData).tags)}
+              suggestions={allTags}
+              onAdd={(list) => api.editTags(tagging, { add: list })}
+              onRemove={(tag) => api.editTags(tagging, { remove: [tag] })}
+            />
+            <div className="modal-actions">
+              <button className="btn primary" onClick={() => setTagging(null)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {locating && (
         <LocationDialog

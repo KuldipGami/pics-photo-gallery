@@ -15,6 +15,10 @@ export interface MediaMeta {
 }
 
 export interface MediaItem {
+  /** Stars saved in the file (0 = none); Lumen's own values come in TagsData. */
+  rating?: number
+  /** Keywords saved in the file. */
+  tags?: string[]
   id: string
   path: string
   name: string
@@ -58,6 +62,9 @@ export interface Settings {
   carryDates: boolean
   blurThreshold: number
   largeFileMB: number
+  /** Ratings & tags: written into JPEG files (XMP) and, optionally, .xmp sidecars for other files. */
+  tagsInFiles: boolean
+  xmpSidecars: boolean
   /** Organize: where dated folders go (null = the first library folder). */
   organizeRoot: string | null
   folderPattern: string

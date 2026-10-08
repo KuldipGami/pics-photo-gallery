@@ -402,6 +402,26 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
         </section>
 
         <section className="card">
+          <h2>Ratings & tags</h2>
+          <div className="setting-row">
+            <div>
+              <div>Save ratings and tags inside photos</div>
+              <div className="setting-hint">
+                JPEG photos get them inside the file (without re-saving the picture), so File Explorer, Lightroom and other apps see them too. Other files keep them in Lumen.
+              </div>
+            </div>
+            <Toggle on={settings.tagsInFiles} onChange={() => api.setSettings({ tagsInFiles: !settings.tagsInFiles })} />
+          </div>
+          <div className={`setting-row${settings.tagsInFiles ? '' : ' disabled'}`}>
+            <div>
+              <div>Also write .xmp files next to other photos and videos</div>
+              <div className="setting-hint">For HEIC, PNG, RAW and videos: a small “name.xmp” file that Lightroom and digiKam read. Off keeps your folders tidy.</div>
+            </div>
+            <Toggle on={settings.xmpSidecars} disabled={!settings.tagsInFiles} onChange={() => api.setSettings({ xmpSidecars: !settings.xmpSidecars })} />
+          </div>
+        </section>
+
+        <section className="card">
           <h2>Skip during scans</h2>
           <div className="setting-row column">
             <div className="setting-row-head">

@@ -18,6 +18,8 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { api, mediaUrl, thumbUrl } from '../api'
+import { RatingStars } from './RatingStars'
+import type { TagCount } from './TagEditor'
 import { useElementSize } from '../hooks'
 import { formatDuration, formatLongDate, formatTime } from '../lib/format'
 import type { FaceBox, MediaItem, Place } from '../types'
@@ -46,6 +48,12 @@ interface Props {
   /** An edited copy was saved (it appears in the library a moment later). */
   onEdited(original: MediaItem, id: string, name: string): void
   onLocate?(item: MediaItem): void
+  /** Rating & tags (Lumen's own, else the file's). */
+  marksOf?(item: MediaItem): { rating: number; tags: string[] }
+  tagSuggestions?: TagCount[]
+  onRate?(item: MediaItem, rating: number): void
+  onAddTags?(item: MediaItem, tags: string[]): void
+  onRemoveTag?(item: MediaItem, tag: string): void
 }
 
 const SLIDE_MS = 4000
@@ -83,6 +91,11 @@ export function Viewer({
   liveOf,
   onEdited,
   onLocate,
+  marksOf,
+  tagSuggestions,
+  onRate,
+  onAddTags,
+  onRemoveTag,
 }: Props) {
   const item = items[index]
   const [editing, setEditing] = useState(false)
@@ -190,6 +203,20 @@ export function Viewer({
         case 'i':
         case 'I':
           setShowInfo((s) => !s)
+          break
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+          // stars; the same number again clears them
+          if (mod || !onRate || !marksOf) return
+          onRate(item, marksOf(item).rating === Number(e.key) ? 0 : Number(e.key))
+          break
+        case 't':
+        case 'T':
+          if (mod || !onAddTags) return
+          setShowInfo(true)
           break
         case 'f':
         case 'F':
@@ -316,6 +343,7 @@ export function Viewer({
                 </span>
               </div>
             </div>
+            {marksOf && onRate && <RatingStars dark className="viewer-stars" value={marksOf(item).rating} onChange={(n) => onRate(item, n)} size={18} />}
             <div className="viewer-actions">
               {live && (
                 <button
@@ -402,6 +430,11 @@ export function Viewer({
             onClose={() => setShowInfo(false)}
             onToast={onToast}
             onLocate={onLocate}
+            marks={marksOf?.(item)}
+            tagSuggestions={tagSuggestions}
+            onRate={onRate && ((n) => onRate(item, n))}
+            onAddTags={onAddTags && ((t) => onAddTags(item, t))}
+            onRemoveTag={onRemoveTag && ((t) => onRemoveTag(item, t))}
           />
         )}
       </div>

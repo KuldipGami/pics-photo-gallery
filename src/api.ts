@@ -22,6 +22,7 @@ import type {
 } from './types'
 import type { OrganizePlan } from './components/OrganizeView'
 import type { LocationAssignment, LocationSuggestions, PlaceHit, PlaceName } from './components/LocationDialog'
+import type { TagsData } from './components/RatingFilter'
 
 type Unsubscribe = () => void
 
@@ -52,6 +53,7 @@ export interface LumenApi {
     history: HistoryEntry[]
     /** Lumen was started for a folder or to review duplicates (taken once). */
     launch: { folder?: string; duplicates?: boolean } | null
+    tags: TagsData
   }>
   /** Resolves to the new album's id. */
   createAlbum(name: string, ids: string[]): Promise<string>
@@ -59,6 +61,11 @@ export interface LumenApi {
   createSmartAlbum(name: string, query: string): Promise<string | null>
   /** Items that look like this one, most alike first (the item itself first). */
   findSimilar(id: string): Promise<{ ids: string[]; scores: number[] }>
+  /** 0–5 stars (0 clears). Resolves to how many changed. */
+  rateItems(ids: string[], rating: number): Promise<number>
+  editTags(ids: string[], change: { add?: string[]; remove?: string[]; set?: string[] }): Promise<number>
+  onTags(cb: (data: TagsData) => void): Unsubscribe
+  onTagsError(cb: (text: string) => void): Unsubscribe
   /** Where these were probably taken, from photos taken within `hours` of them. */
   suggestLocations(ids: string[], hours: number): Promise<LocationSuggestions>
   searchPlaces(query: string): Promise<PlaceHit[]>
@@ -159,6 +166,8 @@ export interface LumenApi {
       carryDates: boolean
       blurThreshold: number
       largeFileMB: number
+      tagsInFiles: boolean
+      xmpSidecars: boolean
       organizeRoot: null
       folderPattern: string
       organizeCopy: boolean

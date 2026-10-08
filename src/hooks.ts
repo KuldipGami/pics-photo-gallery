@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { api } from './api'
+import type { TagsData } from './components/RatingFilter'
 import type {
   Album,
   DuplicatesData,
@@ -47,6 +48,7 @@ export function useLibrary() {
   const [dupes, setDupes] = useState<DuplicatesData>(EMPTY_DUPES)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [launch, setLaunch] = useState<{ folder?: string; duplicates?: boolean } | null>(null)
+  const [tags, setTags] = useState<TagsData>({ byItem: {} })
   const [dupesProgress, setDupesProgress] = useState<DuplicatesProgress>({ running: false, phase: 'idle', done: 0, total: 0 })
   const [videosProgress, setVideosProgress] = useState<VideosProgress>({ running: false, done: 0, total: 0, current: null })
   const [smartProgress, setSmartProgress] = useState<SmartProgress>({
@@ -74,6 +76,7 @@ export function useLibrary() {
       api.onVideosProgress(setVideosProgress),
       api.onSmartProgress(setSmartProgress),
       api.onHistory(setHistory),
+      api.onTags(setTags),
     ]
     api.getState().then((s) => {
       setItems(s.items)
@@ -90,6 +93,7 @@ export function useLibrary() {
       setSmartProgress(s.smartProgress)
       setHistory(s.history)
       setLaunch(s.launch ?? null)
+      setTags(s.tags ?? { byItem: {} })
     })
     return () => offs.forEach((off) => off())
   }, [])
@@ -111,6 +115,7 @@ export function useLibrary() {
     smartProgress,
     history,
     launch,
+    tags,
   }
 }
 
