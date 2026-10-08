@@ -4,6 +4,19 @@ A modern photo & video gallery for your desktop. Built with Electron, React and 
 
 ![icon](resources/icon.png)
 
+## Download
+
+Get the latest version from the [Releases page](../../releases/latest):
+
+- **`Pics Setup <version>.exe`**: the installer (recommended). Adds Start menu and desktop shortcuts; uninstall it from Windows Settings → Apps.
+- **`Pics-<version>-win.zip`**: portable. Unzip it anywhere and run `Pics.exe`; nothing is installed. (Settings and caches still go to `%APPDATA%\Pics`.)
+
+Needs Windows 10 or 11, 64-bit. A graphics card is used when there is one (People, smart search, magic eraser, video previews), otherwise the CPU. HEIC photos and HEVC videos need Windows' **HEIF Image Extensions** and **HEVC Video Extensions** from the Microsoft Store (many PCs have them already).
+
+Pics isn't code-signed, so the first time Windows may show "Windows protected your PC": choose **More info → Run anyway**. The very first start can take up to a minute while Windows checks the new program; after that it opens in a couple of seconds.
+
+Everything runs on your computer: photos, faces and searches are never uploaded. Only the map uses the internet, to show OpenStreetMap images.
+
 ## Features
 
 - **Timeline** of every photo and video in your folders, grouped by day (or by month when zoomed out), with a Google Photos–style date scrubber.
@@ -57,7 +70,7 @@ npm run dev
 npm run dist
 ```
 
-The installer is written to `release/`.
+The installer and the portable .zip are written to `release/` (run `npm run models` first: the models are packed into both).
 
 ## Keyboard shortcuts
 
@@ -136,3 +149,11 @@ Measured on a 2,000-file library (1,800 × 12 MP JPEGs + 200 × 1080p videos):
 
 Settings, the library index, the thumbnail cache, faces, albums, the search index and the duplicate cache live in `%APPDATA%\Pics` (or `%APPDATA%\Lumen` when Pics was installed over Lumen, its name before 1.16: that folder keeps being used as it is).
 Pics changes your files only when you ask it to: removing (Recycle Bin or a folder, always after asking), Organize, edits saved as copies, and ratings, tags, dates or places written into JPEGs. Changes to files are listed in History and can be undone there.
+
+## License
+
+Pics' own code is under the [MIT license](LICENSE). It bundles software, AI models and data made by others, each under its own license; they are listed in **Settings → About & licenses** and in [`resources/licenses`](resources/licenses). In particular:
+
+- the **InsightFace** face-recognition models (People) are licensed for **non-commercial use only**, so Pics as distributed here must not be sold or used commercially;
+- **FFmpeg** (video edits, memory movies) is GPL 3.0; where to get its source is in [`resources/licenses/ffmpeg-source.txt`](resources/licenses/ffmpeg-source.txt);
+- place names come from **GeoNames** (CC BY 4.0) and map images from **OpenStreetMap** (© OpenStreetMap contributors).

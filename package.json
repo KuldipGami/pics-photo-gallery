@@ -3,6 +3,8 @@
   "productName": "Pics",
   "version": "1.16.0",
   "description": "A modern photo & video gallery for your desktop",
+  "author": "Kuldip",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -55,7 +57,8 @@
     ],
     "win": {
       "target": [
-        "nsis"
+        "nsis",
+        "zip"
       ],
       "icon": "resources/icon.png"
     },
