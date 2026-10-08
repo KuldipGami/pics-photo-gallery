@@ -25,6 +25,7 @@ import type { OrganizePlan } from './components/OrganizeView'
 import type { LocationAssignment, LocationSuggestions, PlaceHit, PlaceName } from './components/LocationDialog'
 import type { TagsData } from './components/RatingFilter'
 import type { ExportBridge } from './components/ExportDialog'
+import type { PrivateStatus, UnlockResult } from './components/PrivateLock'
 import type { ImportPlan, ImportProgress, ImportResult, ImportScan, ImportScanning, ImportSource } from './components/ImportView'
 
 type Unsubscribe = () => void
@@ -65,6 +66,21 @@ export interface LumenApi {
   createSmartAlbum(name: string, query: string): Promise<string | null>
   /** Items that look like this one, most alike first (the item itself first). */
   findSimilar(id: string): Promise<{ ids: string[]; scores: number[] }>
+  /** Private: lock state, unlocking, marking items, the hidden folder. */
+  privateStatus(): Promise<PrivateStatus>
+  privateUnlockHello(): Promise<UnlockResult>
+  privateUnlockPin(pin: string): Promise<UnlockResult>
+  privateSetPin(pin: string): Promise<{ ok: boolean; error?: string }>
+  privateRemovePin(): Promise<boolean>
+  privateLock(): Promise<void>
+  /** The private items (empty while locked). */
+  privateItems(): Promise<MediaItem[]>
+  privateAdd(ids: string[]): Promise<number>
+  privateRemove(ids: string[]): Promise<number>
+  privateHide(ids: string[]): Promise<{ done: number; errors: string[]; folder: string | null }>
+  privateReset(): Promise<boolean>
+  onPrivateStatus(cb: (status: PrivateStatus) => void): Unsubscribe
+  onPrivateChanged(cb: () => void): Unsubscribe
   exportDefaults: ExportBridge['defaults']
   exportPick: ExportBridge['pick']
   exportStart: ExportBridge['start']

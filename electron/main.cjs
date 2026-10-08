@@ -7,7 +7,7 @@ process.env.UV_THREADPOOL_SIZE ??= String(Math.max(4, Math.min(20, cores)))
 
 const path = require('node:path')
 const fs = require('node:fs')
-const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, nativeImage, Menu, clipboard, session } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, nativeImage, Menu, clipboard, session, powerMonitor } = require('electron')
 
 if (process.env.LUMEN_USER_DATA) app.setPath('userData', path.resolve(process.env.LUMEN_USER_DATA))
 
@@ -42,6 +42,7 @@ const { Tags } = require('./tags.cjs')
 const { Importer } = require('./importer.cjs')
 const { OcrIndex } = require('./ocr.cjs')
 const exporter = require('./exporter.cjs')
+const { PrivateFolder, registerIpc: registerPrivateIpc } = require('./private.cjs')
 const bgx = require('./background.cjs')
 const { WatchAlerts } = require('./watch-alerts.cjs')
 const { registerScheme, handleProtocol } = require('./protocol.cjs')
@@ -209,6 +210,8 @@ let tags
 let importer
 /** Text in photos (Windows' own OCR). */
 let ocr
+/** Private: items hidden from every view until unlocked (Windows Hello or a Lumen PIN). */
+let priv
 /** @type {WatchAlerts} */
 let alerts
 /** @type {import('./background.cjs').Background} */
@@ -222,6 +225,7 @@ const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, 'models') :
 
 function startServices() {
   library = new Library(path.join(userData, 'library.json'))
+  priv = new PrivateFolder(path.join(userData, 'private.json'), { roots: () => store.get('folders'), dataDir: userData })
   thumbs = new Thumbnails(path.join(userData, 'thumbnails'))
   // Background analysis (faces, search, duplicates) waits until every preview exists, so it never
   // slows down browsing.
@@ -291,6 +295,19 @@ function startServices() {
       send('places:changed', placesData)
     }, 400)
   }
+  registerPrivateIpc({ ipcMain, priv, getWindow: () => win, send, privateItems: () => userLocations.apply(priv.split(library.list).hidden) })
+  priv.on('changed', () => {
+    send('library:changed', { items: listed() })
+    send('private:changed')
+    updatePlaces()
+    const shown = visibleLibrary()
+    faces.sync(shown)
+    smart.sync(shown)
+    ocr.sync(shown)
+    dupes.sync(shown)
+  })
+  powerMonitor.on('lock-screen', () => priv.lock())
+  powerMonitor.on('suspend', () => priv.lock())
   userLocations.on('changed', () => {
     send('library:changed', { items: listed() })
     updatePlaces()
@@ -305,11 +322,11 @@ function startServices() {
     tags.reconcile(library.list)
     tags.prune(library.list)
     await thumbs.prune(library.list)
-    thumbs.prefetch(library.list)
-    faces.sync(library.list)
-    smart.sync(library.list)
-  ocr.sync(library.list)
-    dupes.sync(library.list)
+    thumbs.prefetch(visibleLibrary())
+    faces.sync(visibleLibrary())
+    smart.sync(visibleLibrary())
+    ocr.sync(visibleLibrary())
+    dupes.sync(visibleLibrary())
   })
   thumbs.on('progress', (progress) => {
     send('thumbs:progress', progress)
@@ -333,7 +350,7 @@ function startServices() {
   // HEIC / RAW: sharp can't read them, so new ones are compared through their preview.
   const NON_SHARP = new Set(['heic', 'heif', 'dng', 'cr2', 'cr3', 'nef', 'arw', 'orf', 'rw2', 'bmp', 'ico'])
   alerts = new WatchAlerts({
-    items: () => library.list,
+    items: () => visibleLibrary(),
     records: () => dupes.records,
     sensitivity: () => store.get('dupeSensitivity'),
     findCrops: () => store.get('findCrops') !== false,
@@ -693,7 +710,11 @@ ipcMain.handle('app:state', async () => {
 })
 
 /** The library as the UI sees it: with the places the user set for files that can't hold one. */
-const listed = () => userLocations.apply(library.list)
+const listed = () => userLocations.apply(visibleLibrary())
+/** The library without private items (all of it while nothing is private). */
+function visibleLibrary() {
+  return priv ? priv.split(library.list).shown : library.list
+}
 
 const appState = () => ({
   items: listed(),
@@ -913,6 +934,7 @@ async function relocate(pairs) {
   library.save()
   faces.remapIds(ids)
   albums.remapPaths(paths)
+  priv.remap(pairs)
   tags.remapPaths(paths)
   userLocations.remap(pairs)
   dupes.saveSoon(2000)
@@ -973,7 +995,7 @@ function originalsDir() {
 
 ipcMain.handle('organize:plan', (_e, skip) => {
   const o = organizeOptions()
-  return organize.summarize(library.list, { ...o, skip: new Set(idList(skip)) })
+  return organize.summarize(visibleLibrary(), { ...o, skip: new Set(idList(skip)) })
 })
 ipcMain.handle('organize:pick-root', async () => {
   const res = await dialog.showOpenDialog(win, { title: 'Where should the dated folders go?', properties: ['openDirectory', 'createDirectory'] })
@@ -1016,9 +1038,9 @@ ipcMain.handle('organize:run', async (_e, action, skip) => {
 
 async function runOrganize(action, skipped) {
   const o = organizeOptions()
-  const kept = library.list.filter((it) => !skipped.has(it.id))
+  const kept = visibleLibrary().filter((it) => !skipped.has(it.id))
   if (action === 'dates') {
-    const files = await organize.applyDateFixes(organize.findDateFixes(library.list))
+    const files = await organize.applyDateFixes(organize.findDateFixes(visibleLibrary()))
     if (files.length) {
       history.add({ kind: 'dates', files })
       await retime(await newTimes(files.map((f) => f.from)))
@@ -1104,6 +1126,47 @@ ipcMain.handle('edit:date', async (_e, id, ms) => {
 // ---------- duplicates & search ----------
 
 ipcMain.handle('dupes:dismiss', (_e, ids) => dupes.dismiss(idList(ids)))
+// ---------- private ----------
+
+ipcMain.handle('private:add', (_e, ids) => priv.add(itemsFor(idList(ids)).map((it) => it.path)))
+ipcMain.handle('private:remove', async (_e, ids) => {
+  const items = itemsFor(idList(ids))
+  const res = await movePrivate(priv.vaultItems(items), 'out')
+  const movedTo = new Map(res.files.map((f) => [keyOf(f.from), f.to]))
+  return priv.remove(items.map((it) => movedTo.get(keyOf(it.path)) ?? it.path))
+})
+ipcMain.handle('private:hide', async (_e, ids) => {
+  if (!priv.unlocked) return { done: 0, errors: ['Unlock Private first.'] }
+  const res = await movePrivate(itemsFor(idList(ids)), 'in')
+  return { done: res.files.length, errors: res.errors, folder: res.folders?.[0] ?? null }
+})
+ipcMain.handle('private:reset', async () => {
+  if (priv.helloState === 'available') return false // with Windows Hello there's always a way in
+  await movePrivate(priv.vaultItems(library.list), 'out')
+  priv.reset()
+  return true
+})
+
+/** Moves items into ('in') or out of the hidden private folder, recorded in History. */
+async function movePrivate(items, way) {
+  if (!items.length) return { files: [], errors: [] }
+  return withScansHeld(async () => {
+    const res = way === 'in' ? await priv.moveIntoVault(items) : await priv.moveOutOfVault(items)
+    ownFiles(res.files.map((f) => f.to))
+    if (res.files.length) {
+      const n = res.files.length
+      history.add({
+        kind: 'moved',
+        destination: way === 'in' ? res.folders?.[0] : undefined,
+        note: way === 'in' ? `Hid ${n} private item${n === 1 ? '' : 's'} in File Explorer` : `Moved ${n} item${n === 1 ? '' : 's'} out of the hidden private folder`,
+        files: res.files.map(({ id, ...f }) => f),
+      })
+      await relocate(res.files)
+    }
+    return res
+  })
+}
+
 // ---------- export & share ----------
 
 const exports_ = exporter.registerIpc({
@@ -1368,9 +1431,9 @@ function forgetItems(ids) {
   faces.removeItems(ids)
   albums.forget(ids)
   tags.forget(ids)
-  smart.sync(library.list)
-  ocr.sync(library.list)
-  dupes.sync(library.list)
+  smart.sync(visibleLibrary())
+  ocr.sync(visibleLibrary())
+  dupes.sync(visibleLibrary())
 }
 
 /**
@@ -1543,6 +1606,9 @@ ipcMain.handle('items:menu', (event, id, ids) => {
     },
     { label: multi ? `Add ${targets.length} to album…` : 'Add to album…', click: action('album') },
     { label: multi ? `Export ${targets.length}…` : 'Export…', click: action('export') },
+    priv.isPrivate(item.path)
+      ? { label: multi ? `Remove ${targets.length} from Private` : 'Remove from Private', click: action('unprivate') }
+      : { label: multi ? `Move ${targets.length} to Private` : 'Move to Private', click: action('private') },
     { label: multi ? `Set location of ${targets.length}…` : item.meta?.lat !== undefined ? 'Change location…' : 'Add location…', click: action('location') },
     ...(multi
       ? []
@@ -1582,7 +1648,7 @@ ipcMain.handle('window:viewer', (_e, open) => {
 ipcMain.handle('cache:info', () => thumbs.size())
 ipcMain.handle('cache:clear', async () => {
   await thumbs.clear()
-  thumbs.prefetch(library.list)
+  thumbs.prefetch(visibleLibrary())
 })
 
 ipcMain.handle('shell:url', (_e, url) => {
@@ -1626,7 +1692,17 @@ app.whenReady().then(async () => {
   })
   Menu.setApplicationMenu(null)
   startServices()
-  handleProtocol({ library, thumbs, importItem: (id) => importer.thumbItem(id) })
+  handleProtocol({
+    // a locked private item can't be shown, even by id
+    library: {
+      get: (id) => {
+        const it = library.get(id)
+        return it && !priv.unlocked && priv.isPrivate(it.path) ? undefined : it
+      },
+    },
+    thumbs,
+    importItem: (id) => importer.thumbItem(id),
+  })
   // Started with Windows to keep watching: stay in the notification area until opened.
   const startHidden = launchArgs.tray && !launchArgs.folder && !!store.get('watchFolders')
   // Otherwise show the window right away; the saved library, faces, albums… load meanwhile (~0.5 s).
@@ -1638,18 +1714,18 @@ app.whenReady().then(async () => {
     },
     () => {},
   )
-  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), history.load(), userLocations.load(), tags.load()])
+  await Promise.all([library.load(), faces.load(), albums.load(), dupes.load(), smart.load(), history.load(), userLocations.load(), tags.load(), priv.load()])
   placesData = places.group(listed())
   if (launchArgs.folder) await openFolder(launchArgs.folder)
   if (launchArgs.autoscan) showDuplicates()
   markServicesReady()
   tags.resume() // writes left over from last time
   trace(`data loaded: ${library.list.length} items`)
-  thumbs.prefetch(library.list)
-  faces.sync(library.list)
-  smart.sync(library.list)
-  ocr.sync(library.list)
-  dupes.sync(library.list)
+  thumbs.prefetch(visibleLibrary())
+  faces.sync(visibleLibrary())
+  smart.sync(visibleLibrary())
+  ocr.sync(visibleLibrary())
+  dupes.sync(visibleLibrary())
   watchFolders()
   scan()
   updateWatching()
@@ -1680,6 +1756,7 @@ app.on('before-quit', () => {
   dupes?.dispose()
   tags?.saveNow()
   importer?.dispose()
+  priv?.dispose()
   exports_.cancel()
   alerts?.dispose()
   background?.dispose()

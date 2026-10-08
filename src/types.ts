@@ -371,6 +371,7 @@ export type View =
   | { kind: 'similar'; id: string }
   | { kind: 'map' }
   | { kind: 'import' }
+  | { kind: 'private' }
   | { kind: 'map-items'; ids: string[]; label: string }
   | { kind: 'memories' }
   | { kind: 'trip'; id: string }

@@ -1,0 +1,185 @@
+/* Private (PrivateLock.tsx): lock screen, unlocked strip, PIN dialog. Tokens from styles.css (light + dark). */
+
+.priv-lock {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+  padding: 24px;
+  animation: fade-in 0.25s ease-out;
+}
+.priv-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 420px;
+  max-width: 100%;
+  text-align: center;
+}
+.priv-lock-icon {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  margin-bottom: 14px;
+  border-radius: 20px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.priv-card h2 {
+  margin: 0 0 6px;
+  font: 600 21px var(--font-display);
+}
+.priv-card > p {
+  max-width: 380px;
+  margin: 0 0 18px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.priv-wait {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.priv-main {
+  min-width: 240px;
+}
+.priv-card .btn:disabled,
+.priv-modal .btn:disabled {
+  opacity: 0.55;
+  filter: none;
+  cursor: default;
+}
+.priv-alt {
+  margin-top: 14px;
+  font-size: 13px;
+}
+.priv-error {
+  max-width: 340px;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--danger);
+}
+.priv-small {
+  max-width: 360px;
+  margin: 16px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.priv-row {
+  display: flex;
+  gap: 8px;
+}
+.priv-explainer {
+  display: flex;
+  gap: 10px;
+  margin-top: 28px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--hover);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+  text-align: left;
+}
+.priv-explainer svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--text-3);
+}
+
+/* ---------- PIN form ---------- */
+
+.priv-pin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 280px;
+  max-width: 100%;
+}
+.priv-modal .priv-pin {
+  align-items: stretch;
+  width: auto;
+  margin-top: 16px;
+}
+.priv-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: stretch;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--input);
+  color: var(--text-3);
+}
+.priv-field:focus-within {
+  border-color: var(--accent);
+}
+.priv-field input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: 15px var(--font);
+  letter-spacing: 0.08em;
+  outline: none;
+  user-select: text;
+}
+.priv-field input::placeholder {
+  letter-spacing: 0;
+  font-size: 13px;
+  color: var(--text-3);
+}
+.priv-pin .priv-error {
+  margin-top: 0;
+}
+.priv-pin .priv-main {
+  margin-top: 4px;
+}
+.priv-modal .priv-pin .modal-actions {
+  margin-top: 12px;
+}
+
+/* ---------- unlocked strip ---------- */
+
+.priv-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin: 0 28px 10px;
+  padding: 9px 10px 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.priv-bar-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.priv-bar-text {
+  flex: 1;
+  min-width: 220px;
+  font-size: 13px;
+}
+.priv-bar-sub {
+  margin-top: 1px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.priv-bar .btn {
+  height: 30px;
+}

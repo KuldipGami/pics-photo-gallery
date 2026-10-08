@@ -15,6 +15,8 @@ import {
   ImageUp,
   LayoutGrid,
   LoaderCircle,
+  LockKeyhole,
+  LockKeyholeOpen,
   Map as MapIcon,
   MapPin,
   Merge,
@@ -38,6 +40,7 @@ import { MemoriesView, MemoryStrip } from './components/MemoriesView'
 import { MapView, hasPosition, type MapViewState } from './components/MapView'
 import { LocationDialog } from './components/LocationDialog'
 import { ExportDialog, exportResultText } from './components/ExportDialog'
+import { PinDialog, PrivateBar, PrivateEmpty, PrivateLock, privateConfirm, type PrivateBridge, type PrivateStatus } from './components/PrivateLock'
 import {
   importConfirm,
   importDoneText,
@@ -96,7 +99,7 @@ interface PickerOptions {
 
 const ZOOM_STEPS = [80, 100, 124, 150, 180, 220, 270, 330]
 const BIN = api.env.platform === 'win32' ? 'Recycle Bin' : 'Trash'
-const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip', 'similar', 'map-items']
+const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip', 'similar', 'map-items', 'private']
 
 const TITLES: Record<View['kind'], string> = {
   photos: 'Photos',
@@ -112,6 +115,7 @@ const TITLES: Record<View['kind'], string> = {
   albums: 'Albums',
   album: '',
   similar: '',
+  private: 'Private',
   import: 'Import',
   map: 'Map',
   'map-items': '',
@@ -177,6 +181,10 @@ export default function App() {
   const [tagging, setTagging] = useState<string[] | null>(null)
   /** "Export…" for these items; the label names the folder (album, trip, place…). */
   const [exporting, setExporting] = useState<{ ids: string[]; label: string } | null>(null)
+  // ---------- private ----------
+  const [privStatus, setPrivStatus] = useState<PrivateStatus | null>(null)
+  const [privateItems, setPrivateItems] = useState<MediaItem[]>([])
+  const [pinDialog, setPinDialog] = useState(false)
   // ---------- import ----------
   const [importSources, setImportSources] = useState<ImportSource[] | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
@@ -231,7 +239,7 @@ export default function App() {
   }, [])
 
   // ---------- derived data ----------
-  const byId = useMemo(() => new Map(items.map((it) => [it.id, it])), [items])
+  const byId = useMemo(() => new Map([...items, ...privateItems].map((it) => [it.id, it])), [items, privateItems])
   const favorites = useMemo(() => new Set(settings?.favorites ?? []), [settings?.favorites])
   const savedQuery = view.kind === 'album' ? (albums.find((a) => a.id === view.id)?.query ?? '') : ''
   const tokens = useMemo(() => searchTokens(savedQuery ? `${savedQuery} ${query}` : query), [savedQuery, query])
@@ -352,7 +360,7 @@ export default function App() {
 
   /** The current view's items before searching. */
   const baseList = useMemo(() => {
-    let list = shownItems
+    let list = view.kind === 'private' ? privateItems : shownItems
     if (view.kind === 'videos') list = list.filter((it) => it.type === 'video')
     else if (view.kind === 'favorites') list = list.filter((it) => favorites.has(it.id))
     else if (view.kind === 'folder') list = list.filter((it) => it.dir === view.dir)
@@ -375,7 +383,7 @@ export default function App() {
     return list
     // `favDep`/`personDep`/`placeDep` instead of the full objects: toggling a heart or renaming
     // someone shouldn't refilter views that don't depend on them.
-  }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip, similar, byId])
+  }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip, similar, byId, privateItems])
 
   // ---------- search ----------
   // Every word is matched against what Lumen knows about an item (name, folder, date, camera,
@@ -641,6 +649,75 @@ export default function App() {
     api.setSettings({ protectedFolders: [...settings.protectedFolders, dir] })
     toast(`Files in “${baseName(dir)}” will always be kept`)
   }
+  // Private: the lock state comes from the main process; asking for it starts the Windows Hello
+  // check, so only when the page is opened.
+  const privateBridge: PrivateBridge = {
+    status: api.privateStatus,
+    unlockHello: api.privateUnlockHello,
+    unlockPin: api.privateUnlockPin,
+    setPin: api.privateSetPin,
+    lock: api.privateLock,
+    onStatus: api.onPrivateStatus,
+  }
+  useEffect(() => api.onPrivateStatus(setPrivStatus), [])
+  useEffect(() => {
+    if (view.kind === 'private') api.privateStatus().then(setPrivStatus)
+  }, [view.kind])
+  const loadPrivate = useEvent(() => {
+    if (privStatus?.unlocked) api.privateItems().then(setPrivateItems)
+    else setPrivateItems([])
+  })
+  useEffect(() => loadPrivate(), [privStatus?.unlocked, items])
+  useEffect(() => api.onPrivateChanged(() => loadPrivate()), [])
+  // locking closes whatever private photo is open
+  useEffect(() => {
+    if (privStatus && !privStatus.unlocked) {
+      setViewer(null)
+      if (view.kind === 'private') setSelection(new Set())
+    }
+  }, [privStatus?.unlocked])
+  const makePrivate = (ids: string[]) => {
+    if (!ids.length) return
+    const c = privateConfirm('add', ids.length)
+    setConfirm({
+      ...c,
+      onConfirm: async () => {
+        const n = await api.privateAdd(ids)
+        setSelection(new Set())
+        toast(`Moved ${plural(n || ids.length, 'item')} to Private`)
+      },
+    })
+  }
+  const unmakePrivate = (ids: string[]) => {
+    if (!ids.length) return
+    setConfirm({
+      ...privateConfirm('remove', ids.length),
+      onConfirm: async () => {
+        await api.privateRemove(ids)
+        setSelection(new Set())
+        toast(`${plural(ids.length, 'item')} back in your library`)
+      },
+    })
+  }
+  const hideInExplorer = (ids: string[]) => {
+    if (!ids.length) return toast('These are already in the hidden folder')
+    setConfirm({
+      ...privateConfirm('hide', ids.length),
+      onConfirm: async () => {
+        const res = await api.privateHide(ids)
+        setSelection(new Set())
+        toast(res.errors.length ? `Hid ${formatCount(res.done)}, ${formatCount(res.errors.length)} failed: ${res.errors[0]}` : `Hid ${plural(res.done, 'item')} in File Explorer. Undo it from History if needed.`, { error: res.errors.length > 0 })
+      },
+    })
+  }
+  const resetPrivate = () =>
+    setConfirm({
+      ...privateConfirm('reset', privateItems.length),
+      onConfirm: async () => {
+        if (await api.privateReset()) toast('Private was reset: everything shows in your library again')
+      },
+    })
+
   // Import: the options, the source list (refreshed every few seconds while the page is open) and the steps.
   const importOpts: ImportOptions = {
     destination: settings?.importDestination ?? null,
@@ -1208,7 +1285,7 @@ export default function App() {
     setQuery('')
     navigate({ kind: 'similar', id })
   }
-  const onMenuAction = useEvent(({ action, id, ids }: { action: 'open' | 'delete' | 'album' | 'similar' | 'location' | 'export'; id: string; ids: string[] }) => {
+  const onMenuAction = useEvent(({ action, id, ids }: { action: 'open' | 'delete' | 'album' | 'similar' | 'location' | 'export' | 'private' | 'unprivate'; id: string; ids: string[] }) => {
     if (action === 'open') {
       const index = visible.findIndex((it) => it.id === id)
       if (index >= 0) openViewer(index)
@@ -1220,6 +1297,10 @@ export default function App() {
       setLocating(ids)
     } else if (action === 'export') {
       setExporting({ ids, label: exportLabel })
+    } else if (action === 'private') {
+      makePrivate(ids)
+    } else if (action === 'unprivate') {
+      unmakePrivate(ids)
     } else if (action === 'delete') {
       requestDelete(ids)
     }
@@ -1228,7 +1309,7 @@ export default function App() {
 
   // ---------- keyboard ----------
   const onKey = useEvent((e: KeyboardEvent) => {
-    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum || compare || tagging || locating || exporting || savingSearch !== null) return
+    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum || compare || tagging || locating || exporting || pinDialog || savingSearch !== null) return
     const key = e.key.toLowerCase()
     const typing = !!(e.target as HTMLElement)?.closest?.('input, textarea')
     if ((e.ctrlKey || e.metaKey) && key === 'f') {
@@ -1475,6 +1556,20 @@ export default function App() {
           onChange={(n) => api.rateItems([...selection], n)}
           label="Rating of the selected items"
         />
+        {view.kind === 'private' ? (
+          <>
+            <button className="btn ghost" title="Show them in the library again" onClick={() => unmakePrivate([...selection])}>
+              <LockKeyholeOpen size={15} /> Remove from Private
+            </button>
+            <button className="btn ghost" title="Move them into a hidden folder so File Explorer doesn't show them" onClick={() => hideInExplorer([...selection])}>
+              <EyeOff size={15} /> Hide in File Explorer
+            </button>
+          </>
+        ) : (
+          <button className="btn ghost" title="Hide them from every view until Private is unlocked" onClick={() => makePrivate([...selection])}>
+            <LockKeyhole size={15} /> Move to Private
+          </button>
+        )}
         <button className="btn ghost" title="Copies for sharing: smaller, without location, or as one .zip" onClick={() => setExporting({ ids: [...selection], label: exportLabel })}>
           <Share size={15} /> Export…
         </button>
@@ -1993,6 +2088,10 @@ export default function App() {
         }
       />
     )
+  } else if (view.kind === 'private' && !privStatus?.unlocked) {
+    body = <PrivateLock status={privStatus} bridge={privateBridge} onReset={resetPrivate} />
+  } else if (view.kind === 'private' && !privateItems.length) {
+    body = <PrivateEmpty />
   } else if (currentAlbum && !currentAlbum.query && !currentAlbum.items.some((id) => byId.has(id)) && !query) {
     body = (
       <EmptyState
@@ -2146,6 +2245,16 @@ export default function App() {
             }}
           />
         )}
+        {view.kind === 'private' && privStatus?.unlocked && privateItems.length > 0 && (
+          <PrivateBar
+            count={privateItems.length}
+            visibleInExplorer={privateItems.filter((it) => !/[\\/]Lumen Private[\\/]/i.test(it.path)).length}
+            onLock={() => api.privateLock()}
+            onHideInExplorer={() => hideInExplorer(privateItems.filter((it) => !/[\\/]Lumen Private[\\/]/i.test(it.path)).map((it) => it.id))}
+            onPin={() => setPinDialog(true)}
+            hasPin={privStatus.hasPin}
+          />
+        )}
         {currentTrip && visible.some(hasPosition) && (
           <div className="trip-map">
             <MapView
@@ -2204,6 +2313,7 @@ export default function App() {
           onRemoveTag={(item, tag) => api.editTags([item.id], { remove: [tag] })}
         />
       )}
+      {pinDialog && <PinDialog bridge={privateBridge} hasPin={!!privStatus?.hasPin} onClose={() => setPinDialog(false)} onDone={() => toast('PIN saved')} />}
       {exporting && (
         <ExportDialog
           items={exporting.ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it)}
