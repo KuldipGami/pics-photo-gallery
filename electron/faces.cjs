@@ -240,6 +240,7 @@ class FaceIndex extends EventEmitter {
     // a photo that changed (not the model upgrade).
     this.legacy = new Map() // itemId -> [{ box, person?, rej?, manual?, ignored?, cover?, re? }]
     this.photos = new Map() // itemId -> library item (images only)
+    this.restoring = new Map() // itemId -> choices put back by an undo, waiting for the photo to be listed again
     this.enabled = true
     this.halted = false
     this.error = null
@@ -417,6 +418,7 @@ class FaceIndex extends EventEmitter {
    */
   sync(libraryItems) {
     this.photos = new Map(libraryItems.filter((it) => it.type === 'image').map((it) => [it.id, it]))
+    this.takeRestoring()
     let dropped = false
     for (const [id, rec] of this.items) {
       const it = this.photos.get(id)
@@ -710,7 +712,7 @@ class FaceIndex extends EventEmitter {
   prunePeople() {
     const used = new Set()
     for (const f of this.faces.values()) if (f.person) used.add(f.person)
-    for (const list of this.legacy.values()) for (const t of list) if (t.person) used.add(t.person)
+    for (const map of [this.legacy, this.restoring]) for (const list of map.values()) for (const t of list) if (t.person) used.add(t.person)
     for (const pid of this.people.keys()) if (!used.has(pid)) this.people.delete(pid)
   }
 
@@ -727,8 +729,14 @@ class FaceIndex extends EventEmitter {
    * position) once it's analysed again. (It also keeps a named person whose every photo changed.)
    */
   keepChoices(id) {
+    const kept = this.choicesOf(id)
+    if (kept.length) this.legacy.set(id, [...(this.legacy.get(id) ?? []), ...kept])
+  }
+
+  /** What keepChoices() sets aside for photo `id` (nothing is changed). */
+  choicesOf(id) {
     const rec = this.items.get(id)
-    if (!rec) return
+    if (!rec) return []
     const covers = new Map()
     for (const p of this.people.values()) if (p.cover) covers.set(p.cover, p.id)
     const kept = []
@@ -747,7 +755,58 @@ class FaceIndex extends EventEmitter {
       if (f.ignored) t.ignored = true
       if (t.person || t.rej || t.ignored) kept.push(t)
     }
-    if (kept.length) this.legacy.set(id, [...(this.legacy.get(id) ?? []), ...kept])
+    return kept
+  }
+
+  /**
+   * For undoing a Clean up move (kept in its History entry): the user's choices for these photos,
+   * by item id, as keepChoices() keeps them (plus any still waiting in legacy), and the people they
+   * name, as plain JSON. Null when there are none.
+   */
+  snapshotChoices(ids) {
+    const choices = {}
+    const pids = new Set()
+    for (const id of ids) {
+      const list = [...(this.legacy.get(id) ?? []), ...(this.restoring.get(id) ?? []), ...this.choicesOf(id)]
+      if (!list.length) continue
+      choices[id] = list.map((x) => ({ ...x, ...(x.rej && { rej: [...x.rej] }) }))
+      for (const x of list) {
+        if (x.person) pids.add(x.person)
+        for (const p of x.rej ?? []) pids.add(p)
+      }
+    }
+    if (!Object.keys(choices).length) return null
+    const people = [...pids].map((pid) => this.people.get(pid)).filter(Boolean)
+    return { choices, people: people.map(({ cover, ...p }) => ({ ...p, ...(p.notSame && { notSame: [...p.notSame] }) })) }
+  }
+
+  /**
+   * Undo of a Clean up move: the photos are back at their old paths (so under their old ids). Their
+   * choices wait until the library lists them again, then go to `legacy` and are carried over (by
+   * position) once they're analysed. People removed meanwhile because all their photos had moved
+   * come back with their names.
+   */
+  restoreChoices(snap) {
+    if (!snap || typeof snap !== 'object' || !snap.choices || typeof snap.choices !== 'object') return
+    for (const p of Array.isArray(snap.people) ? snap.people : []) {
+      if (p && typeof p.id === 'string' && !this.people.has(p.id)) this.people.set(p.id, { ...p })
+    }
+    for (const [id, list] of Object.entries(snap.choices)) {
+      if (Array.isArray(list) && list.length) this.restoring.set(id, [...(this.restoring.get(id) ?? []), ...list])
+    }
+    this.takeRestoring()
+    this.edited()
+  }
+
+  /** Restored choices whose photo is listed again: to legacy (or straight onto its faces if it was analysed already). */
+  takeRestoring() {
+    for (const [id, list] of this.restoring) {
+      if (!this.photos.has(id)) continue
+      this.restoring.delete(id)
+      this.legacy.set(id, [...(this.legacy.get(id) ?? []), ...list])
+      const rec = this.items.get(id)
+      if (rec) this.carryOver(id, rec.faces.map((fid) => this.faces.get(fid)).filter(Boolean))
+    }
   }
 
   // ---------- user actions ----------
@@ -967,6 +1026,7 @@ class FaceIndex extends EventEmitter {
     this.faces.clear()
     this.people.clear()
     this.legacy.clear()
+    this.restoring.clear()
     this.failed.clear()
     this.attempts.clear()
     this.edits++

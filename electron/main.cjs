@@ -1869,6 +1869,8 @@ function rememberForUndo(items) {
     albums: albums.membershipsOf(paths),
     // one path at a time, so each file's entries can be told apart later
     tags: paths.map((p) => [p, tags.snapshot([p])]).filter(([, e]) => Array.isArray(e) && e.length),
+    // faces moved by hand, "not this person", covers, faces of named people (and those people)
+    faces: faces.snapshotChoices(items.map((it) => it.id)),
   }
 }
 
@@ -1879,11 +1881,19 @@ function keptFor(kept, paths) {
     favorites: kept.favorites.filter((p) => want.has(keyOf(p))),
     albums: kept.albums.map((m) => ({ ...m, paths: m.paths.filter((p) => want.has(keyOf(p))) })).filter((m) => m.paths.length || (m.cover && want.has(keyOf(m.cover)))),
     tags: kept.tags.filter(([p]) => want.has(keyOf(p))),
+    faces: facesFor(kept.faces, new Set(paths.map(idOf))),
   }
-  return out.favorites.length || out.albums.length || out.tags.length ? out : null
+  return out.favorites.length || out.albums.length || out.tags.length || out.faces ? out : null
 }
 
-/** Undo of a Clean up move: the files of `paths` that are back get their favorite, albums, ratings and tags back. */
+/** The face choices of the photos with these ids only (null when none). */
+function facesFor(snap, ids) {
+  if (!snap?.choices) return null
+  const choices = Object.fromEntries(Object.entries(snap.choices).filter(([id]) => ids.has(id)))
+  return Object.keys(choices).length ? { choices, people: snap.people ?? [] } : null
+}
+
+/** Undo of a Clean up move: the files of `paths` that are back get their favorite, albums, ratings, tags and face choices back. */
 function restoreForgotten(forgotten, paths) {
   if (!forgotten || !paths.length) return
   const back = new Set(paths.map(keyOf))
@@ -1899,6 +1909,8 @@ function restoreForgotten(forgotten, paths) {
     .filter((t) => Array.isArray(t) && typeof t[0] === 'string' && back.has(keyOf(t[0])) && Array.isArray(t[1]))
     .flatMap(([, e]) => e)
   if (entries.length) tags.restoreEntries(entries)
+  const faceChoices = facesFor(forgotten.faces, new Set(paths.map(idOf)))
+  if (faceChoices) faces.restoreChoices(faceChoices)
 }
 
 ipcMain.handle('items:trash', (_e, ids) => removeItems(ids, 'recycle'))

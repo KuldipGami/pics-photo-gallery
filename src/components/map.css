@@ -6,6 +6,9 @@
   display: flex;
   min-height: 0;
   container-type: inline-size;
+  /* Leaflet stacks its panes and controls at z-index 400–1000: keep them inside the map, or they
+     cover the viewer, menus, dialogs and toasts opened over it */
+  isolation: isolate;
 }
 .lmap-wrap.compact {
   position: relative;
