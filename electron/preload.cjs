@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('lumen', {
   onPeople: (cb) => on('people:changed', cb),
   onPeopleProgress: (cb) => on('people:progress', cb),
   createAlbum: (name, ids) => ipcRenderer.invoke('albums:create', name, ids),
+  createSmartAlbum: (name, query) => ipcRenderer.invoke('albums:create-smart', name, query),
+  findSimilar: (id) => ipcRenderer.invoke('smart:similar', id),
   renameAlbum: (id, name) => ipcRenderer.invoke('albums:rename', id, name),
   deleteAlbum: (id) => ipcRenderer.invoke('albums:delete', id),
   addToAlbum: (id, ids) => ipcRenderer.invoke('albums:add', id, ids),

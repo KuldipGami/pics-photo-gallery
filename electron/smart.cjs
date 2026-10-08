@@ -15,6 +15,8 @@ const BIAS = -12.93
 const MIN_PROB = 0.002 // ≈ cos 0.057: clearly related, recall over precision
 const BEST_MARGIN = 0.06 // ...and not far below the best match for this search
 const MAX_RESULTS = 3000
+const SIMILAR_MIN = 0.6 // image-to-image cosine: same kind of scene or subject
+const SIMILAR_MAX = 400
 
 const prob = (cos) => 1 / (1 + Math.exp(-(SCALE * cos + BIAS)))
 
@@ -315,6 +317,28 @@ class SmartIndex extends EventEmitter {
     const floor = Math.max((Math.log(MIN_PROB / (1 - MIN_PROB)) - BIAS) / SCALE, top - BEST_MARGIN)
     const kept = hits.filter((h) => h[1] >= floor).sort((a, b) => b[1] - a[1]).slice(0, MAX_RESULTS)
     return { ids: kept.map((h) => h[0]), scores: kept.map((h) => +prob(h[1]).toFixed(4)) }
+  }
+
+  /** Items that look like this one (by their search vectors), most alike first; the item itself leads. */
+  similar(id) {
+    const a = this.vectors.get(id)
+    if (!a || !this.media.has(id)) return { ids: [], scores: [] }
+    const hits = []
+    for (const [other, r] of this.vectors) {
+      if (other === id || !this.media.has(other)) continue
+      let dot = 0
+      const v = r.q
+      for (let k = 0; k < DIMS; k++) dot += a.q[k] * v[k]
+      const cos = dot * a.s * r.s
+      if (cos >= SIMILAR_MIN) hits.push([other, cos])
+    }
+    const kept = hits.sort((x, y) => y[1] - x[1]).slice(0, SIMILAR_MAX)
+    return { ids: [id, ...kept.map((h) => h[0])], scores: [1, ...kept.map((h) => +h[1].toFixed(4))] }
+  }
+
+  /** Whether "Find similar" can work for this item yet. */
+  hasVector(id) {
+    return this.vectors.has(id)
   }
 
   setEnabled(enabled) {

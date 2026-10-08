@@ -1,4 +1,4 @@
-import { Album as AlbumIcon, Check, Pencil, Plus, Search, X } from 'lucide-react'
+import { Album as AlbumIcon, Check, Pencil, Plus, Search, Sparkles, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatCount, formatRange } from '../lib/format'
 import { fold } from '../lib/search'
@@ -50,12 +50,18 @@ export function AlbumsView({
           return (
             <button key={a.id} className="folder-card" onClick={() => onOpen(a.id)} title={a.name}>
               <div className="folder-cover n1">
-                <CoverImage item={cover} fallback={<AlbumIcon size={32} />} />
+                <CoverImage item={cover} fallback={a.query ? <Sparkles size={32} /> : <AlbumIcon size={32} />} />
               </div>
               <div className="folder-name">{a.name}</div>
               <div className="folder-meta">
-                {formatCount(items.length)} item{items.length === 1 ? '' : 's'}
-                {range ? ` · ${range}` : ''}
+                {a.query ? (
+                  <>Smart album · “{a.query}”</>
+                ) : (
+                  <>
+                    {formatCount(items.length)} item{items.length === 1 ? '' : 's'}
+                    {range ? ` · ${range}` : ''}
+                  </>
+                )}
               </div>
             </button>
           )
@@ -132,7 +138,7 @@ export function AlbumPicker({
   const inputRef = useRef<HTMLInputElement>(null)
   const q = fold(query.trim())
   const list = useMemo(
-    () => [...albums].filter((a) => !q || fold(a.name).includes(q)).sort((a, b) => b.updated - a.updated),
+    () => [...albums].filter((a) => !a.query && (!q || fold(a.name).includes(q))).sort((a, b) => b.updated - a.updated),
     [albums, q],
   )
   const exact = list.some((a) => fold(a.name) === q)

@@ -107,6 +107,8 @@ export interface Album {
   items: string[]
   /** Chosen cover item (else the newest photo). */
   cover: string | null
+  /** Smart album: a saved search; its photos are whatever matches now (items is empty). */
+  query?: string
   created: number
   updated: number
 }
@@ -335,6 +337,7 @@ export type View =
   | { kind: 'place'; id: string }
   | { kind: 'albums' }
   | { kind: 'album'; id: string }
+  | { kind: 'similar'; id: string }
   | { kind: 'memories' }
   | { kind: 'trip'; id: string }
   | { kind: 'cleanup' }

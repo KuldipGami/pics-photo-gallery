@@ -76,7 +76,7 @@ interface PickerOptions {
 
 const ZOOM_STEPS = [80, 100, 124, 150, 180, 220, 270, 330]
 const BIN = api.env.platform === 'win32' ? 'Recycle Bin' : 'Trash'
-const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip']
+const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip', 'similar']
 
 const TITLES: Record<View['kind'], string> = {
   photos: 'Photos',
@@ -91,6 +91,7 @@ const TITLES: Record<View['kind'], string> = {
   place: '',
   albums: 'Albums',
   album: '',
+  similar: '',
   cleanup: 'Clean up',
   organize: 'Organize',
   history: 'History',
@@ -142,6 +143,7 @@ export default function App() {
   /** "Add to album…" for these items. */
   const [albumPicker, setAlbumPicker] = useState<string[] | null>(null)
   const [newAlbum, setNewAlbum] = useState(false)
+  const [savingSearch, setSavingSearch] = useState<string | null>(null)
   const [placeCountry, setPlaceCountry] = useState<string | null>(null)
   const { toasts, push: toast, dismiss: dismissToast } = useToasts()
   // ---------- clean up (DupeLens) ----------
@@ -188,7 +190,10 @@ export default function App() {
   // ---------- derived data ----------
   const byId = useMemo(() => new Map(items.map((it) => [it.id, it])), [items])
   const favorites = useMemo(() => new Set(settings?.favorites ?? []), [settings?.favorites])
-  const tokens = useMemo(() => searchTokens(query), [query])
+  const savedQuery = view.kind === 'album' ? (albums.find((a) => a.id === view.id)?.query ?? '') : ''
+  const tokens = useMemo(() => searchTokens(savedQuery ? `${savedQuery} ${query}` : query), [savedQuery, query])
+  // "Find similar": the photo's look-alikes, most alike first
+  const [similar, setSimilar] = useState<{ id: string; ids: string[]; scores: number[] } | null>(null)
   const dateField = view.kind === 'recent' ? 'added' : 'date'
   const isGrid = GRID_VIEWS.includes(view.kind)
   const favDep = view.kind === 'favorites' ? favorites : null
@@ -311,9 +316,11 @@ export default function App() {
     else if (view.kind === 'person') {
       list = list.filter((it) => people.byItem[it.id]?.faces.some(([, pid]) => pid === view.id))
     } else if (view.kind === 'place') list = list.filter((it) => places.byItem[it.id] === view.id)
-    else if (view.kind === 'album') {
+    else if (view.kind === 'album' && !currentAlbum?.query) {
       const members = new Set(currentAlbum?.items ?? [])
       list = list.filter((it) => members.has(it.id))
+    } else if (view.kind === 'similar') {
+      list = similar && similar.id === view.id ? similar.ids.map((id) => byId.get(id)).filter((it): it is MediaItem => !!it) : []
     } else if (view.kind === 'trip') {
       const members = new Set(currentTrip?.items ?? [])
       list = list.filter((it) => members.has(it.id))
@@ -322,7 +329,7 @@ export default function App() {
     return list
     // `favDep`/`personDep`/`placeDep` instead of the full objects: toggling a heart or renaming
     // someone shouldn't refilter views that don't depend on them.
-  }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip])
+  }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip, similar, byId])
 
   // ---------- search ----------
   // Every word is matched against what Lumen knows about an item (name, folder, date, camera,
@@ -386,8 +393,9 @@ export default function App() {
         return (mask & strict) === strict && !!smart.matches?.get(phraseOf(mask))?.has(it.id)
       })
     }
+    if (view.kind === 'similar') return list // most alike first
     return [...list].sort((a, b) => (sortAsc ? a[dateField] - b[dateField] : b[dateField] - a[dateField]))
-  }, [baseList, search, smart.matches, sortAsc, dateField])
+  }, [baseList, search, smart.matches, sortAsc, dateField, view.kind])
   const smartHits = useMemo(() => {
     if (!search || !smart.matches) return 0
     let n = 0
@@ -1046,13 +1054,22 @@ export default function App() {
     return () => offs.forEach((off) => off())
   }, [])
 
-  const onMenuAction = useEvent(({ action, id, ids }: { action: 'open' | 'delete' | 'album'; id: string; ids: string[] }) => {
+  const findSimilar = async (id: string) => {
+    const res = await api.findSimilar(id)
+    if (res.ids.length <= 1) return toast('Nothing looks like this one yet. Lumen may still be preparing smart search.')
+    setSimilar({ id, ...res })
+    setQuery('')
+    navigate({ kind: 'similar', id })
+  }
+  const onMenuAction = useEvent(({ action, id, ids }: { action: 'open' | 'delete' | 'album' | 'similar'; id: string; ids: string[] }) => {
     if (action === 'open') {
       const index = visible.findIndex((it) => it.id === id)
       if (index >= 0) openViewer(index)
     } else if (action === 'album') {
       setAlbumPicker(ids)
-    } else {
+    } else if (action === 'similar') {
+      findSimilar(id)
+    } else if (action === 'delete') {
       requestDelete(ids)
     }
   })
@@ -1139,7 +1156,15 @@ export default function App() {
   // ---------- header ----------
   const allSelectedFav = selection.size > 0 && [...selection].every((id) => favorites.has(id))
   const title =
-    view.kind === 'folder' ? baseName(view.dir) : currentPlace ? currentPlace.name : currentTrip ? currentTrip.title : TITLES[view.kind]
+    view.kind === 'folder'
+      ? baseName(view.dir)
+      : view.kind === 'similar'
+        ? `Like “${byId.get(view.id)?.name ?? 'this photo'}”`
+        : currentPlace
+          ? currentPlace.name
+          : currentTrip
+            ? currentTrip.title
+            : TITLES[view.kind]
   let subtitle = ''
   if (isGrid) {
     subtitle = summarize(visible)
@@ -1147,6 +1172,8 @@ export default function App() {
     if (range) subtitle += ` · ${range}`
     if (currentPlace) subtitle = `${[currentPlace.admin, currentPlace.country].filter(Boolean).join(', ')} · ${subtitle}`
     if (currentTrip) subtitle = `${formatTripDates(currentTrip.start, currentTrip.end)} · ${currentTrip.where ? currentTrip.where + ' · ' : ''}${summarize(visible)}`
+    if (view.kind === 'similar') subtitle = `${summarize(visible)} · most alike first, by what's in them`
+    if (currentAlbum?.query) subtitle = `Smart album · “${currentAlbum.query}” · ${subtitle}`
     if (search && smart.pending) subtitle += ' · Looking inside photos…'
     else if (smartHits) subtitle += ` · ${formatCount(smartHits)} found by what's in them`
   } else if (view.kind === 'places') {
@@ -1263,6 +1290,7 @@ export default function App() {
                 <ImageUp size={15} /> Use as cover
               </button>
             )}
+            {!currentAlbum.query && (
             <button
               className="btn ghost"
               title="Take them out of this album (the files are kept)"
@@ -1275,6 +1303,7 @@ export default function App() {
             >
               <ImageMinus size={15} /> Remove from album
             </button>
+            )}
           </>
         )}
         <button className="btn ghost" onClick={() => setAlbumPicker([...selection])}>
@@ -1446,6 +1475,11 @@ export default function App() {
             }
           >
             <MapIcon size={15} /> Map
+          </button>
+        )}
+        {isGrid && query.trim() && view.kind !== 'similar' && !currentAlbum?.query && (
+          <button className="btn ghost" title="Keep this search as an album that fills itself as new photos match" onClick={() => setSavingSearch(query.trim())}>
+            <Sparkles size={15} /> Save as smart album
           </button>
         )}
         {currentAlbum && (
@@ -1707,7 +1741,7 @@ export default function App() {
         }
       />
     )
-  } else if (currentAlbum && !currentAlbum.items.some((id) => byId.has(id)) && !query) {
+  } else if (currentAlbum && !currentAlbum.query && !currentAlbum.items.some((id) => byId.has(id)) && !query) {
     body = (
       <EmptyState
         icon={<AlbumIcon size={44} strokeWidth={1.5} />}
@@ -1911,6 +1945,23 @@ export default function App() {
             createAlbumWith(name, ids)
           }}
           onClose={() => setAlbumPicker(null)}
+        />
+      )}
+      {savingSearch !== null && (
+        <AlbumNameDialog
+          title="Save as smart album"
+          initial={savingSearch.charAt(0).toUpperCase() + savingSearch.slice(1)}
+          confirmLabel="Save"
+          onClose={() => setSavingSearch(null)}
+          onSubmit={async (name) => {
+            const q = savingSearch
+            setSavingSearch(null)
+            const id = await api.createSmartAlbum(name, q)
+            if (!id) return
+            setQuery('')
+            navigate({ kind: 'album', id })
+            toast(`Saved “${name}”: new photos matching “${q}” will show up in it`)
+          }}
         />
       )}
       {newAlbum && (

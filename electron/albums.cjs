@@ -66,6 +66,7 @@ class Albums extends EventEmitter {
       id: a.id,
       name: a.name,
       items: a.paths.map(idOf),
+      ...(a.query ? { query: a.query } : {}),
       cover: a.cover ? idOf(a.cover) : null,
       created: a.created,
       updated: a.updated,
@@ -78,6 +79,16 @@ class Albums extends EventEmitter {
     const album = { id: newAlbumId(), name: cleanName(name) || 'Untitled album', paths: [], cover: null, created: now, updated: now }
     this.albums.unshift(album)
     this.addTo(album, items)
+    this.changed()
+    return album.id
+  }
+
+  /** A smart album: a saved search; the app works out its photos live, so it holds no files. */
+  createSmart(name, query) {
+    const now = Date.now()
+    const q = String(query ?? '').trim().slice(0, 200)
+    const album = { id: newAlbumId(), name: cleanName(name) || cleanName(q) || 'Smart album', paths: [], query: q, cover: null, created: now, updated: now }
+    this.albums.unshift(album)
     this.changed()
     return album.id
   }
@@ -113,7 +124,7 @@ class Albums extends EventEmitter {
   /** Returns how many were new to the album. */
   add(id, items) {
     const album = this.get(id)
-    if (!album) return 0
+    if (!album || album.query) return 0
     const added = this.addTo(album, items)
     if (added) this.changed()
     return added
@@ -134,7 +145,7 @@ class Albums extends EventEmitter {
 
   setCover(id, item) {
     const album = this.get(id)
-    if (!album || !album.paths.some((p) => keyOf(p) === keyOf(item.path))) return
+    if (!album || (!album.query && !album.paths.some((p) => keyOf(p) === keyOf(item.path)))) return
     album.cover = item.path
     this.changed()
   }

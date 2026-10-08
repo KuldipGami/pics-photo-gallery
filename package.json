@@ -1,7 +1,7 @@
 {
   "name": "lumen",
   "productName": "Lumen",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "A modern photo & video gallery for your desktop",
   "private": true,
   "type": "module",

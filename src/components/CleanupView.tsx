@@ -35,6 +35,7 @@ import {
   rank,
   ruleMarks,
   screenshotList,
+  shortLocation,
   type Facts,
   type Listed,
 } from '../lib/cleanup'
@@ -98,11 +99,15 @@ export function CleanupView(props: Props) {
   const [groupSort, setGroupSort] = useState<GroupSort>('found')
   const [listSort, setListSort] = useState<ListSort>('suggested')
   const [limit, setLimit] = useState(PAGE)
+  /** Only show files in this folder (and its subfolders); 'all' = every copy of a group must be there. */
+  const [inFolder, setInFolder] = useState<string | null>(null)
+  const [folderMode, setFolderMode] = useState<'any' | 'all'>('any')
+  const where = (dir: string) => shortLocation(dir, settings.folders)
   const [backupView, setBackupView] = useState<'both' | 'missing' | 'only'>('missing')
   const roots = settings.folders
   const [main, setMain] = useState(roots[0] ?? '')
   const [backup, setBackup] = useState(roots[1] ?? '')
-  useEffect(() => setLimit(PAGE), [tab, filter, groupSort, props.query])
+  useEffect(() => setLimit(PAGE), [tab, filter, groupSort, props.query, inFolder, folderMode])
 
   const terms = useMemo(() => fold(props.query).split(/\s+/).filter(Boolean), [props.query])
   const rule = settings.keepRule
@@ -123,6 +128,16 @@ export function CleanupView(props: Props) {
   const visibleGroups = useMemo(() => {
     let list = groups.filter((g) => (filter === 'all' ? true : filter === 'exact' ? g.exact : !g.exact))
     if (terms.length) list = list.filter((g) => g.ids.some((id) => { const it = byId.get(id); return !!it && itemMatches(it, terms) }))
+    if (inFolder) {
+      const here = (id: string) => {
+        const it = byId.get(id)
+        return !!it && isUnder(it.path, inFolder)
+      }
+      list = list.filter((g) => {
+        const live = g.ids.filter((id) => byId.has(id))
+        return folderMode === 'all' ? live.every(here) : live.some(here)
+      })
+    }
     const newest = (g: DupGroup) => Math.max(...g.ids.map((id) => byId.get(id)?.date ?? 0))
     const first = (g: DupGroup) => g.ids.map((id) => byId.get(id)?.name.toLowerCase() ?? '').sort()[0]
     const cmp: Record<GroupSort, (a: DupGroup, b: DupGroup) => number> = {
@@ -133,7 +148,44 @@ export function CleanupView(props: Props) {
       name: (a, b) => first(a).localeCompare(first(b)),
     }
     return [...list].sort((a, b) => cmp[groupSort](a, b) || a.n - b.n)
-  }, [groups, filter, terms, groupSort, byId])
+  }, [groups, filter, terms, groupSort, byId, inFolder, folderMode])
+
+  /** Folders holding duplicates, most groups first (for the folder filter). */
+  const dupFolders = useMemo(() => {
+    const count = new Map<string, number>()
+    for (const g of groups) {
+      const dirs = new Set(g.ids.map((id) => byId.get(id)?.dir).filter((d): d is string => !!d))
+      for (const d of dirs) count.set(d, (count.get(d) ?? 0) + 1)
+    }
+    return [...count.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 60)
+  }, [groups, byId])
+
+  const folderOptions = tab === 'duplicates' ? dupFolders : []
+  const folderPicker = (
+    <label className="clean-select" title="Only show files in one folder (and its subfolders)">
+      <Folder size={14} />
+      <select
+        className="clean-folder"
+        value={inFolder ?? ''}
+        onChange={async (e) => {
+          const v = e.target.value
+          if (v === '?') {
+            const [picked] = await api.pickFolders(tab === 'duplicates' ? 'Show duplicates in this folder' : 'Show files in this folder')
+            if (picked) setInFolder(picked)
+          } else setInFolder(v || null)
+        }}
+      >
+        <option value="">All folders</option>
+        {inFolder && !folderOptions.some(([d]) => d === inFolder) && <option value={inFolder}>{where(inFolder)}</option>}
+        {folderOptions.map(([dir, n]) => (
+          <option key={dir} value={dir}>
+            {where(dir)} ({formatCount(n)})
+          </option>
+        ))}
+        <option value="?">Choose a folder…</option>
+      </select>
+    </label>
+  )
 
   // ---------- the flat lists ----------
   const lists = useMemo(() => {
@@ -161,6 +213,7 @@ export function CleanupView(props: Props) {
   const visibleFlat = useMemo(() => {
     if (!flat) return []
     let list = terms.length ? flat.filter((l) => itemMatches(l.item, terms)) : flat
+    if (inFolder) list = list.filter((l) => isUnder(l.item.path, inFolder))
     const by: Record<ListSort, ((a: Listed, b: Listed) => number) | null> = {
       suggested: null,
       largest: (a, b) => b.item.size - a.item.size,
@@ -172,7 +225,7 @@ export function CleanupView(props: Props) {
     const c = by[listSort]
     if (c) list = [...list].sort(c)
     return list
-  }, [flat, terms, listSort])
+  }, [flat, terms, listSort, inFolder])
 
   // ---------- selection in the current tab ----------
   const tabIds = useMemo(() => {
@@ -344,6 +397,7 @@ export function CleanupView(props: Props) {
             onCompare={(focus) => props.onCompare(visibleGroups, gi, focus)}
             onProtectFolder={props.onProtectFolder}
             onDismiss={() => props.onDismiss(g.ids)}
+            where={where}
           />
         ))}
         {visibleGroups.length > limit && (
@@ -443,6 +497,7 @@ export function CleanupView(props: Props) {
                 protectedFile={isProtected(l.item.id)}
                 showBadge={marks.has(l.item.id)}
                 match={l.issue}
+                location={where(l.item.dir)}
                 onToggle={() => toggle(l.item.id)}
                 onOpen={() => props.onPreview(visibleFlat.map((x) => x.item), i)}
                 onProtectFolder={props.onProtectFolder}
@@ -589,8 +644,17 @@ export function CleanupView(props: Props) {
                 <option value="name">Name</option>
               </select>
             </label>
+            {folderPicker}
+            {inFolder && (
+              <label className="clean-select" title="Which groups to show for this folder">
+                <select value={folderMode} onChange={(e) => setFolderMode(e.target.value as 'any' | 'all')}>
+                  <option value="any">with a copy here</option>
+                  <option value="all">only copies here</option>
+                </select>
+              </label>
+            )}
             <span className="clean-count">
-              {terms.length || filter !== 'all' ? `${formatCount(visibleGroups.length)} of ${formatCount(groups.length)} groups` : ''}
+              {terms.length || filter !== 'all' || inFolder ? `${formatCount(visibleGroups.length)} of ${formatCount(groups.length)} groups` : ''}
             </span>
           </>
         ) : tab === 'folders' ? (
@@ -598,6 +662,7 @@ export function CleanupView(props: Props) {
         ) : (
           <>
             <span className="clean-hint">{HINT[tab]}</span>
+            {tab !== 'backup' && folderPicker}
             <button className="btn ghost" disabled={!visibleFlat.length} onClick={() => mark(visibleFlat.map((l) => l.item.id), true)}>
               Select all
             </button>
@@ -654,6 +719,7 @@ function GroupCard({
   onCompare,
   onProtectFolder,
   onDismiss,
+  where,
 }: {
   group: DupGroup
   byId: Map<string, MediaItem>
@@ -666,6 +732,8 @@ function GroupCard({
   onCompare(focus?: string): void
   onProtectFolder(dir: string): void
   onDismiss(): void
+  /** A file's folder, shown short. */
+  where(dir: string): string
 }) {
   const live = g.ids.map((id, i) => [id, i] as const).filter(([id]) => byId.has(id))
   const nMarked = live.filter(([id]) => marks.has(id)).length
@@ -709,6 +777,7 @@ function GroupCard({
             protectedFile={isProtected(id)}
             showBadge
             match={matchText(g, i)}
+            location={where(byId.get(id)!.dir)}
             isRef={i === g.ref}
             sharpest={g.sharpest === i}
             onToggle={() => onToggle(id)}
@@ -729,6 +798,7 @@ export const Tile = memo(function Tile({
   protectedFile,
   showBadge,
   match,
+  location,
   isRef,
   sharpest,
   onToggle,
@@ -742,6 +812,8 @@ export const Tile = memo(function Tile({
   protectedFile: boolean
   showBadge: boolean
   match: string
+  /** Where the file is (its folder, shown short; the full path is in the tooltip). */
+  location?: string
   isRef?: boolean
   sharpest?: boolean
   onToggle(): void
@@ -791,6 +863,12 @@ export const Tile = memo(function Tile({
         </div>
         <div className="ctile-meta">{details.filter(Boolean).join(' · ')}</div>
         <div className="ctile-meta">{item.taken ? `Taken ${dateFmt.format(item.taken)}` : `Modified ${dateFmt.format(item.mtime)}`}</div>
+        {location && (
+          <button className="ctile-dir" title={`${item.path}\nClick to show it in its folder`} onClick={() => api.reveal(item.id)}>
+            <Folder size={12} />
+            <span>{location}</span>
+          </button>
+        )}
         <div className="ctile-match">
           <span className={isRef ? 'ref' : ''}>{match}</span>
           {sharpest && <span className="sharpest" title="The clearest shot in this group"> · Sharpest</span>}

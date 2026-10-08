@@ -94,6 +94,11 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
 
   // ---------- keyboard (DupeLens' review keys) ----------
   const videoRef = useRef<SyncedVideosHandle>(null)
+  // Many copies don't fit side by side: the columns scroll, and the chosen one comes into view.
+  const colsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    colsRef.current?.querySelector(`[data-col="${focus}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' })
+  }, [focus])
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {})
   keyRef.current = (e: KeyboardEvent) => {
     if (e.ctrlKey || e.altKey || e.metaKey || (e.target as HTMLElement)?.closest?.('input, select, textarea')) return
@@ -214,9 +219,11 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
               <td>{dateTimeFmt.format(it.mtime)}</td>
             </tr>
             <tr>
-              <th>Folder</th>
-              <td className="compare-dir" title={it.dir}>
-                {it.dir}
+              <th>Location</th>
+              <td className="compare-dir">
+                <button className="link" title="Show it in its folder" onClick={() => api.reveal(id)}>
+                  {it.path}
+                </button>
               </td>
             </tr>
           </tbody>
@@ -337,9 +344,9 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
           onSelect={setFocus}
         />
       ) : (
-        <div className="compare-cols" style={{ gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}>
+        <div className="compare-cols" ref={colsRef} style={{ gridTemplateColumns: `repeat(${items.length}, minmax(${items.length > 3 ? 340 : 0}px, 1fr))` }}>
           {items.map((it, i) => (
-            <div key={it.id} className={`compare-col${i === focus ? ' focused' : ''}${marks.has(it.id) ? ' marked' : ''}`}>
+            <div key={it.id} data-col={i} className={`compare-col${i === focus ? ' focused' : ''}${marks.has(it.id) ? ' marked' : ''}`}>
               <div className="compare-stage">
                 {pane(i)}
                 {badges(i)}

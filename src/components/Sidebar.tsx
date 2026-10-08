@@ -91,7 +91,7 @@ export function Sidebar(props: Props) {
                 aria-current={on ? 'page' : undefined}
                 title={a.name}
                 onDragOver={(e) => {
-                  if (!props.canDropItems()) return
+                  if (a.query || !props.canDropItems()) return
                   e.preventDefault()
                   e.dataTransfer.dropEffect = 'copy'
                   setDropTarget(a.id)
@@ -106,10 +106,14 @@ export function Sidebar(props: Props) {
                 }}
               >
                 <span className="nav-album-thumb">
-                  <CoverImage item={cover} fallback={<AlbumIcon size={14} />} />
+                  <CoverImage item={cover} fallback={a.query ? <Sparkles size={14} /> : <AlbumIcon size={14} />} />
                 </span>
                 <span className="nav-label">{a.name}</span>
-                <span className="nav-count">{formatCount(a.items.length)}</span>
+                {a.query ? (
+                  <Sparkles size={13} className="nav-smart" aria-label="Smart album" />
+                ) : (
+                  <span className="nav-count">{formatCount(a.items.length)}</span>
+                )}
               </button>
             )
           })}

@@ -54,6 +54,10 @@ export interface LumenApi {
   }>
   /** Resolves to the new album's id. */
   createAlbum(name: string, ids: string[]): Promise<string>
+  /** A saved search that fills itself. Resolves to the new album's id. */
+  createSmartAlbum(name: string, query: string): Promise<string | null>
+  /** Items that look like this one, most alike first (the item itself first). */
+  findSimilar(id: string): Promise<{ ids: string[]; scores: number[] }>
   renameAlbum(id: string, name: string): Promise<void>
   deleteAlbum(id: string): Promise<void>
   /** Resolves to how many were new to the album. */

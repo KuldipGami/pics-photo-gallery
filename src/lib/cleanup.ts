@@ -19,6 +19,15 @@ export const isUnder = (file: string, folder: string) => {
   return f === d || f.startsWith(d + '\\') || f.startsWith(d + '/')
 }
 
+/** A folder shown short: its path inside the library folder it belongs to ("Pictures\WhatsApp\Sent"). */
+export function shortLocation(dir: string, roots: string[]) {
+  const root = roots.filter((r) => isUnder(dir, r)).sort((a, b) => b.length - a.length)[0]
+  if (!root) return dir
+  const name = root.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || root
+  const rest = dir.slice(root.replace(/[\\/]+$/, '').length).replace(/^[\\/]+/, '')
+  return rest ? `${name}\\${rest}` : name
+}
+
 export const makeProtected = (folders: string[]) => (item: MediaItem) => folders.some((f) => isUnder(item.path, f))
 
 /** Keep order for a group: protected files first, then the rule's ranking (computed in the main process). */

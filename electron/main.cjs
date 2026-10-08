@@ -712,6 +712,9 @@ ipcMain.handle('people:suggestions', () => faces.suggestions())
 const isAlbumId = (v) => typeof v === 'string' && /^a[0-9a-f]{10}$/.test(v)
 
 ipcMain.handle('albums:create', (_e, name, ids) => albums.create(typeof name === 'string' ? name : '', itemsFor(idList(ids))))
+ipcMain.handle('albums:create-smart', (_e, name, query) =>
+  typeof query === 'string' && query.trim() ? albums.createSmart(typeof name === 'string' ? name : '', query) : null,
+)
 ipcMain.handle('albums:rename', (_e, id, name) => {
   if (isAlbumId(id) && typeof name === 'string') albums.rename(id, name)
 })
@@ -1016,6 +1019,7 @@ ipcMain.handle('edit:date', async (_e, id, ms) => {
 // ---------- duplicates & search ----------
 
 ipcMain.handle('dupes:dismiss', (_e, ids) => dupes.dismiss(idList(ids)))
+ipcMain.handle('smart:similar', (_e, id) => (typeof id === 'string' ? smart.similar(id) : { ids: [], scores: [] }))
 ipcMain.handle('smart:search', (_e, query) => (typeof query === 'string' ? smart.search(query.slice(0, 200)) : { ids: [], scores: [] }))
 
 ipcMain.handle('library:rescan', () => scan())
@@ -1276,6 +1280,7 @@ ipcMain.handle('items:menu', (event, id, ids) => {
           { label: 'Open', click: action('open') },
           { label: 'Open with default app', click: () => shell.openPath(item.path) },
           { label: IS_MAC ? 'Reveal in Finder' : 'Show in Explorer', click: () => shell.showItemInFolder(item.path) },
+          ...(smart.hasVector(item.id) ? [{ label: 'Find similar', click: action('similar') }] : []),
           { type: 'separator' },
         ]),
     {
