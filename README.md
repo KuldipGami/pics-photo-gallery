@@ -8,7 +8,7 @@ A modern photo & video gallery for your desktop. Built with Electron, React and 
 
 Get the latest version from the [Releases page](../../releases/latest):
 
-- **`Pics Setup <version>.exe`**: the installer (recommended). Adds Start menu and desktop shortcuts; uninstall it from Windows Settings → Apps.
+- **`Pics.Setup.<version>.exe`**: the installer (recommended). Adds Start menu and desktop shortcuts; uninstall it from Windows Settings → Apps.
 - **`Pics-<version>-win.zip`**: portable. Unzip it anywhere and run `Pics.exe`; nothing is installed. (Settings and caches still go to `%APPDATA%\Pics`.)
 
 Needs Windows 10 or 11, 64-bit. A graphics card is used when there is one (People, smart search, magic eraser, video previews), otherwise the CPU. HEIC photos and HEVC videos need Windows' **HEIF Image Extensions** and **HEVC Video Extensions** from the Microsoft Store (many PCs have them already).
