@@ -1,8 +1,8 @@
 {
   "name": "pics",
   "productName": "Pics",
-  "version": "1.16.0",
-  "description": "A modern photo & video gallery for your desktop",
+  "version": "1.17.0",
+  "description": "A modern photo and video gallery for your desktop",
   "author": "Kuldip",
   "license": "MIT",
   "private": true,
@@ -15,7 +15,9 @@
     "typecheck": "tsc --noEmit",
     "icon": "electron scripts/make-icon.cjs",
     "models": "node scripts/get-models.mjs",
-    "dist": "vite build && electron-builder --win"
+    "dist": "vite build && electron-builder --win",
+    "store-assets": "node scripts/make-store-assets.mjs",
+    "store": "node scripts/build-store.mjs"
   },
   "build": {
     "appId": "app.lumen.gallery",
@@ -66,6 +68,19 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true
+    },
+    "appx": {
+      "applicationId": "Pics",
+      "displayName": "Pics – Photos &amp; Videos",
+      "identityName": "KuldipGami.PicsPhotosVideos",
+      "publisher": "CN=6B0590BC-9ABE-4F13-82CC-2D3941731FB5",
+      "publisherDisplayName": "Kuldip Gami",
+      "backgroundColor": "transparent",
+      "languages": [
+        "en-US"
+      ],
+      "minVersion": "10.0.17763.0",
+      "maxVersionTested": "10.0.26100.0"
     }
   },
   "dependencies": {

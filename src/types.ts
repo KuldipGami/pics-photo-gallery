@@ -89,6 +89,8 @@ export interface Settings {
   /** Read from Windows, not stored. */
   startWithWindows: boolean
   contextMenu: boolean
+  /** Installed from the Microsoft Store: no Start with Windows or Explorer menu entry. */
+  storeApp?: boolean
   /** Scans skip these folders, file type groups (FileType keys) and files under minFileKB. */
   skippedFolders: string[]
   skippedTypes: string[]

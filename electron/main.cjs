@@ -66,6 +66,12 @@ const launchArgs = bgx.parseArgs(process.argv)
 // ---------- single instance (with hand-over to newer versions) ----------
 
 const VERSION = app.getVersion()
+/**
+ * Installed from the Microsoft Store (an MSIX package): Windows keeps its registry writes to itself,
+ * so "Start with Windows" and "Scan with Pics" in Explorer can't work and aren't offered; the Store
+ * also gives the app its own identity (no AppUserModelId of ours) and handles updates.
+ */
+const STORE_APP = !!process.windowsStore
 const INSTANCE_FILE = path.join(app.getPath('userData'), 'instance.json')
 
 const isNewer = (a, b) => {
@@ -567,6 +573,7 @@ const settingsPayload = () => ({
   minimizeToTray: !!store.get('minimizeToTray'),
   startWithWindows: startsWithWindows(),
   contextMenu: contextMenuOn,
+  storeApp: STORE_APP,
   skippedFolders: store.get('skippedFolders'),
   skippedTypes: store.get('skippedTypes'),
   minFileKB: store.get('minFileKB'),
@@ -686,6 +693,7 @@ function scanOptions() {
 }
 
 function startsWithWindows() {
+  if (STORE_APP) return false
   try {
     return bgx.isStartWithWindows()
   } catch {
@@ -1778,6 +1786,7 @@ ipcMain.handle('settings:set', (_e, patch) => {
 })
 
 ipcMain.handle('system:context-menu', async (_e, on) => {
+  if (STORE_APP) return { ok: false, error: 'Not available in the Microsoft Store version.' }
   try {
     await bgx.setContextMenu(!!on)
     contextMenuOn = await bgx.isContextMenuEnabled()
@@ -1789,6 +1798,7 @@ ipcMain.handle('system:context-menu', async (_e, on) => {
   }
 })
 ipcMain.handle('system:startup', (_e, on) => {
+  if (STORE_APP) return { ok: false, error: 'Not available in the Microsoft Store version.' }
   try {
     bgx.startWithWindows(!!on)
     return { ok: true }
@@ -2226,7 +2236,7 @@ function writeInstanceFile(extra = {}) {
 app.whenReady().then(async () => {
   if (!(await singleInstance)) return
   writeInstanceFile()
-  if (process.platform === 'win32') app.setAppUserModelId('app.lumen.gallery')
+  if (process.platform === 'win32' && !STORE_APP) app.setAppUserModelId('app.lumen.gallery')
   session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ['https://tile.openstreetmap.org/*'] }, (details, done) => {
     done({ requestHeaders: { ...details.requestHeaders, 'User-Agent': `Pics/${VERSION} (Windows photo gallery)` } })
   })
@@ -2247,7 +2257,7 @@ app.whenReady().then(async () => {
   const startHidden = launchArgs.tray && !launchArgs.folder && !!store.get('watchFolders')
   // Otherwise show the window right away; the saved library, faces, albums… load meanwhile (~0.5 s).
   if (!startHidden) createWindow()
-  bgx.isContextMenuEnabled().then(
+  ;(STORE_APP ? Promise.resolve(false) : bgx.isContextMenuEnabled()).then(
     (on) => {
       contextMenuOn = on
       // follow an updated install (and "Scan with Lumen" becomes "Scan with Pics")
@@ -2256,7 +2266,7 @@ app.whenReady().then(async () => {
     () => {},
   )
   // "Start with Windows" naming the old program file (Lumen.exe before the rename): point it here
-  if (app.isPackaged) {
+  if (app.isPackaged && !STORE_APP) {
     try {
       if (bgx.refreshStartWithWindows()) trace('start with Windows: now starts this copy')
     } catch {}

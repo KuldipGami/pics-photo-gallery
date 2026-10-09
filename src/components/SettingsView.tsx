@@ -549,6 +549,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
               onChange={() => api.setSettings({ minimizeToTray: !settings.minimizeToTray })}
             />
           </div>
+          {!settings.storeApp && (
           <div className="setting-row">
             <div>
               <div>Start with Windows</div>
@@ -562,6 +563,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
               }}
             />
           </div>
+          )}
           {settings.watchFolders && (
             <div className="setting-row column">
               <div className="watch-status">
@@ -579,7 +581,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
           )}
         </section>
 
-        {api.env.platform === 'win32' && (
+        {api.env.platform === 'win32' && !settings.storeApp && (
           <section className="card">
             <h2>Windows integration</h2>
             <div className="setting-row">
