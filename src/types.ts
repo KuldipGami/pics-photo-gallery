@@ -379,10 +379,6 @@ export interface Memory {
 export type View =
   | { kind: 'photos' }
   | { kind: 'videos' }
-  /** Live Photos only. */
-  | { kind: 'live' }
-  /** Photos, videos and Live Photos together. */
-  | { kind: 'all' }
   | { kind: 'favorites' }
   | { kind: 'recent' }
   | { kind: 'folders' }

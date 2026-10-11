@@ -1,4 +1,4 @@
-import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, Import, LayoutGrid, LoaderCircle, LockKeyhole, Map as MapIcon, MapPin, Plus, RefreshCw, Settings, Film, FolderTree, Sparkles, Target, Users } from 'lucide-react'
+import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, Import, LoaderCircle, LockKeyhole, Map as MapIcon, MapPin, Plus, RefreshCw, Settings, Film, FolderTree, Sparkles, Users } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
@@ -9,7 +9,8 @@ import { CoverImage } from './CoverImage'
 interface Props {
   view: View
   onNavigate(view: View): void
-  counts: { all: number; photos: number; videos: number; live: number; favorites: number; folders: number; people: number; places: number; trips: number }
+  /** `photos`: what the Photos tab shows now (photos, Live Photos, or everything). */
+  counts: { all: number; photos: number; videos: number; favorites: number; folders: number; people: number; places: number; trips: number }
   albums: Album[]
   byId: Map<string, MediaItem>
   duplicateBytes: number
@@ -30,16 +31,22 @@ interface Props {
 
 const pct = (done: number, total: number) => (total ? Math.min(100, Math.floor((done / total) * 100)) : 0)
 
-/** A background task's line: "Label · 45%", and "Label · 1,234 of 14,800 photos" while hovered. */
+/**
+ * A background task's line: "Label · 45%". Hovering it shows a card above with the whole label and
+ * "1,234 of 14,800 photos · 45%" (the line itself is too narrow for both).
+ */
 function Running({ label, done, total, noun }: { label: string; done: number; total: number; noun: string }) {
   const p = pct(done, total)
   return (
     <>
       <LoaderCircle size={14} className="spin" />
       <span>
-        {label} · <span className="scan-pct">{p}%</span>
-        <span className="scan-count">
-          {formatCount(Math.min(done, total))} of {formatCount(total)} {noun}
+        {label} · {p}%
+      </span>
+      <span className="scan-tip" role="tooltip">
+        <strong>{label}</strong>
+        <span>
+          {formatCount(Math.min(done, total))} of {formatCount(total)} {noun} · {p}%
         </span>
       </span>
       <span className="scan-progress" style={{ width: `${p}%` }} />
@@ -51,6 +58,7 @@ export function Sidebar(props: Props) {
   const { view, onNavigate, counts, status, thumbProgress, peopleProgress, smartProgress, dupesProgress } = props
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const { pending, total } = thumbProgress
+  const away = status.unreachable ?? [] // library folders not connected (their items are kept)
   const active = (kind: View['kind']) =>
     view.kind === kind ||
     (kind === 'folders' && view.kind === 'folder') ||
@@ -76,8 +84,6 @@ export function Sidebar(props: Props) {
         <div className="nav-section">
           {item('photos', 'Photos', <Images size={18} />, counts.photos)}
           {item('videos', 'Videos', <Film size={18} />, counts.videos)}
-          {item('live', 'Live', <Target size={18} />, counts.live)}
-          {item('all', 'All', <LayoutGrid size={18} />, counts.all)}
           {item('favorites', 'Favorites', <Heart size={18} />, counts.favorites)}
           {item('memories', 'Memories', <Sparkles size={18} />, counts.trips)}
           {item('people', 'People', <Users size={18} />, counts.people)}
@@ -170,8 +176,19 @@ export function Sidebar(props: Props) {
           <Running label="Comparing videos" done={props.videosProgress.done} total={props.videosProgress.total} noun="videos" />
         ) : (
           <>
-            <span className="scan-dot" />
-            <span>Library up to date</span>
+            <span className={`scan-dot${away.length ? ' away' : ''}`} />
+            <span>{away.length ? `Up to date · ${away.length === 1 ? 'a folder' : `${away.length} folders`} not connected` : 'Library up to date'}</span>
+            {away.length > 0 && (
+              <span className="scan-tip" role="tooltip">
+                <strong>Not connected</strong>
+                {away.map((f) => (
+                  <span key={f} className="scan-tip-path">
+                    {f}
+                  </span>
+                ))}
+                <span>Pics keeps what it found in {away.length === 1 ? 'it' : 'them'} (previews, people, text, duplicates) and carries on when the drive is back, even under another letter.</span>
+              </span>
+            )}
             <button className="icon-btn tiny" title="Rescan library (F5)" onClick={() => api.rescan()}>
               <RefreshCw size={13} />
             </button>

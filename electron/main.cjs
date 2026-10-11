@@ -29,7 +29,8 @@ const trace = process.env.LUMEN_TRACE
 trace(`start v${app.getVersion()}`)
 
 const { Store } = require('./store.cjs')
-const { Library, idOf, keyOf, extOf, FILE_TYPES, skippedExtensions } = require('./library.cjs')
+const { Library, idOf, keyOf, extOf, FILE_TYPES, skippedExtensions, sameTime } = require('./library.cjs')
+const drives = require('./drives.cjs')
 const { Thumbnails } = require('./thumbs.cjs')
 const { FaceIndex } = require('./faces.cjs')
 const { Albums } = require('./albums.cjs')
@@ -203,6 +204,8 @@ const store = new Store(path.join(userData, 'settings.json'), {
   skippedTypes: [],
   minFileKB: 0,
   window: { width: 1360, height: 860 },
+  /** folderKey(library folder) -> { serial, rel }: its drive, found again under another letter (drives.cjs). */
+  folderDrives: {},
 })
 
 // On laptops with two GPUs (e.g. Intel + NVIDIA), Windows runs Chromium on the integrated one.
@@ -263,6 +266,8 @@ let dataLoaded = false
  * read every folder since. Until then, a folder that couldn't be read has no items at all.
  */
 let libraryComplete = false
+/** folderKey()s of the library folders not connected at the last look (their photos are left alone). */
+let offlineBefore = new Set()
 
 const MODELS_DIR = app.isPackaged ? path.join(process.resourcesPath, 'models') : path.join(__dirname, '..', 'models')
 
@@ -315,6 +320,10 @@ function startServices() {
     gentle: () => !!win && !win.isDestroyed() && win.isVisible() && win.isFocused() && !win.isMinimized(),
   })
   dupes = new Duplicates(path.join(userData, 'duplicates.json'), { canRun: idle, thumb: (item) => thumbs.ensure(item), videoFrames })
+  // Photos on a drive that isn't connected are left alone (not tried, so not marked unreadable) and
+  // everything known about them is kept: when the drive is back, the work carries on from there.
+  const offline = (item) => library.isUnreachable(item.path)
+  for (const engine of [thumbs, faces, smart, ocr, videoFrames, dupes]) engine.offline = offline
   videoFrames.on('progress', (progress) => send('dupes:videos', progress))
   configureDupes()
   history = new History(path.join(userData, 'history.json'))
@@ -394,6 +403,15 @@ function startServices() {
     if (back) updateWatching()
   })
   library.on('scanned', async () => {
+    // A library folder's drive unplugged, or back: the analyses take that in (photos that failed
+    // while it went away get another go), and the drives that are there are remembered.
+    const offlineNow = new Set(library.unreachable.map(folderKey))
+    const back = [...offlineBefore].filter((k) => !offlineNow.has(k))
+    const away = [...offlineNow].some((k) => !offlineBefore.has(k))
+    offlineBefore = offlineNow
+    if (back.length) forgetFailures(library.list.filter((it) => back.some((k) => isWithin(it.path, k))).map((it) => it.id))
+    if (back.length || away) indexesStale = true
+    rememberDrives().catch((err) => console.error('[drives] could not note the drives', err))
     // A library folder this scan couldn't read (drive not connected, share not there yet) kept its
     // items as they were. With no saved library to go by (library.json missing, damaged or
     // unreadable at start), nothing is known about its photos yet: dropping what isn't in the
@@ -680,12 +698,106 @@ function configureDupes() {
 // moved files' faces, fingerprints and previews before relocate() can carry them over.
 let scanHolds = 0
 let scanWanted = false
+let followingDrives = null
 function scan() {
-  if (scanHolds) {
+  if (scanHolds || followingDrives) {
     scanWanted = true
     return
   }
-  library.scan(store.get('folders'), excludedFolders(), scanOptions())
+  // (a library folder whose drive came back under another letter moves there first)
+  followingDrives = followMovedDrives()
+    .catch((err) => console.error('[drives] could not follow a drive to its new letter', err))
+    .finally(() => {
+      followingDrives = null
+      if (scanHolds) {
+        scanWanted = true
+        return
+      }
+      scanWanted = false
+      library.scan(store.get('folders'), excludedFolders(), scanOptions())
+    })
+}
+
+/** Photos of a drive that's back: their failures (while it was away) are forgotten, so they're tried again. */
+function forgetFailures(ids) {
+  if (!ids.length) return
+  const want = new Set(ids)
+  for (const engine of [faces, smart, ocr]) {
+    for (const id of want) {
+      engine.failed?.delete(id)
+      engine.attempts?.delete(id)
+    }
+  }
+  for (const id of want) videoFrames.unanswered?.delete(id)
+  for (const name of [...thumbs.failed.keys()]) if (want.has(name.slice(0, 16))) thumbs.failed.delete(name)
+}
+
+/** Notes the drive (volume serial and place on it) of every library folder that's there now. */
+async function rememberDrives() {
+  const folders = store.get('folders')
+  const before = store.get('folderDrives') ?? {}
+  const next = {}
+  for (const f of folders) {
+    const k = folderKey(f)
+    const id = await drives.identify(f).catch(() => null)
+    if (id) next[k] = id
+    else if (before[k]) next[k] = before[k] // not there now: what it was is kept
+  }
+  if (JSON.stringify(next) !== JSON.stringify(before)) store.set({ folderDrives: next })
+}
+
+/**
+ * Library folders on a drive that came back under another letter (E: one day, F: the next): the
+ * folder moves to the new letter, and with it everything Pics knows about its photos (previews,
+ * faces, text, search, duplicates, albums, tags, favorites, History), instead of finding them as
+ * new photos and analysing them all over again.
+ */
+async function followMovedDrives() {
+  if (!dataLoaded || quitting) return
+  const known = store.get('folderDrives') ?? {}
+  for (const folder of store.get('folders')) {
+    if (!drives.isLocal(folder)) continue
+    if ((await fs.promises.stat(folder).catch(() => null))?.isDirectory()) continue
+    const inside = library.list.filter((it) => isWithin(it.path, folder))
+    const drive = known[folderKey(folder)]
+    if (!drive && !inside.length) continue
+    const step = Math.max(1, Math.floor(inside.length / 12))
+    const sample = inside.filter((_, i) => i % step === 0).slice(0, 12)
+    const to = await drives.findMoved(folder, drive, sample, sameTime)
+    if (to && !quitting) await moveLibraryFolder(folder, to, inside)
+  }
+}
+
+async function moveLibraryFolder(from, to, inside) {
+  console.log(`[drives] ${from} is at ${to} now`)
+  const moveIn = (p) => (typeof p === 'string' && isWithin(p, from) ? path.join(to, path.relative(from, p)) : p)
+  await withScansHeld(async () => {
+    const folders = []
+    for (const f of store.get('folders').map(moveIn)) if (!folders.some((g) => folderKey(g) === folderKey(f))) folders.push(f)
+    const known = { ...(store.get('folderDrives') ?? {}) }
+    const drive = known[folderKey(from)]
+    delete known[folderKey(from)]
+    if (drive) known[folderKey(to)] = drive
+    store.set({
+      folders,
+      folderDrives: known,
+      skippedFolders: store.get('skippedFolders').map(moveIn),
+      protectedFolders: store.get('protectedFolders').map(moveIn),
+      moveDestination: moveIn(store.get('moveDestination')),
+      importDestination: moveIn(store.get('importDestination')),
+      organizeRoot: moveIn(store.get('organizeRoot')),
+    })
+    const pairs = inside.map((it) => ({ from: it.path, to: moveIn(it.path) }))
+    // Already found there as new photos (the folder was added again at the new letter): what they
+    // got so far gives way to what was known, so no face is counted twice.
+    for (const p of pairs) if (library.items.has(keyOf(p.to))) faces.dropItem(idOf(p.to))
+    if (pairs.length) await relocate(pairs)
+  })
+  configureDupes()
+  send('settings:changed', settingsPayload())
+  watchFolders()
+  updateWatching()
+  send('app:notice', `${to} was ${from} before (its drive got another letter). Pics kept everything it knew about its photos.`)
 }
 
 function scanOptions() {
@@ -2396,6 +2508,9 @@ app.whenReady().then(async () => {
   markServicesReady()
   tags.resume() // writes left over from last time
   trace(`data loaded: ${library.list.length} items (library ${library.loadState})`)
+  // (folders on a drive that isn't connected: their photos are left alone from the start)
+  await library.checkRoots(store.get('folders'))
+  offlineBefore = new Set(library.unreachable.map(folderKey))
   thumbs.prefetch(visibleLibrary())
   libraryComplete = library.loadState === 'ok'
   if (libraryComplete) {

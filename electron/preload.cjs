@@ -97,6 +97,7 @@ contextBridge.exposeInMainWorld('lumen', {
   historySince: (since) => ipcRenderer.invoke('history:since', since),
   clearHistory: () => ipcRenderer.invoke('history:clear'),
   onHistory: (cb) => on('history:changed', cb),
+  onNotice: (cb) => on('app:notice', cb),
   openRecycleBin: () => ipcRenderer.invoke('shell:recycle-bin'),
   saveReport: (html, csv) => ipcRenderer.invoke('report:save', html, csv),
   rotateLossless: (ids, turns) => ipcRenderer.invoke('edit:rotate', ids, turns),

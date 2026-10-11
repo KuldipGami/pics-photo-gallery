@@ -155,6 +155,8 @@ export interface LumenApi {
   historySince(since: number): Promise<string[]>
   clearHistory(): Promise<void>
   onHistory(cb: (entries: HistoryEntry[]) => void): Unsubscribe
+  /** Something Pics did on its own that the user should know (a drive found under a new letter…). */
+  onNotice(cb: (text: string) => void): Unsubscribe
   openRecycleBin(): Promise<void>
   /** Save dialog; writes the HTML or the CSV depending on the chosen type. */
   saveReport(html: string, csv: string): Promise<string | null>

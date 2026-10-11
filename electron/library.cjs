@@ -69,6 +69,22 @@ const isMedia = (p) => {
 }
 const validDate = (ms) => Number.isFinite(ms) && ms > MIN_VALID_DATE && ms < Date.now() + 86_400_000
 
+const QUARTER_HOUR = 900_000
+/**
+ * Is `now` (ms) still the file time `before`? FAT drives (memory cards, many USB sticks) keep local
+ * time with no time zone, so after a daylight-saving change, or on a PC in another time zone, every
+ * file there seems to have changed by whole hours (quarter hours in India or Nepal). With the same
+ * size it's the same file: reading it again would redo its previews, faces and text for nothing.
+ * (FAT keeps times to 2 s, hence the slack.)
+ */
+function sameTime(before, now) {
+  if (before === now) return true
+  const d = Math.abs(now - before)
+  if (d < QUARTER_HOUR - 2000 || d > 14 * 3_600_000 + 2000) return false
+  const off = d % QUARTER_HOUR
+  return off <= 2000 || QUARTER_HOUR - off <= 2000
+}
+
 /**
  * Does a watcher event's name end in a real file extension ("notes.txt", "IMG_1.jpg.lumen.old")?
  * Folder names often have dots too ("2019.05.12 Goa", "Trip.2019"): an "extension" with spaces,
@@ -450,6 +466,25 @@ class Library extends EventEmitter {
     return this.byId.get(id)
   }
 
+  /**
+   * Before the first scan: library folders that aren't there now (a drive not connected), so the
+   * analyses leave their photos alone rather than failing on each one. A folder slow to answer (a
+   * network share waking up) counts as there: the scan finds out.
+   */
+  async checkRoots(folders) {
+    if (this.scanning) return
+    const missing = []
+    await Promise.all(
+      folders.map(async (root) => {
+        const st = await Promise.race([fsp.stat(root).catch(() => null), new Promise((r) => setTimeout(() => r('slow'), 1500))])
+        if (st !== 'slow' && !st?.isDirectory()) missing.push(root)
+      }),
+    )
+    if (this.scanning) return // (the scan's own answer comes soon)
+    this.unreachable = missing
+    if (missing.length) this.emit('status', this.status())
+  }
+
   /** `unreachable`: library folders the last scan couldn't read (their items were kept as they were). */
   status() {
     return { scanning: this.scanning, found: this.found, unreachable: [...this.unreachable] }
@@ -560,7 +595,8 @@ class Library extends EventEmitter {
         if (st.size < skip.minBytes) return // "Skip tiny files" (stickers, icons, thumbnails)
         const prev = this.items.get(key)
         // (items cached by Pics < 1.8 lack `taken`: read their metadata again once)
-        if (prev && prev.size === st.size && prev.mtime === Math.round(st.mtimeMs) && prev.taken !== undefined && prev.rating !== undefined) {
+        // (the earlier entry, with its time, so previews, faces and text stay theirs: see sameTime)
+        if (prev && prev.size === st.size && sameTime(prev.mtime, Math.round(st.mtimeMs)) && prev.taken !== undefined && prev.rating !== undefined) {
           if (needsLocalTime(prev)) {
             changed = true
             next.set(key, await withLocalTime(prev))
@@ -636,7 +672,7 @@ class Library extends EventEmitter {
     try {
       const st = await fsp.stat(full)
       if (!prev) return st.isFile() && st.size >= this.skip.minBytes
-      return st.size !== prev.size || Math.round(st.mtimeMs) !== prev.mtime
+      return st.size !== prev.size || !sameTime(prev.mtime, Math.round(st.mtimeMs))
     } catch {
       return !!prev // gone
     }
@@ -795,4 +831,4 @@ const MIME = {
   '3gp': 'video/3gpp', avi: 'video/x-msvideo', wmv: 'video/x-ms-wmv', mpg: 'video/mpeg', mpeg: 'video/mpeg',
 }
 
-module.exports = { Library, idOf, keyOf, extOf, isMedia, MIME, IMAGE_EXT, VIDEO_EXT, FILE_TYPES, skippedExtensions }
+module.exports = { Library, idOf, keyOf, extOf, isMedia, MIME, IMAGE_EXT, VIDEO_EXT, FILE_TYPES, skippedExtensions, sameTime, normFolder, isUnder }

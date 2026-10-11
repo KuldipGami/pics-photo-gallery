@@ -208,6 +208,8 @@ class Duplicates extends EventEmitter {
     this.file = file
     this.canRun = canRun
     this.thumb = thumb // item -> Promise<Buffer | null> (cached thumbnail)
+    /** item -> its drive isn't connected: left alone (what's known about it is kept), done when it's back. */
+    this.offline = () => false
     this.videoFrames = videoFrames
     this.memo = new Map() // video alignments for describe(), keyed by both files' versions
     videoFrames?.on('changed', () => this.regroupSoon())
@@ -410,7 +412,7 @@ class Duplicates extends EventEmitter {
         list.push(it)
       }
       const toHash = []
-      for (const list of bySize.values()) if (list.length > 1) for (const it of list) if (!this.rec(it).x) toHash.push(it)
+      for (const list of bySize.values()) if (list.length > 1) for (const it of list) if (!this.rec(it).x && !this.offline(it)) toHash.push(it)
       let done = 0
       this.setProgress('hashing', 0, toHash.length)
       await pool(toHash, 2, async (it) => {
@@ -423,7 +425,9 @@ class Duplicates extends EventEmitter {
       })
 
       // 2. fingerprint, sharpness and brightness of every preview
-      const toLook = items.filter((it) => this.rec(it).s === undefined)
+      const toLook = items.filter((it) => this.rec(it).s === undefined && !this.offline(it))
+      // (a file gone meanwhile, its drive unplugged, isn't marked "nothing to compare" for good)
+      const gone = (it) => this.offline(it) || !fs.existsSync(it.path)
       done = 0
       this.setProgress('comparing', 0, toLook.length)
       await pool(toLook, CONCURRENCY, async (it) => {
@@ -431,14 +435,15 @@ class Duplicates extends EventEmitter {
         const r = this.rec(it)
         try {
           const thumb = await this.thumb(it)
-          if (!thumb) r.s = null
-          else {
+          if (!thumb) {
+            if (!gone(it)) r.s = null
+          } else {
             const v = await visual(thumb)
             Object.assign(r, { s: sig.toBase64(v.words), c: v.crops ? 1 : 0, lo: v.lowDetail ? 1 : 0, a: +v.aspect.toFixed(4) })
             if (it.type === 'image') Object.assign(r, { sh: v.sharpness, br: v.brightness })
           }
         } catch {
-          r.s = null // no preview: nothing to compare (until the file changes)
+          if (!gone(it)) r.s = null // no preview: nothing to compare (until the file changes)
         }
         this.setProgress('comparing', ++done, toLook.length)
         this.saveSoon()

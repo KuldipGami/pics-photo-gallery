@@ -201,6 +201,8 @@ class SmartIndex extends EventEmitter {
     this.file = file
     this.canRun = canRun
     this.thumb = thumb // item -> Promise<Buffer | null>
+    /** item -> its drive isn't connected: left alone (what's known about it is kept), done when it's back. */
+    this.offline = () => false
     this.vectors = new Map() // id -> { m: mtime, q: Int8Array(768), s: scale }
     this.media = new Map() // id -> library item
     this.enabled = true
@@ -347,7 +349,7 @@ class SmartIndex extends EventEmitter {
     }
     if (dropped) this.saveSoon()
     this.queue = [...this.media.values()]
-      .filter((it) => !this.vectors.has(it.id) && !this.inflight.has(it.id) && !this.failed.has(it.id))
+      .filter((it) => !this.vectors.has(it.id) && !this.inflight.has(it.id) && !this.failed.has(it.id) && !this.offline(it))
       .sort((a, b) => b.date - a.date)
       .map((it) => it.id)
     this.progress = { done: 0, total: this.queue.length }

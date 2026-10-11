@@ -232,6 +232,8 @@ class FaceIndex extends EventEmitter {
     this.file = file
     this.canRun = canRun
     this.render = render // item -> Promise<JPEG Buffer> (1024px)
+    /** item -> its drive isn't connected: left alone (what's known about it is kept), done when it's back. */
+    this.offline = () => false
     this.items = new Map() // itemId -> { m: mtime, ar: aspect ratio, faces: [faceId] }
     this.faces = new Map() // faceId -> { id, item, box, score, px, d: Float32Array(512), person, rej: [], manual?, ignored? }
     this.people = new Map() // personId -> { id, name, hidden, created, cover?, notSame? }
@@ -444,7 +446,7 @@ class FaceIndex extends EventEmitter {
       this.changed()
     }
     this.queue = [...this.photos.values()]
-      .filter((it) => !this.items.has(it.id) && !this.inflight.has(it.id) && !this.failed.has(it.id))
+      .filter((it) => !this.items.has(it.id) && !this.inflight.has(it.id) && !this.failed.has(it.id) && !this.offline(it))
       .sort((a, b) => b.date - a.date)
       .map((it) => it.id)
     this.progress = { done: 0, total: this.queue.length }

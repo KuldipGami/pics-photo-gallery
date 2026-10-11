@@ -105,14 +105,18 @@ interface PickerOptions {
 const ZOOM_STEPS = [80, 100, 124, 150, 180, 220, 270, 330]
 const BIN = api.env.platform === 'win32' ? 'Recycle Bin' : 'Trash'
 /** Views that are one kind of item already (or a person's photos): no All / Photos / Videos filter there. */
-const OWN_TYPE_VIEWS = new Set<View['kind']>(['photos', 'videos', 'live', 'all', 'person'])
-const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'live', 'all', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip', 'similar', 'map-items', 'private']
+type PhotosMode = 'photos' | 'live' | 'all'
+const PHOTOS_MODES: [PhotosMode, string, string][] = [
+  ['photos', 'Photos', 'Photos only'],
+  ['live', 'Live', 'Live Photos only (a photo with its short clip)'],
+  ['all', 'All', 'Photos, videos and Live Photos'],
+]
+const OWN_TYPE_VIEWS = new Set<View['kind']>(['photos', 'videos', 'person'])
+const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip', 'similar', 'map-items', 'private']
 
 const TITLES: Record<View['kind'], string> = {
   photos: 'Photos',
   videos: 'Videos',
-  live: 'Live',
-  all: 'All',
   favorites: 'Favorites',
   recent: 'Recently added',
   folders: 'Folders',
@@ -161,6 +165,21 @@ export default function App() {
   const [view, setView] = useState<View>({ kind: 'photos' })
   const [query, setQuery] = useState('')
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
+  // the Photos tab's switch: photos only, Live Photos only, or photos, videos and Live Photos (remembered)
+  const [photosMode, setPhotosModeState] = useState<PhotosMode>(() => {
+    try {
+      const v = localStorage.getItem('lumen.photosMode')
+      return v === 'live' || v === 'all' ? v : 'photos'
+    } catch {
+      return 'photos'
+    }
+  })
+  const setPhotosMode = (m: PhotosMode) => {
+    setPhotosModeState(m)
+    try {
+      localStorage.setItem('lumen.photosMode', m)
+    } catch {}
+  }
   const [sortAsc, setSortAsc] = useState(false)
   const [selection, setSelection] = useState<Set<string>>(() => new Set())
   const [viewer, setViewer] = useState<{ ids: string[]; index: number } | null>(null)
@@ -398,9 +417,10 @@ export default function App() {
   /** The current view's items before searching. */
   const baseList = useMemo(() => {
     let list = view.kind === 'private' ? shownPrivate : shownItems
-    if (view.kind === 'photos') list = list.filter((it) => it.type === 'image')
-    else if (view.kind === 'videos') list = list.filter((it) => it.type === 'video')
-    else if (view.kind === 'live') list = list.filter((it) => libraryLive.has(it.id))
+    if (view.kind === 'photos') {
+      if (photosMode === 'live') list = list.filter((it) => libraryLive.has(it.id))
+      else if (photosMode === 'photos') list = list.filter((it) => it.type === 'image')
+    } else if (view.kind === 'videos') list = list.filter((it) => it.type === 'video')
     else if (view.kind === 'favorites') list = list.filter((it) => favorites.has(it.id))
     else if (view.kind === 'folder') list = list.filter((it) => it.dir === view.dir)
     else if (view.kind === 'person') {
@@ -422,7 +442,7 @@ export default function App() {
     return list
     // `favDep`/`personDep`/`placeDep` instead of the full objects: toggling a heart or renaming
     // someone shouldn't refilter views that don't depend on them.
-  }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip, similar, byId, shownPrivate, libraryLive])
+  }, [shownItems, view, typeFilter, photosMode, favDep, personDep, placeDep, currentAlbum, currentTrip, similar, byId, shownPrivate, libraryLive])
 
   // ---------- search ----------
   // Every word is matched against what Pics knows about an item (name, folder, date, camera,
@@ -546,16 +566,15 @@ export default function App() {
     const visiblePeople = people.people.filter((p) => !p.hidden).length
     return {
       all: shownItems.length,
-      photos: shownItems.length - videos,
+      photos: photosMode === 'live' ? live : photosMode === 'all' ? shownItems.length : shownItems.length - videos,
       videos,
-      live,
       favorites: favs,
       folders: folders.length,
       people: visiblePeople,
       places: places.places.length,
       trips: trips.length,
     }
-  }, [shownItems, favorites, folders, people.people, places.places, trips, libraryLive])
+  }, [shownItems, favorites, folders, people.people, places.places, trips, libraryLive, photosMode])
 
   const shownPlaces = useMemo(() => {
     const q = fold(query.trim())
@@ -1077,7 +1096,7 @@ export default function App() {
   }, [viewer, viewerItems.length])
 
   const viewKey = view.kind === 'folder' ? view.dir : 'id' in view ? view.id : ''
-  const resetKey = `${view.kind}|${viewKey}|${typeFilter}|${query}|${sortAsc}|${ratingFilter.minRating}|${ratingFilter.tags.join(',')}`
+  const resetKey = `${view.kind}|${viewKey}|${typeFilter}|${view.kind === 'photos' ? photosMode : ''}|${query}|${sortAsc}|${ratingFilter.minRating}|${ratingFilter.tags.join(',')}`
 
   // A person can disappear (merged away, or their last photo removed): fall back to People.
   // Same for a deleted album, or a place whose last photo is gone.
@@ -1509,6 +1528,7 @@ export default function App() {
     return r ?? 0
   }, [selection, byId, tagsData])
   useEffect(() => api.onTagsError((text) => toast(text, { error: true })), [])
+  useEffect(() => api.onNotice((text) => toast(text)), [])
   useEffect(() => api.onMovieProgress(setMovieProgress), [])
   const findSimilar = async (id: string) => {
     const res = await api.findSimilar(id)
@@ -2017,6 +2037,15 @@ export default function App() {
           />
         )}
         {isGrid && <RatingFilter value={ratingFilter} onChange={setRatingFilter} tags={viewTags} />}
+        {view.kind === 'photos' && (
+          <div className="segmented small" role="group" aria-label="Show">
+            {PHOTOS_MODES.map(([m, label, title]) => (
+              <button key={m} className={photosMode === m ? 'active' : ''} onClick={() => setPhotosMode(m)} title={title} aria-pressed={photosMode === m}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
         {isGrid && !OWN_TYPE_VIEWS.has(view.kind) && (
           <div className="segmented small">
             {(['all', 'image', 'video'] as TypeFilter[]).map((t) => (
@@ -2394,7 +2423,7 @@ export default function App() {
       />
     ) : view.kind === 'videos' || (typeFilter === 'video' && !OWN_TYPE_VIEWS.has(view.kind)) ? (
       <EmptyState icon={<Film size={40} strokeWidth={1.5} />} title="No videos" text="Videos in your library folders will show up here." />
-    ) : view.kind === 'live' ? (
+    ) : view.kind === 'photos' && photosMode === 'live' ? (
       <EmptyState
         icon={<Target size={40} strokeWidth={1.5} />}
         title="No Live Photos"
@@ -2515,7 +2544,7 @@ export default function App() {
             undo={lastStep?.area === 'people' ? { label: lastStep.label, run: () => void runUndo(lastStep) } : undefined}
           />
         )}
-        {(view.kind === 'photos' || view.kind === 'all') && !query && selection.size === 0 && memories.length > 0 && hiddenMemoriesDay !== today && items.length > 0 && (
+        {view.kind === 'photos' && !query && selection.size === 0 && memories.length > 0 && hiddenMemoriesDay !== today && items.length > 0 && (
           <MemoryStrip
             memories={memories}
             byId={byId}

@@ -472,15 +472,38 @@ html[data-platform='darwin'] .titlebar {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* hovering a task's line shows how many are done instead of the percentage */
-.scan-count {
+/* hovering the line shows the whole of it in a card above (how many are done, what's not connected) */
+.scan-tip {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: calc(100% + 6px);
+  z-index: 20;
   display: none;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: normal;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
-.scan-status:hover .scan-pct {
-  display: none;
+.scan-tip strong {
+  color: var(--text);
+  font-weight: 600;
 }
-.scan-status:hover .scan-count {
-  display: inline;
+.scan-tip-path {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.scan-status:hover .scan-tip {
+  display: flex;
 }
 .scan-progress {
   position: absolute;
@@ -492,11 +515,16 @@ html[data-platform='darwin'] .titlebar {
   transition: width 0.3s ease;
 }
 .scan-dot {
+  flex-shrink: 0;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: #34c759;
   box-shadow: 0 0 0 3px color-mix(in srgb, #34c759 22%, transparent);
+}
+.scan-dot.away {
+  background: #f5a623;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #f5a623 22%, transparent);
 }
 
 .content {

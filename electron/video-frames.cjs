@@ -380,6 +380,8 @@ class VideoFrames extends EventEmitter {
     this.canRun = canRun
     this.analyze = analyze
     this.gentle = gentle
+    /** item -> its drive isn't connected: left alone (what's known about it is kept), done when it's back. */
+    this.offline = () => false
     this.records = new Map() // id -> { m, z, d, w, h, s, x, f }
     this.videos = [] // library videos
     this.byId = new Map()
@@ -503,7 +505,7 @@ class VideoFrames extends EventEmitter {
    * files before big ones, so most results arrive early.
    */
   queue() {
-    const todo = this.videos.filter((it) => !this.get(it))
+    const todo = this.videos.filter((it) => !this.get(it) && !this.offline(it))
     const known = this.videos.filter((it) => it.duration > 0).sort((a, b) => a.duration - b.duration)
     const paired = new Set()
     for (let i = 0; i + 1 < known.length; i++) {
@@ -572,6 +574,8 @@ class VideoFrames extends EventEmitter {
             }
           }
           silent = 0
+          // a video gone meanwhile (its drive unplugged) isn't marked unreadable for good
+          if (!(res && res.duration > 0) && (this.offline(item) || !fs.existsSync(item.path))) continue
           const r = { m: item.mtime, z: item.size, d: 0, w: 0, h: 0, s: null, x: null, f: 1 }
           if (res && res.duration > 0) {
             Object.assign(r, { d: res.duration, w: res.width || 0, h: res.height || 0, s: toWords(res.summary), x: toWords(res.dense) })

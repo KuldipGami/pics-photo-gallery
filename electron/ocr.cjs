@@ -254,6 +254,8 @@ class OcrIndex extends EventEmitter {
     this.script = path.join(path.dirname(file), 'ocr-engine.ps1')
     this.canRun = canRun ?? (() => true)
     this.image = image
+    /** item -> its drive isn't connected: left alone (what's known about it is kept), done when it's back. */
+    this.offline = () => false
     this.render = render
     this.records = new Map() // id -> { m: mtime, s: size, t: text ('' = no text) }
     this.media = new Map() // id -> library item
@@ -382,7 +384,7 @@ class OcrIndex extends EventEmitter {
       this.changedSoon()
     }
     this.queue = [...this.media.values()]
-      .filter((it) => it.type === 'image' && !this.records.has(it.id) && !this.inflight.has(it.id) && !this.failed.has(it.id))
+      .filter((it) => it.type === 'image' && !this.records.has(it.id) && !this.inflight.has(it.id) && !this.failed.has(it.id) && !this.offline(it))
       .map((it) => [it, priority(it)])
       .sort((a, b) => b[1] - a[1] || b[0].date - a[0].date)
       .map(([it]) => it.id)

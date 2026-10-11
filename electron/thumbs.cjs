@@ -170,6 +170,8 @@ class Thumbnails extends EventEmitter {
     this.cached = new Set(migrateLegacyCache(dir).filter((name) => !name.endsWith('.tmp')))
     this.jobs = new Map()
     this.failed = new Map() // name -> time of failure
+    /** item -> its drive isn't connected: left alone (what's known about it is kept), done when it's back. */
+    this.offline = () => false
     this.cpu = new Lane(CPU_JOBS, Math.max(1, CPU_JOBS - 2))
     // Few background decodes: a saturated GPU process stalls Chromium's UI thread natively.
     this.gpu = new Lane(8, 2)
@@ -381,7 +383,7 @@ class Thumbnails extends EventEmitter {
     const todo = items
       .filter((it) => {
         const name = this.name(it, 'thumb')
-        return !this.cached.has(name) && !this.jobs.has(name) && !this.isFailed(name)
+        return !this.cached.has(name) && !this.jobs.has(name) && !this.isFailed(name) && !this.offline(it)
       })
       .sort((a, b) => b.date - a.date)
     for (const it of todo) this.schedule(it, 'thumb', 'low')
