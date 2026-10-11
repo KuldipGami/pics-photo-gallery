@@ -80,13 +80,13 @@ export function importUndoneText(res: { restored: number; kept?: number }) {
 }
 
 const canRestore = (e: HistoryEntry) =>
-  ['moved', 'renamed', 'dates', 'edited', 'converted', 'imported'].includes(e.kind) &&
+  ['moved', 'recycled', 'renamed', 'dates', 'edited', 'converted', 'imported'].includes(e.kind) &&
   (e.files.some((f) => !f.restored) || (e.dateChanges ?? []).some((d) => !d.restored))
 
 function detail(e: HistoryEntry) {
   switch (e.kind) {
     case 'recycled':
-      return 'Restore them from the Recycle Bin if you need them back'
+      return 'Restore puts them back where they were, while they are still in the Recycle Bin'
     case 'renamed':
       return 'Renamed in place'
     case 'dates':

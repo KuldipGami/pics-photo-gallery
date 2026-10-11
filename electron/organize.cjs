@@ -25,17 +25,17 @@ const DEFAULTS = {
 
 /** Folder patterns (.NET custom date formats; `\\` = a nested folder) and how they look. */
 const FOLDER_PATTERNS = [
-  { value: 'yyyy\\\\MM - MMMM', label: '2022\\12 - December' },
-  { value: 'yyyy\\\\MM', label: '2022\\12' },
-  { value: 'yyyy\\\\yyyy-MM-dd', label: '2022\\2022-12-16' },
-  { value: 'yyyy-MM', label: '2022-12' },
-  { value: 'yyyy', label: '2022' },
+  { value: 'yyyy\\\\MM - MMMM', label: 'yyyy\\mm - Month' },
+  { value: 'yyyy\\\\MM', label: 'yyyy\\mm' },
+  { value: 'yyyy\\\\yyyy-MM-dd', label: 'yyyy\\yyyy-mm-dd' },
+  { value: 'yyyy-MM', label: 'yyyy-mm' },
+  { value: 'yyyy', label: 'yyyy' },
 ]
 
 const NAME_PATTERNS = [
-  { value: 'yyyy-MM-dd HH.mm.ss', label: '2022-12-16 14.30.05' },
-  { value: 'yyyyMMdd_HHmmss', label: '20221216_143005' },
-  { value: 'yyyy-MM-dd {name}', label: '2022-12-16 IMG-20221216-WA0037' },
+  { value: 'yyyy-MM-dd HH.mm.ss', label: 'yyyy-mm-dd hh.mm.ss' },
+  { value: 'yyyyMMdd_HHmmss', label: 'yyyymmdd_hhmmss' },
+  { value: 'yyyy-MM-dd {name}', label: 'yyyy-mm-dd + the current name' },
 ]
 
 /** Where HEIC originals go after converting (left out of scans by main.cjs). */

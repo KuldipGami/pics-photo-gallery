@@ -240,6 +240,7 @@ class FaceIndex extends EventEmitter {
     // a photo that changed (not the model upgrade).
     this.legacy = new Map() // itemId -> [{ box, person?, rej?, manual?, ignored?, cover?, re? }]
     this.photos = new Map() // itemId -> library item (images only)
+    this.undoSteps = [] // what the last user actions changed (undo())
     this.restoring = new Map() // itemId -> choices put back by an undo, waiting for the photo to be listed again
     this.enabled = true
     this.halted = false
@@ -809,6 +810,63 @@ class FaceIndex extends EventEmitter {
     }
   }
 
+  // ---------- undo (Ctrl+Z) ----------
+
+  /** What a user action can change: the people, and each face's person, rejections and flags. */
+  captureUndo() {
+    return {
+      people: new Map([...this.people].map(([id, p]) => [id, structuredClone(p)])),
+      faces: new Map([...this.faces].map(([id, f]) => [id, [f.person, f.rej.slice(), !!f.manual, !!f.ignored]])),
+    }
+  }
+
+  /**
+   * Runs a user action (merge, "not this person", rename, hide…) and remembers what it changed, so
+   * undo() can put exactly that back. Returns what the action returns.
+   */
+  undoable(action) {
+    const before = this.captureUndo()
+    const result = action()
+    const people = []
+    for (const [id, p] of before.people) {
+      const now = this.people.get(id)
+      if (!now || JSON.stringify(now) !== JSON.stringify(p)) people.push([id, p])
+    }
+    for (const id of this.people.keys()) if (!before.people.has(id)) people.push([id, null]) // made by the action
+    const faces = []
+    for (const [id, f] of this.faces) {
+      const b = before.faces.get(id)
+      if (b && (b[0] !== f.person || b[2] !== !!f.manual || b[3] !== !!f.ignored || b[1].join() !== f.rej.join())) faces.push([id, b])
+    }
+    // (even when nothing changed: each user action is one step, so the app's Ctrl+Z list stays in step)
+    this.undoSteps.push({ people, faces })
+    if (this.undoSteps.length > 50) this.undoSteps.shift()
+    return result
+  }
+
+  /** Undoes the last user action on People. Resolves to false when there's nothing to undo. */
+  undo() {
+    const step = this.undoSteps.pop()
+    if (!step) return false
+    for (const [id, p] of step.people) {
+      if (p) this.people.set(id, p)
+      else this.people.delete(id)
+    }
+    for (const [id, [person, rej, manual, ignored]] of step.faces) {
+      const f = this.faces.get(id)
+      if (!f) continue
+      f.person = person
+      f.rej = rej
+      f.manual = manual || undefined
+      f.ignored = ignored || undefined
+    }
+    this.generation++
+    this.edits++
+    this.changed()
+    this.saveSoon(1500)
+    return true
+  }
+
   // ---------- user actions ----------
 
   edited() {
@@ -1022,6 +1080,7 @@ class FaceIndex extends EventEmitter {
 
   /** "Delete all face data": an empty faces.json (written after any save still on its way). */
   async reset() {
+    this.undoSteps = []
     this.items.clear()
     this.faces.clear()
     this.people.clear()

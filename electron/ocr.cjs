@@ -350,6 +350,21 @@ class OcrIndex extends EventEmitter {
     if (this.writing) this.flushed = true
   }
 
+  /** Settings → Data: the text read from every photo is forgotten and read again. */
+  async reset() {
+    this.records.clear()
+    this.failed.clear()
+    this.attempts.clear()
+    this.blocked = false
+    this.halted = false
+    this.error = null
+    this.startFailures = 0
+    this.dirty = true
+    await this.save()
+    this.emit('changed')
+    this.sync([...this.media.values()])
+  }
+
   // ---------- pipeline ----------
 
   sync(items) {

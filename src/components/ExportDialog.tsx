@@ -405,7 +405,7 @@ export function ExportDialog({ items, label = '', bridge, onClose, onDone }: Exp
               <div>
                 <select className="exp-select" value={o.naming} onChange={(e) => set({ naming: e.target.value as ExportOptions['naming'] })} aria-label="File names">
                   <option value="keep">Keep their names</option>
-                  <option value="date">Date taken (2024-06-01 14.30.05)</option>
+                  <option value="date">Date taken (yyyy-mm-dd hh.mm.ss)</option>
                   <option value="sequence">A name and a number</option>
                 </select>
                 {o.naming === 'sequence' && (

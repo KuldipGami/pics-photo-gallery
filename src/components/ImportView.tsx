@@ -20,7 +20,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { formatBytes, formatCount } from '../lib/format'
-import { FOLDER_PATTERNS } from './OrganizeView'
+import { DEFAULT_FOLDER_PATTERN, FOLDER_PATTERNS, optionLabel } from './OrganizeView'
 import './import.css'
 
 /**
@@ -497,7 +497,7 @@ function Results(props: ImportViewProps & { scan: ImportScan }) {
             <select className="imp-select" value={options.folderPattern} onChange={(e) => props.onOptions({ folderPattern: e.target.value })}>
               {FOLDER_PATTERNS.map((p) => (
                 <option key={p.value} value={p.value}>
-                  {p.label}
+                  {optionLabel(p, DEFAULT_FOLDER_PATTERN)}
                 </option>
               ))}
             </select>

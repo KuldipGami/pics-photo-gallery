@@ -18,21 +18,29 @@ export interface OrganizeOption {
   label: string
 }
 
-/** Same values as electron/organize.cjs FOLDER_PATTERNS (.NET date formats; `\\` = nested folder). */
+/**
+ * Same values as electron/organize.cjs FOLDER_PATTERNS (.NET date formats; `\\` = nested folder). Labels
+ * use yyyy / mm / dd rather than an example date; "Month" is the month's name.
+ */
 export const FOLDER_PATTERNS: OrganizeOption[] = [
-  { value: 'yyyy\\\\MM - MMMM', label: '2022\\12 - December' },
-  { value: 'yyyy\\\\MM', label: '2022\\12' },
-  { value: 'yyyy\\\\yyyy-MM-dd', label: '2022\\2022-12-16' },
-  { value: 'yyyy-MM', label: '2022-12' },
-  { value: 'yyyy', label: '2022' },
+  { value: 'yyyy\\\\MM - MMMM', label: 'yyyy\\mm - Month' },
+  { value: 'yyyy\\\\MM', label: 'yyyy\\mm' },
+  { value: 'yyyy\\\\yyyy-MM-dd', label: 'yyyy\\yyyy-mm-dd' },
+  { value: 'yyyy-MM', label: 'yyyy-mm' },
+  { value: 'yyyy', label: 'yyyy' },
 ]
+export const DEFAULT_FOLDER_PATTERN = 'yyyy\\\\MM - MMMM'
 
-/** Same values as electron/organize.cjs NAME_PATTERNS. */
+/** Same values as electron/organize.cjs NAME_PATTERNS (hh.mm.ss: hours, minutes, seconds). */
 export const NAME_PATTERNS: OrganizeOption[] = [
-  { value: 'yyyy-MM-dd HH.mm.ss', label: '2022-12-16 14.30.05' },
-  { value: 'yyyyMMdd_HHmmss', label: '20221216_143005' },
-  { value: 'yyyy-MM-dd {name}', label: '2022-12-16 IMG-20221216-WA0037' },
+  { value: 'yyyy-MM-dd HH.mm.ss', label: 'yyyy-mm-dd hh.mm.ss' },
+  { value: 'yyyyMMdd_HHmmss', label: 'yyyymmdd_hhmmss' },
+  { value: 'yyyy-MM-dd {name}', label: 'yyyy-mm-dd + the current name' },
 ]
+export const DEFAULT_NAME_PATTERN = 'yyyy-MM-dd HH.mm.ss'
+
+/** A pattern's label in a list, with "(Default)" after the default one. */
+export const optionLabel = (p: OrganizeOption, defaultValue: string) => (p.value === defaultValue ? `${p.label} (Default)` : p.label)
 
 /** What the Organize view shows; produced by organize.summarize() in the main process. */
 export interface OrganizePlan {
@@ -253,7 +261,7 @@ export function OrganizeView(props: OrganizeViewProps) {
     ? checking
     : fixes.count === 0
       ? "Every file's date already matches the date in its name."
-      : `${plural(fixes.count, 'file')} carry a date in their name (like WhatsApp's IMG-20221216-WA0037) but show a different date in Windows, usually the day they were received or copied.`
+      : `${plural(fixes.count, 'file')} carry a date in their name (like WhatsApp's IMG-yyyymmdd-WA0001) but show a different date in Windows, usually the day they were received or copied.`
 
   // ----- dated folders -----
   const folders = plan.folders
@@ -354,7 +362,7 @@ export function OrganizeView(props: OrganizeViewProps) {
             <select className="org-select" value={options.folderPattern} onChange={(e) => props.onOptions({ folderPattern: e.target.value })} disabled={busy}>
               {FOLDER_PATTERNS.map((p) => (
                 <option key={p.value} value={p.value}>
-                  {p.label}
+                  {optionLabel(p, DEFAULT_FOLDER_PATTERN)}
                 </option>
               ))}
             </select>
@@ -395,7 +403,7 @@ export function OrganizeView(props: OrganizeViewProps) {
             <select className="org-select wide" value={options.renamePattern} onChange={(e) => props.onOptions({ renamePattern: e.target.value })} disabled={busy}>
               {NAME_PATTERNS.map((p) => (
                 <option key={p.value} value={p.value}>
-                  {p.label}
+                  {optionLabel(p, DEFAULT_NAME_PATTERN)}
                 </option>
               ))}
             </select>

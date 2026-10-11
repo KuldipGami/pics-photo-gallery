@@ -19,6 +19,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { api, fullImageUrl, mediaUrl, thumbUrl } from '../api'
 import { RatingStars } from './RatingStars'
+import { VideoControls } from './VideoControls'
 import { VideoEditor, type VideoInfo } from './VideoEditor'
 import type { TagCount } from './TagEditor'
 import { useElementSize } from '../hooks'
@@ -111,7 +112,8 @@ export function Viewer({
   const [editing, setEditing] = useState(false)
   const [livePlaying, setLivePlaying] = useState(false)
   const live = item?.type === 'image' ? liveOf(item.id) : undefined
-  useEffect(() => setLivePlaying(false), [item?.id])
+  // A Live Photo plays its motion once when it's opened; after that the LIVE button plays it again.
+  useEffect(() => setLivePlaying(!!live), [item?.id, live?.id])
   const [showInfo, setShowInfo] = useState(() => readPref('lumen.info') === '1')
   const [idle, setIdle] = useState(false)
   const [slideshow, setSlideshow] = useState(false)
@@ -193,7 +195,8 @@ export function Viewer({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.closest?.('input, textarea')) return
-      const inVideo = document.activeElement instanceof HTMLVideoElement
+      // (the video's own controls have the keyboard: arrows seek instead of changing photo)
+      const inVideo = document.activeElement instanceof HTMLVideoElement || !!document.activeElement?.closest?.('.vc')
       const mod = e.ctrlKey || e.metaKey || e.altKey
       if (mod && /^[ifIF0+=-]$/.test(e.key)) return
       switch (e.key) {
@@ -203,9 +206,16 @@ export function Viewer({
           break
         case 'ArrowRight':
           if (!inVideo) next()
+          else if (videoRef.current) videoRef.current.currentTime += 5
           break
         case 'ArrowLeft':
           if (!inVideo) prev()
+          else if (videoRef.current) videoRef.current.currentTime -= 5
+          break
+        case 'm':
+        case 'M':
+          if (mod || item.type !== 'video' || !videoRef.current) return
+          videoRef.current.muted = !videoRef.current.muted
           break
         case 'Home':
           go(0)
@@ -344,6 +354,8 @@ export function Viewer({
                 videoRef={videoRef}
                 onDims={onDims}
                 onEnded={() => slideshow && !editing && !typing && next()}
+                onToast={onToast}
+                chromeProps={chromeProps}
               />
             )}
           </div>
@@ -545,13 +557,19 @@ function VideoPlayer({
   videoRef,
   onDims,
   onEnded,
+  onToast,
+  chromeProps,
 }: {
   item: MediaItem
   videoRef: RefObject<HTMLVideoElement | null>
   onDims(w: number, h: number): void
   onEnded(): void
+  onToast(text: string): void
+  chromeProps: object
 }) {
   const [error, setError] = useState(false)
+  const [video, setVideo] = useState<HTMLVideoElement | null>(null)
+  const frame = useRef<HTMLDivElement>(null)
   const [resumed, setResumed] = useState<number | null>(null)
   const lastSave = useRef(0)
   useEffect(() => {
@@ -572,11 +590,13 @@ function VideoPlayer({
     )
   }
 
+  const toggle = (v: HTMLVideoElement) => (v.paused || v.ended ? void v.play().catch(() => {}) : v.pause())
   return (
-    <>
+    <div className="pv" ref={frame}>
       <video
         ref={(el) => {
           videoRef.current = el
+          setVideo(el)
           if (el && !el.dataset.init) {
             el.dataset.init = '1'
             el.volume = Number(readPref('lumen.volume') ?? 1)
@@ -586,9 +606,13 @@ function VideoPlayer({
         className="viewer-video"
         src={mediaUrl(item)}
         poster={thumbUrl(item)}
-        controls
         autoPlay
         playsInline
+        onClick={(e) => toggle(e.currentTarget)}
+        onDoubleClick={() => {
+          if (document.fullscreenElement) void document.exitFullscreen().catch(() => {})
+          else void frame.current?.requestFullscreen().catch(() => {})
+        }}
         onLoadedMetadata={(e) => {
           const v = e.currentTarget
           onDims(v.videoWidth, v.videoHeight)
@@ -629,7 +653,17 @@ function VideoPlayer({
           </button>
         </div>
       )}
-    </>
+      <VideoControls
+        video={video}
+        frame={frame}
+        className="chrome"
+        onSaveCopy={async () => {
+          const to = await api.saveCopy(item.id)
+          if (to) onToast(`Saved a copy as “${to.split(/[\\/]/).pop()}”`)
+        }}
+        {...chromeProps}
+      />
+    </div>
   )
 }
 

@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronUp, Merge, UserX } from 'lucide-react'
+import { Check, ChevronDown, ChevronUp, Merge, Undo2, UserX } from 'lucide-react'
 import { useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { useElementSize } from '../hooks'
 import { formatCount } from '../lib/format'
@@ -96,6 +96,7 @@ export function PossibleMatches({
   byId,
   onMerge,
   onNotSame,
+  undo,
 }: {
   person: Person
   matches: PersonMatch[]
@@ -103,11 +104,14 @@ export function PossibleMatches({
   byId: Map<string, MediaItem>
   onMerge(ids: string[]): void
   onNotSame(ids: string[]): void
+  /** The latest change to People, to take back a wrong click (also Ctrl+Z). */
+  undo?: { label: string; run(): void }
 }) {
   const [open, setOpen] = useState(true)
   const [picked, setPicked] = useState<Set<string>>(() => new Set())
   const list = useMemo(() => matches.map((m) => peopleById.get(m.id)).filter((p): p is Person => !!p), [matches, peopleById])
-  if (!list.length) return null
+  // (still shown with no matches left while the last answer can be undone)
+  if (!list.length && !undo) return null
 
   const toggle = (id: string) =>
     setPicked((prev) => {
@@ -126,8 +130,13 @@ export function PossibleMatches({
           {open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           Possible matches <span className="matches-count">{formatCount(list.length)}</span>
         </button>
-        {open && <span className="matches-sub">Select the groups that are also {who}</span>}
+        {open && <span className="matches-sub">{list.length ? `Select the groups that are also ${who}` : 'No more possible matches'}</span>}
         <div className="spacer" />
+        {undo && (
+          <button className="btn ghost" onClick={undo.run} title={`Undo: ${undo.label} (Ctrl+Z)`}>
+            <Undo2 size={15} /> Undo
+          </button>
+        )}
         {open && ids.length > 0 && (
           <>
             <button className="btn ghost" onClick={() => (onNotSame(ids), setPicked(new Set()))}>
@@ -139,7 +148,7 @@ export function PossibleMatches({
           </>
         )}
       </div>
-      {open && (
+      {open && list.length > 0 && (
         <div className="matches-strip">
           {list.map((p) => (
             <button key={p.id} className={`match-card${picked.has(p.id) ? ' picked' : ''}`} onClick={() => toggle(p.id)}>

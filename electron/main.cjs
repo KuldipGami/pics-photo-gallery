@@ -43,6 +43,7 @@ const videoEdit = require('./video-edit.cjs')
 const { makeMovie } = require('./movie.cjs')
 const { History } = require('./history.cjs')
 const cleanup = require('./cleanup.cjs')
+const { restoreFromRecycleBin } = require('./recycle-bin.cjs')
 const edits = require('./edits.cjs')
 const { isJpeg, setSwapJournal, recoverSwaps } = require('./jpeg-exif.cjs')
 const ffmpeg = require('./ffmpeg.cjs')
@@ -174,6 +175,8 @@ const store = new Store(path.join(userData, 'settings.json'), {
   protectedFolders: [],
   moveDestination: null,
   carryDates: true,
+  /** Ask before a duplicate group's own Recycle button removes its copies ("Don't ask again" turns it off). */
+  askGroupRecycle: true,
   tagsInFiles: true,
   xmpSidecars: false,
   exportOptions: null,
@@ -552,6 +555,7 @@ const settingsPayload = () => ({
   moveDestination: store.get('moveDestination'),
   defaultMoveDestination: defaultMoveDestination(),
   carryDates: store.get('carryDates') !== false,
+  askGroupRecycle: store.get('askGroupRecycle') !== false,
   tagsInFiles: store.get('tagsInFiles') !== false,
   xmpSidecars: !!store.get('xmpSidecars'),
   importDestination: store.get('importDestination'),
@@ -976,62 +980,65 @@ const isPersonId = (v) => typeof v === 'string' && /^p[0-9a-f]{10}$/.test(v)
 const idList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [])
 
 ipcMain.handle('people:rename', (_e, id, name) => {
-  if (isPersonId(id) && typeof name === 'string') faces.rename(id, name)
+  if (isPersonId(id) && typeof name === 'string') faces.undoable(() => faces.rename(id, name))
 })
 ipcMain.handle('people:hide', (_e, id, hidden) => {
-  if (isPersonId(id)) faces.setHidden(id, !!hidden)
+  if (isPersonId(id)) faces.undoable(() => faces.setHidden(id, !!hidden))
 })
 ipcMain.handle('people:merge', (_e, fromIds, intoId) => {
-  if (isPersonId(intoId)) faces.merge(idList(fromIds).filter(isPersonId), intoId)
+  if (isPersonId(intoId)) faces.undoable(() => faces.merge(idList(fromIds).filter(isPersonId), intoId))
 })
 ipcMain.handle('people:reject', (_e, id, itemIds) => {
-  if (isPersonId(id)) faces.reject(id, idList(itemIds))
+  if (isPersonId(id)) faces.undoable(() => faces.reject(id, idList(itemIds)))
 })
 ipcMain.handle('people:reset', () => faces.reset())
 
 const isFaceId = (v) => typeof v === 'string' && /^[0-9a-f]{16}:\d+$/.test(v)
 ipcMain.handle('people:assign', (_e, faceIds, target) => {
   const ids = idList(faceIds).filter(isFaceId)
-  if (isPersonId(target)) return faces.assignFaces(ids, target)
-  if (target && typeof target === 'object' && typeof target.name === 'string') return faces.assignFaces(ids, { name: target.name })
+  if (isPersonId(target)) return faces.undoable(() => faces.assignFaces(ids, target))
+  if (target && typeof target === 'object' && typeof target.name === 'string') return faces.undoable(() => faces.assignFaces(ids, { name: target.name }))
   return null
 })
-ipcMain.handle('people:reject-faces', (_e, faceIds) => faces.rejectFaces(idList(faceIds).filter(isFaceId)))
+ipcMain.handle('people:reject-faces', (_e, faceIds) => faces.undoable(() => faces.rejectFaces(idList(faceIds).filter(isFaceId))))
 ipcMain.handle('people:cover', (_e, id, faceId) => {
-  if (isPersonId(id) && isFaceId(faceId)) faces.setCover(id, faceId)
+  if (isPersonId(id) && isFaceId(faceId)) faces.undoable(() => faces.setCover(id, faceId))
 })
 ipcMain.handle('people:remove', (_e, id) => {
-  if (isPersonId(id)) faces.removePerson(id)
+  if (isPersonId(id)) faces.undoable(() => faces.removePerson(id))
 })
 ipcMain.handle('people:not-same', (_e, a, b) => {
-  if (isPersonId(a) && isPersonId(b)) faces.markNotSame(a, b)
+  if (isPersonId(a) && isPersonId(b)) faces.undoable(() => faces.markNotSame(a, b))
 })
-ipcMain.handle('people:hide-many', (_e, ids, hidden) => faces.setHiddenMany(idList(ids).filter(isPersonId), !!hidden))
+ipcMain.handle('people:hide-many', (_e, ids, hidden) => faces.undoable(() => faces.setHiddenMany(idList(ids).filter(isPersonId), !!hidden)))
 ipcMain.handle('people:matches', (_e, id) => (isPersonId(id) ? faces.matches(id) : []))
 ipcMain.handle('people:suggestions', () => faces.suggestions())
+ipcMain.handle('people:undo', () => faces.undo())
 
 // ---------- albums ----------
 
 const isAlbumId = (v) => typeof v === 'string' && /^a[0-9a-f]{10}$/.test(v)
 
-ipcMain.handle('albums:create', (_e, name, ids) => albums.create(typeof name === 'string' ? name : '', itemsFor(idList(ids))))
+// (each one is a step for Ctrl+Z: albums:undo)
+ipcMain.handle('albums:create', (_e, name, ids) => albums.undoable(() => albums.create(typeof name === 'string' ? name : '', itemsFor(idList(ids)))))
 ipcMain.handle('albums:create-smart', (_e, name, query) =>
-  typeof query === 'string' && query.trim() ? albums.createSmart(typeof name === 'string' ? name : '', query) : null,
+  typeof query === 'string' && query.trim() ? albums.undoable(() => albums.createSmart(typeof name === 'string' ? name : '', query)) : null,
 )
 ipcMain.handle('albums:rename', (_e, id, name) => {
-  if (isAlbumId(id) && typeof name === 'string') albums.rename(id, name)
+  if (isAlbumId(id) && typeof name === 'string') albums.undoable(() => albums.rename(id, name))
 })
 ipcMain.handle('albums:delete', (_e, id) => {
-  if (isAlbumId(id)) albums.remove(id)
+  if (isAlbumId(id)) albums.undoable(() => albums.remove(id))
 })
-ipcMain.handle('albums:add', (_e, id, ids) => (isAlbumId(id) ? albums.add(id, itemsFor(idList(ids))) : 0))
+ipcMain.handle('albums:add', (_e, id, ids) => (isAlbumId(id) ? albums.undoable(() => albums.add(id, itemsFor(idList(ids)))) : 0))
 ipcMain.handle('albums:remove-items', (_e, id, ids) => {
-  if (isAlbumId(id)) albums.removeItems(id, idList(ids))
+  if (isAlbumId(id)) albums.undoable(() => albums.removeItems(id, idList(ids)))
 })
 ipcMain.handle('albums:cover', (_e, id, itemId) => {
   const [item] = itemsFor(itemId)
-  if (isAlbumId(id) && item) albums.setCover(id, item)
+  if (isAlbumId(id) && item) albums.undoable(() => albums.setCover(id, item))
 })
+ipcMain.handle('albums:undo', () => albums.undo())
 
 // ---------- editing ----------
 
@@ -1484,9 +1491,31 @@ ipcMain.handle('edit:date', async (_e, id, ms) => {
 // ---------- duplicates & search ----------
 
 ipcMain.handle('dupes:dismiss', (_e, ids) => dupes.dismiss(idList(ids)))
+ipcMain.handle('dupes:undismiss', (_e, ids) => dupes.undismiss(idList(ids)))
 // ---------- private ----------
 
-ipcMain.handle('private:add', (_e, ids) => priv.add(itemsFor(idList(ids)).map((it) => it.path)))
+// Ctrl+Z right after "Move to Private" takes back only what that marked, and only for a few
+// minutes: it can't make anything else public without unlocking Private.
+const recentPrivate = new Map() // keyOf(path) -> when it was marked
+const PRIVATE_UNDO_MS = 10 * 60_000
+ipcMain.handle('private:add', (_e, ids) => {
+  const paths = itemsFor(idList(ids)).map((it) => it.path)
+  const fresh = paths.filter((p) => !priv.isPrivate(p))
+  const n = priv.add(paths)
+  const now = Date.now()
+  for (const p of fresh) recentPrivate.set(keyOf(p), now)
+  return n
+})
+ipcMain.handle('private:undo-add', (_e, ids) => {
+  const now = Date.now()
+  for (const [k, t] of recentPrivate) if (now - t > PRIVATE_UNDO_MS) recentPrivate.delete(k)
+  const paths = idList(ids)
+    .map((id) => library.get(id))
+    .filter((it) => it && recentPrivate.has(keyOf(it.path)) && !priv.inVault(it.path))
+    .map((it) => it.path)
+  for (const p of paths) recentPrivate.delete(keyOf(p))
+  return paths.length ? priv.remove(paths) : 0
+})
 ipcMain.handle('private:remove', async (_e, ids) => {
   if (!priv.unlocked) return 0 // only someone who unlocked Private can make items public again
   const items = itemsFor(idList(ids))
@@ -1747,6 +1776,7 @@ ipcMain.handle('settings:set', (_e, patch) => {
     else allowed.moveDestination = patch.moveDestination
   }
   if (typeof patch.carryDates === 'boolean') allowed.carryDates = patch.carryDates
+  if (typeof patch.askGroupRecycle === 'boolean') allowed.askGroupRecycle = patch.askGroupRecycle
   if (Number.isFinite(patch.blurThreshold)) allowed.blurThreshold = Math.min(80, Math.max(5, Math.round(patch.blurThreshold)))
   if (Number.isFinite(patch.largeFileMB)) allowed.largeFileMB = Math.min(500, Math.max(5, Math.round(patch.largeFileMB)))
   if (organize.FOLDER_PATTERNS.some((p) => p.value === patch.folderPattern)) allowed.folderPattern = patch.folderPattern
@@ -1852,9 +1882,9 @@ async function removeItems(ids, how, dest) {
     if (dateChanges.length) await retime(await newTimes(dateChanges.map((c) => c.path)))
     let kept = null
     const res = await tags.hold(async () => {
-      // what forgetItems() drops, so undoing the move can put it back (taken before the move: a scan
-      // finishing meanwhile could drop the moved files' Pics-only ratings and tags)
-      if (how === 'move') kept = rememberForUndo(items)
+      // what forgetItems() drops, so undoing the move (or getting the files back from the Recycle Bin)
+      // can put it back (taken before: a scan finishing meanwhile could drop Pics-only ratings and tags)
+      kept = rememberForUndo(items)
       return how === 'move' ? cleanup.moveTo(items, destination, { signal }) : cleanup.recycle(items, { signal })
     })
     let entry = null
@@ -1961,6 +1991,13 @@ ipcMain.handle('history:clear', async () => {
   await edits.deleteBackups(history.list(), backupsDir()).catch(() => {})
   return history.clear()
 })
+// Ctrl+Z: the entries an action just added (newest first), so undoing it restores exactly those.
+// Imports have their own Undo (it asks first), and copies leave the originals as they were.
+ipcMain.handle('history:since', (_e, since) => {
+  const t = Number(since)
+  if (!Number.isFinite(t)) return []
+  return history.list().filter((e) => e.time >= t && e.kind !== 'imported' && e.kind !== 'copied').map((e) => e.id)
+})
 ipcMain.handle('history:restore', async (_e, id) => {
   const entry = typeof id === 'string' ? history.get(id) : null
   if (!entry) return { restored: 0 }
@@ -1987,6 +2024,17 @@ async function restoreEntry(entry) {
   } else if (entry.kind === 'imported') {
     restored = await importer.undo(entry, (p) => shell.trashItem(p))
     kept = entry.keptOnUndo ?? 0
+  } else if (entry.kind === 'recycled') {
+    // back from the Recycle Bin (Ctrl+Z, History → Restore), with what was dropped when they left
+    await withScansHeld(async () => {
+      const pending = entry.files.filter((f) => !f.restored)
+      ownFiles(pending.map((f) => f.from))
+      restored = await restoreFromRecycleBin(entry.files, entry.time)
+      const back = pending.filter((f) => f.restored).map((f) => f.from)
+      if (entry.forgotten && back.length) restoreForgotten(entry.forgotten, back)
+      const dated = (entry.dateChanges ?? []).filter((c) => !c.restored)
+      if (back.length && (await cleanup.restoreDates(entry.dateChanges))) await retime(await newTimes(dated.filter((c) => c.restored).map((c) => c.path)))
+    })
   } else if (['moved', 'renamed', 'converted', 'dates'].includes(entry.kind)) {
     await withScansHeld(async () => {
       if (entry.kind === 'moved' || entry.kind === 'renamed') {
@@ -2057,6 +2105,19 @@ ipcMain.handle('items:reveal', (_e, id) => {
   if (item) shell.showItemInFolder(item.path)
 })
 
+// the video player's "Save a copy…" (Chromium's own controls called it Download)
+ipcMain.handle('items:save-copy', async (_e, id) => {
+  const [item] = itemsFor(id)
+  if (!item) return null
+  const res = await dialog.showSaveDialog(win, {
+    title: 'Save a copy',
+    defaultPath: path.join(app.getPath('downloads'), item.name),
+    filters: [{ name: item.ext.toUpperCase(), extensions: [item.ext] }],
+  })
+  if (res.canceled || !res.filePath || keyOf(res.filePath) === keyOf(item.path)) return null
+  await fs.promises.copyFile(item.path, res.filePath)
+  return res.filePath
+})
 ipcMain.handle('items:open', (_e, id) => {
   const [item] = itemsFor(id)
   if (item) return shell.openPath(item.path)
@@ -2181,6 +2242,35 @@ ipcMain.handle('window:viewer', (_e, open) => {
 })
 
 ipcMain.handle('cache:info', () => thumbs.size())
+
+// ---------- Settings → Data: what Pics has made, and starting any of it again ----------
+
+const DATA_FILES = {
+  faces: ['faces.json'],
+  smart: ['smart.bin'],
+  text: ['ocr.json'],
+  duplicates: ['duplicates.json', 'duplicates-pairs.bin', 'video-frames.bin'],
+}
+const fileSize = (name) => fs.promises.stat(path.join(userData, name)).then((st) => st.size, () => 0)
+ipcMain.handle('data:info', async () => {
+  const out = { previews: await thumbs.size() }
+  for (const [kind, names] of Object.entries(DATA_FILES)) out[kind] = { bytes: (await Promise.all(names.map(fileSize))).reduce((a, b) => a + b, 0) }
+  return out
+})
+/** Deletes one kind of data (or 'all'); it's made again in the background, newest photos first. */
+ipcMain.handle('data:delete', async (_e, kind) => {
+  const kinds = kind === 'all' ? ['previews', 'faces', 'smart', 'text', 'duplicates'] : [kind]
+  for (const k of kinds) {
+    if (k === 'previews') {
+      await thumbs.clear()
+      thumbs.prefetch(visibleLibrary())
+    } else if (k === 'faces') await faces.reset()
+    else if (k === 'smart') await smart.reset()
+    else if (k === 'text') await ocr.reset()
+    else if (k === 'duplicates') await dupes.reset()
+  }
+  return true
+})
 ipcMain.handle('cache:clear', async () => {
   await thumbs.clear()
   thumbs.prefetch(visibleLibrary())

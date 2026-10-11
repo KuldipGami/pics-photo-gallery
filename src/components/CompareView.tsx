@@ -1,6 +1,8 @@
 import { ChevronLeft, ChevronRight, Columns2, ExternalLink, FolderOpen, Maximize2, Minus, Plus, ShieldCheck, SplitSquareHorizontal, Trash, X } from 'lucide-react'
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { api, fullImageUrl, mediaUrl, thumbUrl } from '../api'
+import { withFileUndo } from '../undo'
+import { VideoControls } from './VideoControls'
 import { isLastCopy, kindText, matchText, needsReview, ruleMarks, type Facts } from '../lib/cleanup'
 import { formatBytes, formatCount, formatDuration } from '../lib/format'
 import type { DupGroup, KeepRule, MediaItem } from '../types'
@@ -296,14 +298,14 @@ export function CompareView({ source, byId, facts, marks, keepRule, isProtected,
               onClick={async () => {
                 const turns = turnToMatch(group, group.ids.indexOf(id), it)
                 setTurned((t) => new Set(t).add(id)) // one click, one turn
-                const res = await api.rotateLossless([id], turns)
+                const { res } = await withFileUndo(`Turned ${it.name}`, () => api.rotateLossless([id], turns))
                 if (!res.done)
                   setTurned((t) => {
                     const next = new Set(t)
                     next.delete(id)
                     return next
                   })
-                onToast(res.done ? `Turned ${it.name}. Undo it from History if needed.` : `Couldn't turn ${it.name}: ${res.errors[0] ?? ''}`)
+                onToast(res.done ? `Turned ${it.name}. Ctrl+Z undoes it.` : `Couldn't turn ${it.name}: ${res.errors[0] ?? ''}`)
               }}
             >
               {['', 'Turn right', 'Turn upside down', 'Turn left'][turnToMatch(group, group.ids.indexOf(id), it)]}
@@ -468,6 +470,7 @@ export function turnToMatch(g: DupGroup, i: number, it: MediaItem) {
 function Pane({ item, view, onView, clip }: { item: MediaItem; view: View; onView(update: (v: View) => View): void; clip?: number }) {
   const ref = useRef<HTMLDivElement>(null)
   const [loaded, setLoaded] = useState(false)
+  const [video, setVideo] = useState<HTMLVideoElement | null>(null)
   const drag = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null)
 
   const at = (clientX: number, clientY: number) => {
@@ -488,6 +491,7 @@ function Pane({ item, view, onView, clip }: { item: MediaItem; view: View; onVie
     const el = ref.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
+      if ((e.target as Element).closest?.('.vc')) return // (over the video's controls)
       e.preventDefault()
       zoomAround(e.deltaY < 0 ? 1.25 : 1 / 1.25, e.clientX, e.clientY)
     }
@@ -520,7 +524,14 @@ function Pane({ item, view, onView, clip }: { item: MediaItem; view: View; onVie
     >
       <div className="pane-inner" style={style}>
         {item.type === 'video' ? (
-          <video src={mediaUrl(item)} poster={thumbUrl(item)} controls playsInline muted />
+          <video
+            ref={setVideo}
+            src={mediaUrl(item)}
+            poster={thumbUrl(item)}
+            playsInline
+            muted
+            onClick={(e) => (e.currentTarget.paused ? void e.currentTarget.play().catch(() => {}) : e.currentTarget.pause())}
+          />
         ) : (
           <>
             {!loaded && <img src={thumbUrl(item)} alt="" draggable={false} />}
@@ -528,6 +539,7 @@ function Pane({ item, view, onView, clip }: { item: MediaItem; view: View; onVie
           </>
         )}
       </div>
+      {item.type === 'video' && <VideoControls video={video} frame={ref} className="vc-compact" />}
     </div>
   )
 }

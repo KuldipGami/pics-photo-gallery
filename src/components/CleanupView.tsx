@@ -64,6 +64,8 @@ export interface CleanupActions {
   onPreview(list: MediaItem[], index: number): void
   onMove(ids: string[]): void
   onRecycle(ids: string[]): void
+  /** A group's own Recycle button (may skip asking). */
+  onRecycleGroup(ids: string[]): void
   onUndo(): void
   onProtectFolder(dir: string): void
   onExport(): void
@@ -84,7 +86,8 @@ interface Props extends CleanupActions {
   settings: Settings
   isProtected(id: string): boolean
   query: string
-  canUndo: boolean
+  /** What Ctrl+Z would take back now (null: nothing). */
+  undoLabel: string | null
 }
 
 const itemMatches = (it: MediaItem, terms: string[]) =>
@@ -340,8 +343,8 @@ export function CleanupView(props: Props) {
 
   const actions = (
     <div className="clean-actions">
-      {props.canUndo && (
-        <button className="btn ghost" onClick={props.onUndo} title="Undo the last move (Ctrl+Z)">
+      {props.undoLabel && (
+        <button className="btn ghost" onClick={props.onUndo} title={`Undo: ${props.undoLabel} (Ctrl+Z)`}>
           <Undo2 size={15} /> Undo
         </button>
       )}
@@ -406,7 +409,7 @@ export function CleanupView(props: Props) {
             onCompare={(focus) => props.onCompare(visibleGroups, gi, focus)}
             onProtectFolder={props.onProtectFolder}
             onDismiss={() => props.onDismiss(g.ids)}
-            onRecycle={props.onRecycle}
+            onRecycle={props.onRecycleGroup}
             where={where}
           />
         ))}

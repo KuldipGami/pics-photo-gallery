@@ -472,6 +472,16 @@ html[data-platform='darwin'] .titlebar {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* hovering a task's line shows how many are done instead of the percentage */
+.scan-count {
+  display: none;
+}
+.scan-status:hover .scan-pct {
+  display: none;
+}
+.scan-status:hover .scan-count {
+  display: inline;
+}
 .scan-progress {
   position: absolute;
   left: 0;
@@ -1682,6 +1692,21 @@ html[data-platform='darwin'] .titlebar {
   color: var(--text-2);
 }
 
+.modal-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 2px;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+.modal-check input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+}
 .modal-backdrop {
   position: fixed;
   inset: 0;

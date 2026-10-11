@@ -341,6 +341,25 @@ class Duplicates extends EventEmitter {
   }
 
   /** Called whenever the library changes; the scan itself waits until previews are done. */
+  /**
+   * Settings → Data: every fingerprint (photos and videos) and the saved photo pairs are made again.
+   * "Not duplicates" answers are the user's own choices and are kept.
+   */
+  async reset() {
+    this.records.clear()
+    this.decoded.clear()
+    this.memo.clear()
+    this.photoPairs = null
+    await fsp.rm(this.pairsFile, { force: true }).catch(() => {})
+    this.result = { groups: [] }
+    this.blocked = false
+    this.dirty = true
+    await this.save()
+    this.emit('changed')
+    await this.videoFrames?.reset()
+    this.pump()
+  }
+
   sync(items) {
     this.items = items
     this.videoFrames?.sync(items)
@@ -732,6 +751,14 @@ class Duplicates extends EventEmitter {
     this.result = { groups: this.result.groups.filter((g) => g.ids.slice().sort().join(',') !== key) }
     this.saveSoon(1000)
     this.emit('changed')
+  }
+
+  /** Undo of dismiss(): the group may be suggested again (it comes back with the next regroup). */
+  undismiss(ids) {
+    const key = [...ids].sort().join(',')
+    if (!this.dismissed.delete(key)) return
+    this.saveSoon(1000)
+    this.regroupSoon()
   }
 
   /** The current groups, plus quality facts of every analysed item: id → [sharpness, brightness, blank, w, h]. */

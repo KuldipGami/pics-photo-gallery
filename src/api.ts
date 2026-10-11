@@ -93,6 +93,8 @@ export interface LumenApi {
   privateItems(): Promise<MediaItem[]>
   privateAdd(ids: string[]): Promise<number>
   privateRemove(ids: string[]): Promise<number>
+  /** Ctrl+Z after privateAdd: un-marks those of `ids` it marked in the last few minutes. */
+  privateUndoAdd(ids: string[]): Promise<number>
   privateHide(ids: string[]): Promise<{ done: number; errors: string[]; folder: string | null }>
   privateReset(): Promise<boolean>
   onPrivateStatus(cb: (status: PrivateStatus) => void): Unsubscribe
@@ -131,9 +133,13 @@ export interface LumenApi {
   addToAlbum(id: string, ids: string[]): Promise<number>
   removeFromAlbum(id: string, ids: string[]): Promise<void>
   setAlbumCover(id: string, itemId: string): Promise<void>
+  /** Takes back the latest change to albums (create, rename, delete, add, remove, cover). False when there's none. */
+  undoAlbums(): Promise<boolean>
   onAlbums(cb: (albums: Album[]) => void): Unsubscribe
   onPlaces(cb: (places: PlacesData) => void): Unsubscribe
   dismissDuplicates(ids: string[]): Promise<void>
+  /** Undo of a dismiss: these items show up as duplicates again. */
+  undismissDuplicates(ids: string[]): Promise<void>
   /** Moves files into one folder (default: the Clean up destination). */
   moveItems(ids: string[], dest?: string): Promise<RemoveResult>
   /** Choose where moved duplicates go (saved as the default). */
@@ -145,6 +151,8 @@ export interface LumenApi {
    * photo has the old name now.
    * `kept`: imported files left in place by an import undo (their originals were removed from the card, or they changed since). */
   restoreHistory(id: string): Promise<{ restored: number; total?: number; kept?: number; renamed?: number }>
+  /** Ids of the History entries added at or after `since` (ms), newest first; imports left out. */
+  historySince(since: number): Promise<string[]>
   clearHistory(): Promise<void>
   onHistory(cb: (entries: HistoryEntry[]) => void): Unsubscribe
   openRecycleBin(): Promise<void>
@@ -223,6 +231,8 @@ export interface LumenApi {
   setPersonCover(id: string, faceId: string): Promise<void>
   removePerson(id: string): Promise<void>
   markNotSame(a: string, b: string): Promise<void>
+  /** Takes back the latest change to People (rename, merge, hide, moved faces…). False when there's none. */
+  undoPeople(): Promise<boolean>
   hidePeople(ids: string[], hidden: boolean): Promise<void>
   personMatches(id: string): Promise<PersonMatch[]>
   peopleSuggestions(): Promise<PairSuggestion[]>
@@ -251,6 +261,7 @@ export interface LumenApi {
       protectedFolders: string[]
       moveDestination: string | null
       carryDates: boolean
+      askGroupRecycle: boolean
       blurThreshold: number
       largeFileMB: number
       tagsInFiles: boolean
@@ -278,12 +289,18 @@ export interface LumenApi {
   trash(ids: string[]): Promise<RemoveResult>
   reveal(id: string): Promise<void>
   openExternal(id: string): Promise<string>
+  /** Copies the file where the user picks (a Save dialog). Resolves to where, or null. */
+  saveCopy(id: string): Promise<string | null>
   copy(id: string, kind: 'image' | 'path'): Promise<boolean>
   showContextMenu(id: string, ids: string[]): Promise<void>
   startDrag(ids: string[]): void
   reportDuration(id: string, seconds: number): Promise<void>
   cacheInfo(): Promise<{ bytes: number; files: number }>
   clearCache(): Promise<void>
+  /** Sizes of what Pics has made (Settings → Storage and data). */
+  dataInfo(): Promise<import('./components/SettingsView').DataInfo>
+  /** Deletes one kind of it, or 'all'; it's made again in the background. */
+  deleteData(kind: 'previews' | 'faces' | 'smart' | 'text' | 'duplicates' | 'all'): Promise<boolean>
   openUrl(url: string): Promise<void>
   pathForFile(file: File): string
   setViewerMode(open: boolean): Promise<void>

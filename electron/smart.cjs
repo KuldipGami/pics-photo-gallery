@@ -318,6 +318,21 @@ class SmartIndex extends EventEmitter {
     if (this.writing) this.flushed = true
   }
 
+  /** Settings → Data: every search vector is forgotten and made again (newest photos first). */
+  async reset() {
+    this.vectors.clear()
+    this.failed.clear()
+    this.attempts.clear()
+    this.queryCache.clear()
+    // (the user asked for a fresh start: writing over a file that couldn't be read is what they want)
+    this.blocked = false
+    this.halted = false
+    this.error = null
+    this.dirty = true
+    await this.save()
+    this.sync([...this.media.values()])
+  }
+
   // ---------- pipeline ----------
 
   sync(items) {

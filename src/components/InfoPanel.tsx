@@ -1,6 +1,7 @@
 import { Aperture, Calendar, CalendarClock, ExternalLink, FileImage, Film, Folder, MapPin, RotateCcw, RotateCw, Star, Tag, UserRoundPen, UserRoundSearch, UserX, Users, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { withFileUndo } from '../undo'
 import { PhotoText } from './PhotoText'
 import { RatingStars } from './RatingStars'
 import { TagEditor, type TagCount } from './TagEditor'
@@ -100,17 +101,17 @@ export function InfoPanel({ item, dims, faces, place, onOpenPlace, onOpenPerson,
   const nameDate = fileNameDate(item.name)
   const saveDate = async () => {
     const ms = parseDate(dateText)
-    if (ms === 'ambiguous') return setDateError('Day or month first? Write it as year-month-day, like 2021-06-08 13:11:51')
-    if (ms === null) return setDateError('Use a date like 2021-06-08 13:11:51')
+    if (ms === 'ambiguous') return setDateError('Day or month first? Write it as yyyy-mm-dd hh:mm:ss')
+    if (ms === null) return setDateError('Write the date as yyyy-mm-dd hh:mm:ss')
     if (new Date(ms).getFullYear() < 1900 || ms > Date.now() + 86_400_000) return setDateError('That date looks wrong.')
     setDateError('')
-    const res = await api.setDateTaken(item.id, ms)
+    const { res } = await withFileUndo(`Date taken of ${item.name} changed`, () => api.setDateTaken(item.id, ms))
     if (res.error) setDateError(res.error)
-    else onToast(`Saved ${new Date(ms).toLocaleString()} inside ${item.name}. Undo it from History if needed.`)
+    else onToast(`Saved ${new Date(ms).toLocaleString()} inside ${item.name}. Ctrl+Z undoes it.`)
   }
   const turn = async (q: number) => {
-    const res = await api.rotateLossless([item.id], q)
-    onToast(res.done ? `Turned ${item.name}. Undo it from History if needed.` : `Couldn't turn ${item.name}: ${res.errors[0] ?? ''}`)
+    const { res } = await withFileUndo(`Turned ${item.name}`, () => api.rotateLossless([item.id], q))
+    onToast(res.done ? `Turned ${item.name}. Ctrl+Z undoes it.` : `Couldn't turn ${item.name}: ${res.errors[0] ?? ''}`)
   }
   const camera = m.model ? (m.make && !m.model.startsWith(m.make) ? `${m.make} ${m.model}` : m.model) : m.make
   const exposure = [

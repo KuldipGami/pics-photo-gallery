@@ -26,6 +26,7 @@ class Albums extends EventEmitter {
     this.dirty = false
     this.writing = 0
     this.queue = serial(() => this.write())
+    this.undoSteps = [] // how the albums the last user actions changed looked before (undo())
   }
 
   async load() {
@@ -200,9 +201,51 @@ class Albums extends EventEmitter {
     this.changed()
   }
 
+  /**
+   * Runs a user action (create, rename, delete, add, remove, cover) and remembers how the albums it
+   * changed looked before, so undo() puts exactly those back. One step per action, even when nothing
+   * changed, so the app's Ctrl+Z list stays in step. Returns what the action returns.
+   */
+  undoable(action) {
+    const before = new Map(this.albums.map((a, i) => [a.id, [JSON.stringify(a), i]]))
+    const result = action()
+    const step = []
+    for (const [id, [json, index]] of before) {
+      const now = this.get(id)
+      if (!now || JSON.stringify(now) !== json) step.push([id, JSON.parse(json), index])
+    }
+    for (const a of this.albums) if (!before.has(a.id)) step.push([a.id, null, -1]) // made by the action
+    this.undoSteps.push(step)
+    if (this.undoSteps.length > 50) this.undoSteps.shift()
+    return result
+  }
+
+  /** Undoes the last user action on albums. False when there's nothing to undo. */
+  undo() {
+    const step = this.undoSteps.pop()
+    if (!step) return false
+    for (const [id, album, index] of step) {
+      const at = this.albums.findIndex((a) => a.id === id)
+      if (!album) {
+        if (at >= 0) this.albums.splice(at, 1)
+      } else if (at >= 0) this.albums[at] = album
+      else this.albums.splice(Math.min(index, this.albums.length), 0, album)
+    }
+    if (step.length) this.changed()
+    return true
+  }
+
   /** Files Pics moved or renamed stay in their albums: old path → new path. */
   remapPaths(map) {
     let changed = false
+    // (what undo puts back follows the files too)
+    for (const step of this.undoSteps) {
+      for (const [, album] of step) {
+        if (!album) continue
+        album.paths = album.paths.map((p) => map.get(keyOf(p)) ?? p)
+        if (album.cover && map.has(keyOf(album.cover))) album.cover = map.get(keyOf(album.cover))
+      }
+    }
     for (const album of this.albums) {
       album.paths = album.paths.map((p) => {
         const to = map.get(keyOf(p))

@@ -62,6 +62,8 @@ export interface Settings {
   defaultMoveDestination: string
   /** Give kept copies the original's date before removing duplicates. */
   carryDates: boolean
+  /** Ask before a duplicate group's own Recycle button removes its copies. */
+  askGroupRecycle: boolean
   blurThreshold: number
   largeFileMB: number
   /** Ratings & tags: written into JPEG files (XMP) and, optionally, .xmp sidecars for other files. */
@@ -377,6 +379,10 @@ export interface Memory {
 export type View =
   | { kind: 'photos' }
   | { kind: 'videos' }
+  /** Live Photos only. */
+  | { kind: 'live' }
+  /** Photos, videos and Live Photos together. */
+  | { kind: 'all' }
   | { kind: 'favorites' }
   | { kind: 'recent' }
   | { kind: 'folders' }

@@ -465,6 +465,16 @@ class VideoFrames extends EventEmitter {
     return r && r.m === item.mtime && r.z === item.size ? r : undefined
   }
 
+  /** Settings → Data: every video's frames are read again (by the duplicates scan that follows). */
+  async reset() {
+    this.records.clear()
+    this.unanswered.clear()
+    this.blocked = false
+    this.dirty = true
+    await this.save()
+    this.setProgress()
+  }
+
   /** Called whenever the library changes: forgets removed / changed videos. Doesn't start work. */
   sync(items) {
     this.videos = items.filter((it) => it.type === 'video')

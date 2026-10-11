@@ -1,0 +1,288 @@
+/* Pics' own video controls (VideoControls.tsx): a floating dark bar, like the viewer's other chrome. */
+
+.vc {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: min(760px, calc(100% - 24px));
+  height: 44px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(20, 20, 24, 0.78);
+  color: #fff;
+  font-size: 12.5px;
+  transform: translateX(-50%);
+  backdrop-filter: blur(14px) saturate(140%);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  container-type: inline-size;
+  user-select: none;
+  cursor: default;
+}
+
+.vc-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 34px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.88);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.vc-btn:hover,
+.vc-btn.on {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+.vc-btn:focus-visible,
+.vc-seek:focus-visible,
+.vc-range:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.vc-speed {
+  min-width: 40px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.vc-speed.on {
+  color: var(--accent);
+}
+
+.vc-time {
+  flex-shrink: 0;
+  padding: 0 8px 0 4px;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.vc-total {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+/* the seek bar: loaded, hovered and played parts, a thumb, and the time under the pointer */
+.vc-seek {
+  position: relative;
+  flex: 1;
+  min-width: 60px;
+  height: 34px;
+  margin: 0 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  touch-action: none;
+}
+.vc-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.18);
+  transform: translateY(-50%);
+  transition: height 0.12s ease;
+}
+.vc-seek:hover .vc-track,
+.vc-seek:focus-visible .vc-track {
+  height: 6px;
+}
+.vc-buffered,
+.vc-hovered,
+.vc-played {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+}
+.vc-buffered {
+  background: rgba(255, 255, 255, 0.22);
+}
+.vc-hovered {
+  background: rgba(255, 255, 255, 0.2);
+}
+.vc-played {
+  background: var(--accent);
+}
+.vc-thumb {
+  position: absolute;
+  top: 50%;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  transform: translate(-50%, -50%) scale(0);
+  transition: transform 0.12s ease;
+  pointer-events: none;
+}
+.vc-seek:hover .vc-thumb,
+.vc-seek:focus-visible .vc-thumb,
+.vc.paused .vc-thumb {
+  transform: translate(-50%, -50%) scale(1);
+}
+.vc-tip {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: clamp(22px, var(--x), calc(100% - 22px));
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(10, 10, 12, 0.92);
+  color: #fff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+/* volume: the slider opens next to the speaker on hover (or when it has the keyboard) */
+.vc-volume {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+.vc-range {
+  width: 0;
+  height: 34px;
+  margin: 0;
+  opacity: 0;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  transition: width 0.15s ease, opacity 0.15s ease, margin 0.15s ease;
+}
+.vc-volume:hover .vc-range,
+.vc-range:focus-visible {
+  width: 76px;
+  margin: 0 6px 0 2px;
+  opacity: 1;
+}
+.vc-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, #fff var(--fill, 0%), rgba(255, 255, 255, 0.22) var(--fill, 0%));
+}
+.vc-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* menus open upwards, inside the bar (a full-screen video only shows what's inside it) */
+.vc-anchor {
+  position: relative;
+  flex-shrink: 0;
+}
+.vc-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  min-width: 170px;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  background: rgba(28, 28, 33, 0.97);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  animation: fade-in 0.12s ease-out;
+}
+.vc-menu-head {
+  padding: 6px 10px 4px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.vc-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px 0 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.9);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.vc-menu-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.vc-menu-item.on {
+  color: var(--accent);
+}
+.vc-menu-icon {
+  display: inline-flex;
+  justify-content: center;
+  width: 18px;
+}
+
+.vc.vc-compact {
+  bottom: 8px;
+  width: min(760px, calc(100% - 16px));
+  height: 40px;
+}
+
+/* narrow players (Compare's panes): keep play, the bar, sound and full screen */
+@container (max-width: 420px) {
+  .vc-total,
+  .vc-pip,
+  .vc-speed {
+    display: none;
+  }
+}
+@container (max-width: 300px) {
+  .vc-time {
+    display: none;
+  }
+}
+
+/* the frame that goes full screen: the video fills the screen, the bar floats over it */
+.pv {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pv:fullscreen {
+  background: #000;
+}
+.pv:fullscreen > video {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+  box-shadow: none;
+  object-fit: contain;
+}
+.pv:fullscreen .vc {
+  bottom: 24px;
+}
+/* the viewer hides its chrome when the mouse rests; a paused video keeps its bar */
+.viewer.idle .vc.paused {
+  opacity: 1;
+  pointer-events: auto;
+}

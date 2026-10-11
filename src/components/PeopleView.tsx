@@ -1,4 +1,4 @@
-import { Check, Eye, LoaderCircle, ScanFace, Sparkles, TriangleAlert } from 'lucide-react'
+import { Check, Eye, LoaderCircle, ScanFace, TriangleAlert } from 'lucide-react'
 import { formatCount } from '../lib/format'
 import type { MediaItem, PeopleProgress, Person } from '../types'
 import { FaceAvatar } from './FaceAvatar'
@@ -15,14 +15,12 @@ interface Props {
   showHidden: boolean
   smallCount: number
   showSmall: boolean
-  suggestionCount: number
   selection: Set<string>
   onToggleHidden(): void
   onToggleSmall(): void
   onToggleSelect(id: string): void
   onOpen(id: string): void
   onEnable(): void
-  onReview(): void
 }
 
 export function PeopleView(props: Props) {
@@ -82,21 +80,6 @@ export function PeopleView(props: Props) {
             <strong>Upgrading to a more accurate face model · {progress.total ? Math.floor((progress.done / progress.total) * 100) : 0}%</strong>
             <span> Your names and corrections are kept. Groups will tidy themselves up as photos are re-checked.</span>
           </div>
-        </div>
-      )}
-      {props.suggestionCount > 0 && !(progress.upgrading && progress.running) && (
-        <div className="review-banner">
-          <Sparkles size={18} />
-          <div>
-            <strong>
-              {props.suggestionCount >= 300 ? '300+' : formatCount(props.suggestionCount)} pairs of groups might be the
-              same person.
-            </strong>
-            <span> Quickly confirm or reject each match — it's the fastest way to tidy up People.</span>
-          </div>
-          <button className="btn primary" onClick={props.onReview}>
-            Review
-          </button>
         </div>
       )}
       <div className="people-grid">

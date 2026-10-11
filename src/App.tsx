@@ -27,6 +27,7 @@ import {
   Share,
   Sparkles,
   Tag,
+  Target,
   Trash,
   UserRoundPen,
   UserX,
@@ -76,7 +77,7 @@ import type { PhotoFace } from './components/InfoPanel'
 import { Logo } from './components/Logo'
 import { ConfirmDialog, DropOverlay, EmptyState, Toasts, type ConfirmOptions } from './components/Overlays'
 import { PeopleView } from './components/PeopleView'
-import { PersonName, PersonPicker, SuggestionsReview } from './components/PersonDialogs'
+import { PersonName, PersonPicker } from './components/PersonDialogs'
 import { FacesGrid, PossibleMatches } from './components/PersonTools'
 import { PlacesView } from './components/PlacesView'
 import { PopoverMenu } from './components/PopoverMenu'
@@ -85,12 +86,13 @@ import { Sidebar } from './components/Sidebar'
 import { TitleBar } from './components/TitleBar'
 import { Viewer } from './components/Viewer'
 import { useEvent, useLibrary, useSmartSearch, useTextHits, useToasts } from './hooks'
+import { fileChanges, latestStep, pushUndo, undo, useUndoSteps, withFileUndo, type UndoStep } from './undo'
 import { baseName, formatBytes, formatCount, formatRange, summarize } from './lib/format'
 import { buildReports, isUnder, largeList, lowQualityList, newFiles, ruleNewFiles, screenshotList, type Facts } from './lib/cleanup'
 import { pairLivePhotos } from './lib/live'
 import { findTrips, formatTripDates, matchTrip, onThisDay } from './lib/memories'
 import { fold, MONTH_WORDS, searchTokens, tokenMask, TYPE_WORDS } from './lib/search'
-import type { DupGroup, FaceBox, FaceRef, HistoryEntry, MediaItem, Memory, PairSuggestion, Person, PersonMatch, Trip, TypeFilter, View } from './types'
+import type { DupGroup, FaceBox, FaceRef, MediaItem, Memory, Person, PersonMatch, Trip, TypeFilter, View } from './types'
 
 interface PickerOptions {
   title: string
@@ -102,11 +104,15 @@ interface PickerOptions {
 
 const ZOOM_STEPS = [80, 100, 124, 150, 180, 220, 270, 330]
 const BIN = api.env.platform === 'win32' ? 'Recycle Bin' : 'Trash'
-const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip', 'similar', 'map-items', 'private']
+/** Views that are one kind of item already (or a person's photos): no All / Photos / Videos filter there. */
+const OWN_TYPE_VIEWS = new Set<View['kind']>(['photos', 'videos', 'live', 'all', 'person'])
+const GRID_VIEWS: View['kind'][] = ['photos', 'videos', 'live', 'all', 'favorites', 'recent', 'folder', 'person', 'place', 'album', 'trip', 'similar', 'map-items', 'private']
 
 const TITLES: Record<View['kind'], string> = {
   photos: 'Photos',
   videos: 'Videos',
+  live: 'Live',
+  all: 'All',
   favorites: 'Favorites',
   recent: 'Recently added',
   folders: 'Folders',
@@ -170,9 +176,6 @@ export default function App() {
   /** The face shift-click selects from (an id: the list can change in between). */
   const faceAnchor = useRef<string | null>(null)
   const [picker, setPicker] = useState<PickerOptions | null>(null)
-  const [suggestions, setSuggestions] = useState<PairSuggestion[]>([])
-  /** Suggestions frozen when the review opens (the live list changes as you merge). */
-  const [reviewing, setReviewing] = useState<PairSuggestion[] | null>(null)
   const [matches, setMatches] = useState<PersonMatch[]>([])
   /** "Add to album…" for these items. */
   const [albumPicker, setAlbumPicker] = useState<string[] | null>(null)
@@ -215,7 +218,6 @@ export default function App() {
   const ruled = useRef(new Set<string>())
   const [compare, setCompare] = useState<CompareSource | null>(null)
   /** Moves made in this session, newest last (Ctrl+Z undoes the last one while it's the latest change to files). */
-  const [sessionMoves, setSessionMoves] = useState<string[]>([])
   /** Turned copies, hidden from the sideways list until the duplicate groups are worked out again. */
   const [turned, setTurned] = useState<{ groups: DupGroup[]; ids: Set<string> } | null>(null)
   // ---------- organize (DupeLens) ----------
@@ -384,15 +386,6 @@ export default function App() {
       .sort((a, b) => a.box[0] - b.box[0])
   }
 
-  // Suggestions are computed in the main process; refresh them whenever People changes.
-  useEffect(() => {
-    if (view.kind !== 'people') return
-    let live = true
-    api.peopleSuggestions().then((s) => live && setSuggestions(s))
-    return () => {
-      live = false
-    }
-  }, [view.kind, people])
   useEffect(() => {
     if (!currentPerson) return setMatches([])
     let live = true
@@ -405,7 +398,9 @@ export default function App() {
   /** The current view's items before searching. */
   const baseList = useMemo(() => {
     let list = view.kind === 'private' ? shownPrivate : shownItems
-    if (view.kind === 'videos') list = list.filter((it) => it.type === 'video')
+    if (view.kind === 'photos') list = list.filter((it) => it.type === 'image')
+    else if (view.kind === 'videos') list = list.filter((it) => it.type === 'video')
+    else if (view.kind === 'live') list = list.filter((it) => libraryLive.has(it.id))
     else if (view.kind === 'favorites') list = list.filter((it) => favorites.has(it.id))
     else if (view.kind === 'folder') list = list.filter((it) => it.dir === view.dir)
     else if (view.kind === 'person') {
@@ -423,11 +418,11 @@ export default function App() {
       const members = new Set(currentTrip?.items ?? [])
       list = list.filter((it) => members.has(it.id))
     }
-    if (typeFilter !== 'all' && view.kind !== 'videos') list = list.filter((it) => it.type === typeFilter)
+    if (typeFilter !== 'all' && !OWN_TYPE_VIEWS.has(view.kind)) list = list.filter((it) => it.type === typeFilter)
     return list
     // `favDep`/`personDep`/`placeDep` instead of the full objects: toggling a heart or renaming
     // someone shouldn't refilter views that don't depend on them.
-  }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip, similar, byId, shownPrivate])
+  }, [shownItems, view, typeFilter, favDep, personDep, placeDep, currentAlbum, currentTrip, similar, byId, shownPrivate, libraryLive])
 
   // ---------- search ----------
   // Every word is matched against what Pics knows about an item (name, folder, date, camera,
@@ -542,21 +537,25 @@ export default function App() {
   const counts = useMemo(() => {
     let videos = 0
     let favs = 0
+    let live = 0
     for (const it of shownItems) {
       if (it.type === 'video') videos++
       if (favorites.has(it.id)) favs++
+      if (libraryLive.has(it.id)) live++
     }
     const visiblePeople = people.people.filter((p) => !p.hidden).length
     return {
       all: shownItems.length,
+      photos: shownItems.length - videos,
       videos,
+      live,
       favorites: favs,
       folders: folders.length,
       people: visiblePeople,
       places: places.places.length,
       trips: trips.length,
     }
-  }, [shownItems, favorites, folders, people.people, places.places, trips])
+  }, [shownItems, favorites, folders, people.people, places.places, trips, libraryLive])
 
   const shownPlaces = useMemo(() => {
     const q = fold(query.trim())
@@ -658,6 +657,42 @@ export default function App() {
     if (res.failed) toast(`Removed ${formatCount(res.removed)}, but ${formatCount(res.failed)} failed: ${res.errors?.[0] ?? ''}`, { error: true })
     sidecarNotes(res)
   }
+  // ---------- undo (Ctrl+Z) ----------
+  const undoSteps = useUndoSteps()
+  const lastStep = latestStep(undoSteps)
+  const runUndo = async (step?: UndoStep) => {
+    const res = await undo(step)
+    if (res) toast(res.message, { error: res.error })
+  }
+  /** Options for a toast with an Undo button for `step` (none when nothing was recorded). */
+  const undoAction = (step: UndoStep | null | undefined) => (step && !step.empty ? { action: { label: 'Undo', run: () => void runUndo(step) } } : {})
+  const addStep = (label: string, run: UndoStep['undo'], more: Pick<UndoStep, 'area' | 'empty'> = {}) => {
+    const step: UndoStep = { label, undo: run, ...more }
+    pushUndo(step)
+    return step
+  }
+  /**
+   * People: the main process takes back its latest step(s) (`times`: one per call the action made).
+   * `empty`: the action changed nothing (no Undo button then).
+   */
+  const peopleStep = (label: string, times = 1, empty = false) =>
+    addStep(
+      label,
+      async () => {
+        let ok = false
+        for (let i = 0; i < times; i++) ok = (await api.undoPeople()) || ok
+        if (!ok) throw new Error('it was too long ago')
+      },
+      { area: 'people', empty },
+    )
+  const albumStep = (label: string, empty = false) =>
+    addStep(
+      label,
+      async () => {
+        if (!(await api.undoAlbums())) throw new Error('it was too long ago')
+      },
+      { area: 'albums', empty },
+    )
   /** " This includes 2 Live Photo clips…" when the photos' motion clips go along. */
   const clipsNote = (ids: string[], all: string[]) => {
     const n = all.length - ids.length
@@ -683,57 +718,40 @@ export default function App() {
         </div>
       ),
       onConfirm: async () => {
-        const res = await api.moveItems(ids)
+        const text = (r: { removed: number; destination?: string }) => `Moved ${formatCount(r.removed)} file${r.removed === 1 ? '' : 's'} to “${baseName(r.destination ?? dest)}”`
+        const { res, step } = await withFileUndo(text, () => api.moveItems(ids))
         afterRemove(ids, res)
-        if (res.entryId) setSessionMoves((m) => [...m, res.entryId!])
-        else setSessionMoves([])
-        if (res.removed)
-          toast(`Moved ${formatCount(res.removed)} file${res.removed === 1 ? '' : 's'} to “${baseName(res.destination ?? dest)}”`, {
-            action: { label: 'Undo', run: () => undoMove(res.entryId!) },
-          })
+        if (res.removed) toast(text(res), undoAction(step))
       },
     })
   }
-  const recycle = (selected: string[]) => {
+  /**
+   * Recycle Bin for files picked in Clean up. `group`: a duplicate group's own button (its card, or
+   * Compare): it asks unless the user ticked "Don't ask again" (Settings → Clean up turns it back on).
+   */
+  const recycle = (selected: string[], { group = false } = {}) => {
     if (!selected.length) return
     const ids = withClips(selected)
     const { n, bytes } = removeLabel(ids)
+    const go = async () => {
+      const text = (r: { removed: number }) => `Moved ${formatCount(r.removed)} file${r.removed === 1 ? '' : 's'} to the ${BIN}`
+      const { res, step } = await withFileUndo(text, () => api.trash(ids))
+      afterRemove(ids, res)
+      if (res.removed) toast(text(res), undoAction(step))
+    }
+    const warning = allCopiesWarning(ids)
+    if (group && settings?.askGroupRecycle === false && !warning) return void go()
     setConfirm({
       title: `Move ${formatCount(n)} file${n === 1 ? '' : 's'} to the ${BIN}?`,
       message: `This frees ${formatBytes(bytes)}. You can restore them from the ${BIN} if you need them back.${clipsNote(selected, ids)}`,
       confirmLabel: `Move to ${BIN}`,
       danger: true,
-      warning: allCopiesWarning(ids),
-      onConfirm: async () => {
-        setSessionMoves([]) // Ctrl+Z is for the latest change to files only
-        const res = await api.trash(ids)
-        afterRemove(ids, res)
-        if (res.removed) toast(`Moved ${formatCount(res.removed)} file${res.removed === 1 ? '' : 's'} to the ${BIN}`)
-      },
+      warning,
+      ...(group && { dontAskAgain: () => api.setSettings({ askGroupRecycle: false }) }),
+      onConfirm: go,
     })
   }
-  // Ctrl+Z (and Clean up's Undo) put back the last move only while it's still the latest change to
-  // files: anything newer in History (Recycle Bin, Organize, an import, an edit…) or Clear history ends
-  // it. Moves undone this way don't count, so Ctrl+Z again undoes the move before.
-  const undoneMoves = useRef(new Set<string>())
-  const undoableMove = useMemo(() => {
-    const last = sessionMoves[sessionMoves.length - 1]
-    if (!last) return null
-    let newest: HistoryEntry | null = null
-    for (const e of history) if (!undoneMoves.current.has(e.id) && (!newest || e.time > newest.time)) newest = e
-    return newest?.id === last ? last : null
-  }, [sessionMoves, history])
-  const undoMove = async (id: string) => {
-    undoneMoves.current.add(id)
-    setSessionMoves((m) => m.filter((x) => x !== id))
-    const res = await api.restoreHistory(id)
-    toast(
-      res.restored
-        ? `Restored ${formatCount(res.restored)} file${res.restored === 1 ? '' : 's'} to ${res.restored === res.total ? 'their original folders' : 'where they were'}`
-        : 'Nothing could be restored: the files were moved or renamed since, or their original spot is taken.',
-      { error: !res.restored },
-    )
-  }
+  const recycleGroup = (selected: string[]) => recycle(selected, { group: true })
   const protectFolder = (dir: string) => {
     if (!settings || settings.protectedFolders.some((f) => isUnder(dir, f))) return toast('This folder is already protected')
     api.setSettings({ protectedFolders: [...settings.protectedFolders, dir] })
@@ -777,9 +795,14 @@ export default function App() {
     setConfirm({
       ...c,
       onConfirm: async () => {
-        await api.privateAdd(withClips(ids))
+        const all = withClips(ids)
+        await api.privateAdd(all)
         setSelection(new Set())
-        toast(`Moved ${plural(ids.length, 'item')} to Private`)
+        const text = `Moved ${plural(ids.length, 'item')} to Private`
+        const step = addStep(text, async () => {
+          if (!(await api.privateUndoAdd(all))) throw new Error('it was too long ago (remove them from Private on the Private page)')
+        })
+        toast(text, undoAction(step))
       },
     })
   }
@@ -788,9 +811,16 @@ export default function App() {
     setConfirm({
       ...privateConfirm('remove', ids.length),
       onConfirm: async () => {
-        await api.privateRemove(withClips(ids))
+        const all = withClips(ids)
+        const text = `${plural(ids.length, 'item')} back in your library`
+        // (files in the hidden folder move out: History has those, so undo moves them back first)
+        const { restore } = await fileChanges(() => api.privateRemove(all))
         setSelection(new Set())
-        toast(`${plural(ids.length, 'item')} back in your library`)
+        const step = addStep(text, async () => {
+          if (restore) await restore(text)
+          await api.privateAdd(all)
+        })
+        toast(text, undoAction(step))
       },
     })
   }
@@ -799,10 +829,9 @@ export default function App() {
     setConfirm({
       ...privateConfirm('hide', ids.length),
       onConfirm: async () => {
-        setSessionMoves([])
-        const res = await api.privateHide(withClips(ids))
+        const { res, step } = await withFileUndo((r) => `Hid ${plural(r.done, 'item')} in File Explorer`, () => api.privateHide(withClips(ids)))
         setSelection(new Set())
-        toast(res.errors.length ? `Hid ${formatCount(res.done)}, ${formatCount(res.errors.length)} failed: ${res.errors[0]}` : `Hid ${plural(res.done, 'item')} in File Explorer. Undo it from History if needed.`, { error: res.errors.length > 0 })
+        toast(res.errors.length ? `Hid ${formatCount(res.done)}, ${formatCount(res.errors.length)} failed: ${res.errors[0]}` : `Hid ${plural(res.done, 'item')} in File Explorer`, { error: res.errors.length > 0, ...undoAction(step) })
       },
     })
   }
@@ -864,7 +893,6 @@ export default function App() {
       if (importStartingRef.current) return
       importStartingRef.current = true
       setImportStarting(true)
-      setSessionMoves([])
       try {
         const res = await api.importRun(importScan.scanId, importDeleteAfter)
         setImportResult(res)
@@ -945,12 +973,12 @@ export default function App() {
     const c = organizeConfirm(action, organizePlan, organizeOptions, { turnCount, originalsDir: settings.originalsDir })
     const go = async () => {
       setOrganizeBusy(true)
-      setSessionMoves([])
       try {
-        const res = await run()
+        const { res, step } = await withFileUndo((r) => organizeDoneText(action, r.done, r.errors, settings.organizeCopy).text, run)
         const t = organizeDoneText(action, res.done, res.errors, settings.organizeCopy)
+        // (copies made into dated folders aren't undone: the originals were never touched)
         const undoable = res.done > 0 && !(action === 'folders' && settings.organizeCopy)
-        toast(t.text, { error: t.error, action: undoable ? { label: 'History', run: () => navigate({ kind: 'history' }) } : undefined })
+        toast(t.text, { error: t.error, ...(undoable && undoAction(step)) })
       } catch (err) {
         toast(`Something went wrong: ${String((err as Error)?.message ?? err)}`, { error: true })
       } finally {
@@ -1117,12 +1145,14 @@ export default function App() {
     const added = await api.addToAlbum(albumId, ids)
     setSelection(new Set())
     const name = album?.name ?? 'the album'
-    toast(added ? `Added ${plural(added, 'item')} to ${name}` : `Already in ${name}`)
+    const text = `Added ${plural(added, 'item')} to ${name}`
+    toast(added ? text : `Already in ${name}`, undoAction(albumStep(text, !added)))
   }
   const createAlbumWith = async (name: string, ids: string[]) => {
     const id = await api.createAlbum(name, ids)
     setSelection(new Set())
-    toast(ids.length ? `Created “${name || 'Untitled album'}” with ${plural(ids.length, 'item')}` : `Created “${name}”`)
+    const text = ids.length ? `Created “${name || 'Untitled album'}” with ${plural(ids.length, 'item')}` : `Created “${name}”`
+    toast(text, undoAction(albumStep(text)))
     return id
   }
   const deleteAlbum = (albumId: string) => {
@@ -1136,7 +1166,7 @@ export default function App() {
       onConfirm: () => {
         api.deleteAlbum(albumId)
         setView({ kind: 'albums' })
-        toast('Album deleted')
+        toast('Album deleted', undoAction(albumStep(`Deleted “${album.name}”`)))
       },
     })
   }
@@ -1153,7 +1183,8 @@ export default function App() {
   const mergePerson = (from: Person, into: Person) => {
     api.mergePeople([from.id], into.id)
     setView({ kind: 'person', id: into.id })
-    toast(into.name ? `Merged into ${into.name}` : 'Merged')
+    const text = into.name ? `Merged into ${into.name}` : 'Merged'
+    toast(text, undoAction(peopleStep(text)))
   }
 
   /** Merge several groups; the named (or biggest) one survives. */
@@ -1175,7 +1206,8 @@ export default function App() {
           into.id,
         )
         setPeopleSelection(new Set())
-        toast(`Merged ${list.length} groups${into.name ? ` into ${into.name}` : ''}`)
+        const text = `Merged ${list.length} groups${into.name ? ` into ${into.name}` : ''}`
+        toast(text, undoAction(peopleStep(text)))
       },
     })
   }
@@ -1193,11 +1225,12 @@ export default function App() {
       onPick: async (target) => {
         setPicker(null)
         const id = await api.assignFaces(faceIds, 'id' in target ? target.id : { name: target.name })
+        const step = peopleStep(`Moved ${plural(faceIds.length, 'face')}`, 1, !id)
         setSelection(new Set())
         setFaceSelection(new Set())
         if (!id) return toast("Couldn't move those faces")
         const to = 'id' in target ? target.name || 'that person' : target.name || 'a new person'
-        toast(`Moved ${plural(faceIds.length, 'face')} to ${to}`)
+        toast(`Moved ${plural(faceIds.length, 'face')} to ${to}`, undoAction(step))
       },
     })
   }
@@ -1207,7 +1240,8 @@ export default function App() {
     api.rejectFaces(faceIds)
     setSelection(new Set())
     setFaceSelection(new Set())
-    toast(`Removed ${plural(faceIds.length, 'face')} from ${nameOf(from)}`)
+    const text = `Removed ${plural(faceIds.length, 'face')} from ${nameOf(from)}`
+    toast(text, undoAction(peopleStep(text)))
   }
 
   /** The current person's faces inside the given photos. */
@@ -1229,7 +1263,7 @@ export default function App() {
       onConfirm: () => {
         api.removePerson(person.id)
         setView({ kind: 'people' })
-        toast('Person removed')
+        toast('Person removed', undoAction(peopleStep(`Removed ${person.name ? `“${person.name}”` : 'a group'}`)))
       },
     })
 
@@ -1244,7 +1278,9 @@ export default function App() {
       })
       return
     }
+    if (name === person.name) return
     api.renamePerson(person.id, name)
+    peopleStep(person.name ? `Renamed “${person.name}”` : `Named someone “${name}”`)
   }
 
   const toggleFace = (face: FaceRef, index: number, e: { shiftKey: boolean }) => {
@@ -1286,8 +1322,10 @@ export default function App() {
     })
   }
 
-  const toggleFavorite = (ids: string[], value?: boolean) => {
+  /** `record`: a Ctrl+Z step (undoing it sets back only the items that changed). */
+  const toggleFavorite = (ids: string[], value?: boolean, record = true) => {
     const v = value ?? !ids.every((id) => favorites.has(id))
+    const changed = ids.filter((id) => favorites.has(id) !== v)
     const idSet = new Set(ids)
     setSettings((s) =>
       s && {
@@ -1296,7 +1334,48 @@ export default function App() {
       },
     )
     api.setFavorite(ids, v)
+    if (record && changed.length)
+      addStep(`${v ? 'Added' : 'Removed'} ${plural(changed.length, 'item')} ${v ? 'to' : 'from'} favorites`, () => void toggleFavorite(changed, !v, false))
     return v
+  }
+
+  /** Ratings: undoing gives each item back the rating it had. */
+  const rate = (ids: string[], rating: number) => {
+    const before = new Map<number, string[]>()
+    for (const id of ids) {
+      const it = byId.get(id)
+      if (!it) continue
+      const r = marksOf(it, tagsData).rating
+      if (r !== rating) before.set(r, [...(before.get(r) ?? []), id])
+    }
+    api.rateItems(ids, rating)
+    if (!before.size) return
+    const n = plural(ids.length, 'item')
+    addStep(rating ? `Rated ${n} ${rating} star${rating === 1 ? '' : 's'}` : `Cleared the rating of ${n}`, async () => {
+      for (const [r, list] of before) await api.rateItems(list, r)
+    })
+  }
+
+  /** Tags: undoing gives each item back the tags it had. */
+  const editTags = (ids: string[], change: { add?: string[]; remove?: string[] }) => {
+    const before = new Map<string, { tags: string[]; ids: string[] }>()
+    for (const id of ids) {
+      const it = byId.get(id)
+      if (!it) continue
+      const tags = marksOf(it, tagsData).tags
+      const k = JSON.stringify(tags)
+      const g = before.get(k)
+      if (g) g.ids.push(id)
+      else before.set(k, { tags, ids: [id] })
+    }
+    api.editTags(ids, change)
+    const added = change.add ?? []
+    const label = added.length
+      ? `Added the tag${added.length === 1 ? '' : 's'} ${added.map((t) => `“${t}”`).join(', ')}`
+      : `Removed the tag${(change.remove?.length ?? 0) === 1 ? '' : 's'} ${(change.remove ?? []).map((t) => `“${t}”`).join(', ')}`
+    addStep(label, async () => {
+      for (const g of before.values()) await api.editTags(g.ids, { set: g.tags })
+    })
   }
 
   const requestDelete = (ids: string[], label?: string) => {
@@ -1312,10 +1391,10 @@ export default function App() {
       confirmLabel: `Move to ${BIN}`,
       danger: true,
       onConfirm: async () => {
-        setSessionMoves([]) // Ctrl+Z is for the latest change to files only
         // a Live Photo's clip goes with it (it isn't shown on its own)
         const all = withClips(ids)
-        const res = await api.trash(all)
+        const text = `Moved ${plural(ids.length, 'item')} to the ${BIN}`
+        const { res, step } = await withFileUndo(text, () => api.trash(all))
         setSelection((prev) => {
           const next = new Set(prev)
           for (const id of all) next.delete(id)
@@ -1323,11 +1402,7 @@ export default function App() {
         })
         const gone = new Set(all)
         setMarks((prev) => (all.some((id) => prev.has(id)) ? new Set([...prev].filter((id) => !gone.has(id))) : prev))
-        toast(
-          res.failed
-            ? `Moved ${res.removed}, couldn't move ${res.failed}`
-            : `Moved ${plural(ids.length, 'item')} to the ${BIN}`,
-        )
+        toast(res.failed ? `Moved ${res.removed}, couldn't move ${res.failed}` : text, { error: !res.removed, ...undoAction(step) })
         sidecarNotes(res)
       },
     })
@@ -1466,18 +1541,23 @@ export default function App() {
 
   // ---------- keyboard ----------
   const onKey = useEvent((e: KeyboardEvent) => {
-    if (viewer || confirm || picker || reviewing || albumPicker || newAlbum || compare || tagging || locating || exporting || movie || pinDialog || savingSearch !== null) return
+    // Ctrl+Z: also in the viewer and Compare; not while typing, in a dialog, or in an editor (they
+    // have their own, and take the key first)
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') {
+      const typingNow = !!(e.target as HTMLElement)?.closest?.('input, textarea, [contenteditable="true"]')
+      if (typingNow || e.defaultPrevented || confirm || picker || albumPicker || newAlbum || tagging || locating || exporting || movie || pinDialog || savingSearch !== null) return
+      e.preventDefault()
+      if (!lastStep) toast('Nothing to undo')
+      else void runUndo()
+      return
+    }
+    if (viewer || confirm || picker || albumPicker || newAlbum || compare || tagging || locating || exporting || movie || pinDialog || savingSearch !== null) return
     const key = e.key.toLowerCase()
     const typing = !!(e.target as HTMLElement)?.closest?.('input, textarea')
     if ((e.ctrlKey || e.metaKey) && key === 'f') {
       e.preventDefault()
       searchRef.current?.focus()
       searchRef.current?.select()
-      return
-    }
-    if ((e.ctrlKey || e.metaKey) && key === 'z' && undoableMove && !typing) {
-      e.preventDefault()
-      undoMove(undoableMove)
       return
     }
     if ((e.ctrlKey || e.metaKey) && key === 'r' && view.kind === 'cleanup') {
@@ -1511,7 +1591,7 @@ export default function App() {
       else if (peopleSelection.size) setPeopleSelection(new Set())
       else if (query) setQuery('')
     } else if (/^[0-5]$/.test(e.key) && selection.size && isGrid && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      api.rateItems([...selection], Number(e.key))
+      rate([...selection], Number(e.key))
     } else if (key === 't' && selection.size && isGrid && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault()
       setTagging([...selection])
@@ -1617,7 +1697,8 @@ export default function App() {
           icon: currentPerson.hidden ? <Eye size={15} /> : <EyeOff size={15} />,
           onClick: () => {
             api.hidePerson(currentPerson.id, !currentPerson.hidden)
-            toast(currentPerson.hidden ? 'Shown in People again' : 'Hidden from People')
+            const text = currentPerson.hidden ? 'Shown in People again' : 'Hidden from People'
+            toast(text, undoAction(peopleStep(text)))
           },
         },
         { label: 'Remove person…', icon: <UserX size={15} />, danger: true, onClick: () => removePersonGroup(currentPerson) },
@@ -1669,7 +1750,7 @@ export default function App() {
                 onClick={() => {
                   api.setPersonCover(currentPerson.id, selectedFaces[0])
                   setSelection(new Set())
-                  toast('Cover photo updated')
+                  toast('Cover photo updated', undoAction(peopleStep('Changed the cover photo')))
                 }}
               >
                 <ImageUp size={15} /> Use as cover
@@ -1685,7 +1766,7 @@ export default function App() {
                 onClick={() => {
                   api.setAlbumCover(currentAlbum.id, [...selection][0])
                   setSelection(new Set())
-                  toast('Album cover updated')
+                  toast('Album cover updated', undoAction(albumStep(`Changed the cover of ${currentAlbum.name}`)))
                 }}
               >
                 <ImageUp size={15} /> Use as cover
@@ -1699,7 +1780,8 @@ export default function App() {
                 const ids = [...selection]
                 api.removeFromAlbum(currentAlbum.id, ids)
                 setSelection(new Set())
-                toast(`Removed ${plural(ids.length, 'item')} from ${currentAlbum.name}`)
+                const text = `Removed ${plural(ids.length, 'item')} from ${currentAlbum.name}`
+                toast(text, undoAction(albumStep(text)))
               }}
             >
               <ImageMinus size={15} /> Remove from album
@@ -1710,7 +1792,7 @@ export default function App() {
         <RatingStars
           value={selectionRating ?? 0}
           mixed={selectionRating === null}
-          onChange={(n) => api.rateItems([...selection], n)}
+          onChange={(n) => rate([...selection], n)}
           label="Rating of the selected items"
         />
         <button className="btn ghost" title="Add or remove tags (T)" onClick={() => setTagging([...selection])}>
@@ -1763,7 +1845,7 @@ export default function App() {
             onClick={() => {
               api.setPersonCover(currentPerson.id, ids[0])
               setFaceSelection(new Set())
-              toast('Cover photo updated')
+              toast('Cover photo updated', undoAction(peopleStep('Changed the cover photo')))
             }}
           >
             <ImageUp size={15} /> Use as cover
@@ -1788,7 +1870,8 @@ export default function App() {
           onClick={() => {
             api.hidePeople(ids, !allHidden)
             setPeopleSelection(new Set())
-            toast(allHidden ? `Showing ${plural(ids.length, 'person')} again` : `Hid ${plural(ids.length, 'person')}`)
+            const text = allHidden ? `Showing ${plural(ids.length, 'person')} again` : `Hid ${plural(ids.length, 'person')}`
+            toast(text, undoAction(peopleStep(text)))
           }}
         >
           {allHidden ? <Eye size={15} /> : <EyeOff size={15} />} {allHidden ? 'Show' : 'Hide'}
@@ -1849,7 +1932,11 @@ export default function App() {
           {currentPerson ? (
             <PersonName key={currentPerson.id} person={currentPerson} onRename={(name) => renamePerson(currentPerson, name)} />
           ) : currentAlbum ? (
-            <AlbumTitle key={currentAlbum.id} album={currentAlbum} onRename={(name) => api.renameAlbum(currentAlbum.id, name)} />
+            <AlbumTitle key={currentAlbum.id} album={currentAlbum} onRename={(name) => {
+                if (name.trim() === currentAlbum.name) return
+                api.renameAlbum(currentAlbum.id, name)
+                albumStep(`Renamed “${currentAlbum.name}”`)
+              }} />
           ) : (
             <h1>{title}</h1>
           )}
@@ -1888,11 +1975,6 @@ export default function App() {
             </button>
             {personMenu}
           </>
-        )}
-        {view.kind === 'people' && suggestions.length > 0 && (
-          <button className="btn ghost" onClick={() => setReviewing(suggestions)}>
-            <Sparkles size={15} /> Review suggestions
-          </button>
         )}
         {view.kind === 'folder' && (
           <button className="btn ghost" onClick={() => api.revealFolder(view.dir)}>
@@ -1935,7 +2017,7 @@ export default function App() {
           />
         )}
         {isGrid && <RatingFilter value={ratingFilter} onChange={setRatingFilter} tags={viewTags} />}
-        {isGrid && view.kind !== 'videos' && view.kind !== 'person' && (
+        {isGrid && !OWN_TYPE_VIEWS.has(view.kind) && (
           <div className="segmented small">
             {(['all', 'image', 'video'] as TypeFilter[]).map((t) => (
               <button key={t} className={typeFilter === t ? 'active' : ''} onClick={() => setTypeFilter(t)}>
@@ -1946,7 +2028,7 @@ export default function App() {
         )}
         {isGrid && !(currentPerson && personTab === 'faces') && (
           <>
-            <button className="btn ghost" onClick={() => setSortAsc((s) => !s)} title="Change sort order">
+            <button className="btn ghost" onClick={() => setSortAsc((s) => !s)} title={`Sorted by ${dateField === "added" ? "when they were added" : "the date they were taken"}, ${sortAsc ? "oldest" : "newest"} first. Click for ${sortAsc ? "newest" : "oldest"} first.`}>
               <ArrowDownUp size={15} /> {sortAsc ? 'Oldest first' : 'Newest first'}
             </button>
             <label className="zoom-slider" title="Thumbnail size (Ctrl + wheel)">
@@ -2028,14 +2110,12 @@ export default function App() {
         showHidden={showHiddenPeople}
         smallCount={smallPeopleCount}
         showSmall={showSmallPeople}
-        suggestionCount={suggestions.length}
         selection={peopleSelection}
         onToggleHidden={() => setShowHiddenPeople((s) => !s)}
         onToggleSmall={() => setShowSmallPeople((s) => !s)}
         onToggleSelect={togglePersonSelect}
         onOpen={openPerson}
         onEnable={() => api.setSettings({ faceRecognition: true })}
-        onReview={() => setReviewing(suggestions)}
       />
     )
   } else if (currentPerson && personTab === 'faces') {
@@ -2123,12 +2203,13 @@ export default function App() {
         settings={settings}
         isProtected={isProtected}
         query={query}
-        canUndo={!!undoableMove}
+        undoLabel={lastStep?.label ?? null}
         onCompare={(groups, index, focusId) => setCompare({ mode: 'groups', groups, index, focus: focusId })}
         onPreview={(list, index) => setCompare({ mode: 'items', items: list, index })}
         onMove={moveToFolder}
         onRecycle={recycle}
-        onUndo={() => undoableMove && undoMove(undoableMove)}
+        onRecycleGroup={recycleGroup}
+        onUndo={() => void runUndo()}
         onProtectFolder={protectFolder}
         onExport={exportReport}
         onToast={toast}
@@ -2136,7 +2217,8 @@ export default function App() {
           api.dismissDuplicates(ids)
           // keeping all of them: none stays selected for removal (in Large files, Organize…)
           setMarks((prev) => (ids.some((id) => prev.has(id)) ? new Set([...prev].filter((id) => !ids.includes(id))) : prev))
-          toast("Got it — they won't be suggested again")
+          const step = addStep(`Said ${plural(ids.length, 'item')} aren't duplicates`, () => api.undismissDuplicates(ids))
+          toast("Got it — they won't be suggested again", undoAction(step))
         }}
       />
     )
@@ -2196,7 +2278,6 @@ export default function App() {
                 : { files: importResult?.imported ?? 0, removedOriginals: importResult?.removed, source: importScan?.source.name },
             ),
             onConfirm: async () => {
-              setSessionMoves([])
               const res = await api.restoreHistory(entryId)
               toast(importUndoneText(res), { error: !res.restored && !res.kept })
               setImportResult(null)
@@ -2246,8 +2327,6 @@ export default function App() {
         onRestore={async (e) => {
           const restore = async () => {
             const res = await api.restoreHistory(e.id)
-            // putting something back is a change too: Ctrl+Z no longer undoes an earlier move
-            setSessionMoves([])
             if (e.kind === 'imported') return toast(importUndoneText(res), { error: !res.restored && !res.kept })
             // (an edit's original that came back under a new name: a different photo has the old one now)
             const renamed = res.renamed
@@ -2274,10 +2353,7 @@ export default function App() {
             message: 'This only forgets the list. No files are touched, but moved files can no longer be put back from here.',
             confirmLabel: 'Clear history',
             danger: true,
-            onConfirm: () => {
-              setSessionMoves([])
-              api.clearHistory()
-            },
+            onConfirm: () => api.clearHistory(),
           })
         }
       />
@@ -2316,8 +2392,14 @@ export default function App() {
         title="No favorites yet"
         text="Tap the heart on any photo or video — or press F in the viewer — to keep it here."
       />
-    ) : view.kind === 'videos' || typeFilter === 'video' ? (
+    ) : view.kind === 'videos' || (typeFilter === 'video' && !OWN_TYPE_VIEWS.has(view.kind)) ? (
       <EmptyState icon={<Film size={40} strokeWidth={1.5} />} title="No videos" text="Videos in your library folders will show up here." />
+    ) : view.kind === 'live' ? (
+      <EmptyState
+        icon={<Target size={40} strokeWidth={1.5} />}
+        title="No Live Photos"
+        text="Live Photos from an iPhone (a photo and its short clip, side by side in a folder) show up here."
+      />
     ) : (
       <EmptyState icon={<Images size={40} strokeWidth={1.5} />} title="Nothing here" text="No items to show." />
     )
@@ -2422,15 +2504,18 @@ export default function App() {
             byId={byId}
             onMerge={(ids) => {
               api.mergePeople(ids, currentPerson.id)
-              toast(`Merged ${plural(ids.length, 'group')} into ${nameOf(currentPerson)}`)
+              const text = `Merged ${plural(ids.length, 'group')} into ${nameOf(currentPerson)}`
+              toast(text, undoAction(peopleStep(text)))
             }}
             onNotSame={(ids) => {
               for (const id of ids) api.markNotSame(currentPerson.id, id)
-              toast(`Won't suggest ${ids.length === 1 ? 'that group' : 'those groups'} again`)
+              const step = peopleStep(`Marked ${plural(ids.length, 'group')} as not ${nameOf(currentPerson)}`, ids.length)
+              toast(`Won't suggest ${ids.length === 1 ? 'that group' : 'those groups'} again`, undoAction(step))
             }}
+            undo={lastStep?.area === 'people' ? { label: lastStep.label, run: () => void runUndo(lastStep) } : undefined}
           />
         )}
-        {view.kind === 'photos' && !query && selection.size === 0 && memories.length > 0 && hiddenMemoriesDay !== today && items.length > 0 && (
+        {(view.kind === 'photos' || view.kind === 'all') && !query && selection.size === 0 && memories.length > 0 && hiddenMemoriesDay !== today && items.length > 0 && (
           <MemoryStrip
             memories={memories}
             byId={byId}
@@ -2493,8 +2578,13 @@ export default function App() {
           placeOf={(itemId) => placeById.get(places.byItem[itemId])}
           liveOf={(itemId) => live.get(itemId)}
           onEdited={(original, id, name) => {
-            setSessionMoves([])
-            toast(`Saved as “${name}” next to the original`)
+            // undoing a saved copy sends the copy to the Recycle Bin (the original was never changed)
+            const step = addStep(`Saved “${name}”`, async () => {
+              const res = await api.trash([id])
+              if (!res.removed) throw new Error(res.errors?.[0] ?? 'the copy is gone')
+              return `Moved “${name}” to the ${BIN}`
+            })
+            toast(`Saved as “${name}” next to the original`, undoAction(step))
             setPendingEdit({ from: original.id, id })
           }}
           onOpenPlace={(id) => {
@@ -2507,9 +2597,9 @@ export default function App() {
           textVersion={ocrVersion}
           query={query}
           tagSuggestions={allTags}
-          onRate={(item, n) => api.rateItems([item.id], n)}
-          onAddTags={(item, list) => api.editTags([item.id], { add: list })}
-          onRemoveTag={(item, tag) => api.editTags([item.id], { remove: [tag] })}
+          onRate={(item, n) => rate([item.id], n)}
+          onAddTags={(item, list) => editTags([item.id], { add: list })}
+          onRemoveTag={(item, tag) => editTags([item.id], { remove: [tag] })}
         />
       )}
       {pinDialog && <PinDialog bridge={privateBridge} hasPin={!!privStatus?.hasPin} onClose={() => setPinDialog(false)} onDone={() => toast('PIN saved')} />}
@@ -2552,8 +2642,8 @@ export default function App() {
               autoFocus
               values={taggingValues}
               suggestions={allTags}
-              onAdd={(list) => api.editTags(tagging, { add: list })}
-              onRemove={(tag) => api.editTags(tagging, { remove: [tag] })}
+              onAdd={(list) => editTags(tagging, { add: list })}
+              onRemove={(tag) => editTags(tagging, { remove: [tag] })}
             />
             <div className="modal-actions">
               <button className="btn primary" onClick={() => setTagging(null)}>
@@ -2572,10 +2662,10 @@ export default function App() {
           describe={api.describePlace}
           onSave={async (assignments, label) => {
             setLocating(null)
-            setSessionMoves([])
-            const res = await api.setLocations(assignments, label)
+            const text = (r: { done: number }) => `Location set${label ? ` to ${label}` : ''} for ${plural(r.done, 'item')}`
+            const { res, step } = await withFileUndo(text, () => api.setLocations(assignments, label))
             if (res.errors.length) toast(`Couldn't set the place of ${plural(res.errors.length, 'file')}: ${res.errors[0]}`, { error: true })
-            else if (res.done) toast(`Location set${label ? ` to ${label}` : ''} for ${plural(res.done, 'item')}. Undo it from History if needed.`)
+            else if (res.done) toast(text(res), undoAction(step))
           }}
           onCancel={() => setLocating(null)}
           onOpenUrl={api.openUrl}
@@ -2612,7 +2702,7 @@ export default function App() {
             if (!id) return
             setQuery('')
             navigate({ kind: 'album', id })
-            toast(`Saved “${name}”: new photos matching “${q}” will show up in it`)
+            toast(`Saved “${name}”: new photos matching “${q}” will show up in it`, undoAction(albumStep(`Saved the smart album “${name}”`)))
           }}
         />
       )}
@@ -2641,17 +2731,6 @@ export default function App() {
           onClose={() => setPicker(null)}
         />
       )}
-      {reviewing && (
-        <SuggestionsReview
-          pairs={reviewing}
-          peopleById={peopleById}
-          facesByPerson={facesByPerson}
-          byId={byId}
-          onSame={(from, into) => api.mergePeople([from.id], into.id)}
-          onDifferent={(a, b) => api.markNotSame(a.id, b.id)}
-          onClose={() => setReviewing(null)}
-        />
-      )}
       {confirm && <ConfirmDialog options={confirm} onClose={() => setConfirm(null)} />}
       {dragOver && <DropOverlay />}
       {compare && settings && (
@@ -2668,7 +2747,7 @@ export default function App() {
           paused={!!viewer || !!confirm}
           onClose={() => setCompare(null)}
           onFullScreen={(ids, index) => setViewer({ ids, index })}
-          onRecycle={recycle}
+          onRecycle={recycleGroup}
           onToast={toast}
         />
       )}

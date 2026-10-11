@@ -1,5 +1,5 @@
 import { FolderPlus, TriangleAlert } from 'lucide-react'
-import { Component, useEffect, useRef, type ReactNode } from 'react'
+import { Component, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Toast } from '../hooks'
 
 export interface ConfirmOptions {
@@ -11,6 +11,8 @@ export interface ConfirmOptions {
   warning?: string
   /** Extra content between the message and the buttons (e.g. a destination folder). */
   extra?: ReactNode
+  /** Shows a "Don't ask again" box; called (before onConfirm) when confirming with it ticked. */
+  dontAskAgain?(): void
   onConfirm(): void
 }
 
@@ -18,8 +20,15 @@ export function ConfirmDialog({ options, onClose }: { options: ConfirmOptions; o
   const confirmRef = useRef<HTMLButtonElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
   // The latest props, so the key listener isn't re-installed (and focus isn't moved) on every App render.
-  const latest = useRef({ options, onClose })
-  latest.current = { options, onClose }
+  const [dontAsk, setDontAsk] = useState(false)
+  const latest = useRef({ options, onClose, dontAsk })
+  latest.current = { options, onClose, dontAsk }
+  const confirm = () => {
+    const { options, onClose, dontAsk } = latest.current
+    if (dontAsk) options.dontAskAgain?.()
+    options.onConfirm()
+    onClose()
+  }
 
   // Focus the confirm button once, when the dialog opens.
   useEffect(() => {
@@ -30,7 +39,7 @@ export function ConfirmDialog({ options, onClose }: { options: ConfirmOptions; o
     // Capture phase so the viewer / grid shortcuts don't also react.
     const onKey = (e: KeyboardEvent) => {
       e.stopPropagation()
-      const { options, onClose } = latest.current
+      const { onClose } = latest.current
       const target = e.target as HTMLElement | null
       const inside = !!target && !!dialogRef.current?.contains(target)
       if (e.key === 'Escape') onClose()
@@ -40,8 +49,7 @@ export function ConfirmDialog({ options, onClose }: { options: ConfirmOptions; o
         // A focused button in the dialog (Cancel, "Change…") does its own thing
         if (inside && target?.closest('button')) return
         e.preventDefault()
-        options.onConfirm()
-        onClose()
+        confirm()
       } else if (e.key === ' ' && !inside) e.preventDefault() // never a button behind the dialog
     }
     window.addEventListener('keydown', onKey, true)
@@ -55,6 +63,12 @@ export function ConfirmDialog({ options, onClose }: { options: ConfirmOptions; o
         <p>{options.message}</p>
         {options.extra}
         {options.warning && <div className="modal-warning">{options.warning}</div>}
+        {options.dontAskAgain && (
+          <label className="modal-check">
+            <input type="checkbox" checked={dontAsk} onChange={(e) => setDontAsk(e.target.checked)} />
+            Don't ask again
+          </label>
+        )}
         <div className="modal-actions">
           <button className="btn ghost" onClick={onClose}>
             Cancel
@@ -62,10 +76,7 @@ export function ConfirmDialog({ options, onClose }: { options: ConfirmOptions; o
           <button
             ref={confirmRef}
             className={`btn ${options.danger ? 'danger' : 'primary'}`}
-            onClick={() => {
-              options.onConfirm()
-              onClose()
-            }}
+            onClick={confirm}
           >
             {options.confirmLabel}
           </button>

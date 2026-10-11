@@ -1,4 +1,4 @@
-import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, Import, LoaderCircle, LockKeyhole, Map as MapIcon, MapPin, Plus, RefreshCw, Settings, Film, FolderTree, Sparkles, Users } from 'lucide-react'
+import { Album as AlbumIcon, Clock, CopyX, Folder, Heart, History, Images, Import, LayoutGrid, LoaderCircle, LockKeyhole, Map as MapIcon, MapPin, Plus, RefreshCw, Settings, Film, FolderTree, Sparkles, Target, Users } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { formatBytes, formatCount } from '../lib/format'
@@ -9,7 +9,7 @@ import { CoverImage } from './CoverImage'
 interface Props {
   view: View
   onNavigate(view: View): void
-  counts: { all: number; videos: number; favorites: number; folders: number; people: number; places: number; trips: number }
+  counts: { all: number; photos: number; videos: number; live: number; favorites: number; folders: number; people: number; places: number; trips: number }
   albums: Album[]
   byId: Map<string, MediaItem>
   duplicateBytes: number
@@ -30,11 +30,27 @@ interface Props {
 
 const pct = (done: number, total: number) => (total ? Math.min(100, Math.floor((done / total) * 100)) : 0)
 
+/** A background task's line: "Label · 45%", and "Label · 1,234 of 14,800 photos" while hovered. */
+function Running({ label, done, total, noun }: { label: string; done: number; total: number; noun: string }) {
+  const p = pct(done, total)
+  return (
+    <>
+      <LoaderCircle size={14} className="spin" />
+      <span>
+        {label} · <span className="scan-pct">{p}%</span>
+        <span className="scan-count">
+          {formatCount(Math.min(done, total))} of {formatCount(total)} {noun}
+        </span>
+      </span>
+      <span className="scan-progress" style={{ width: `${p}%` }} />
+    </>
+  )
+}
+
 export function Sidebar(props: Props) {
   const { view, onNavigate, counts, status, thumbProgress, peopleProgress, smartProgress, dupesProgress } = props
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const { pending, total } = thumbProgress
-  const preparedPct = total ? Math.floor(((total - pending) / total) * 100) : 100
   const active = (kind: View['kind']) =>
     view.kind === kind ||
     (kind === 'folders' && view.kind === 'folder') ||
@@ -58,8 +74,10 @@ export function Sidebar(props: Props) {
     <nav className="sidebar">
       <div className="sidebar-scroll">
         <div className="nav-section">
-          {item('photos', 'Photos', <Images size={18} />, counts.all)}
+          {item('photos', 'Photos', <Images size={18} />, counts.photos)}
           {item('videos', 'Videos', <Film size={18} />, counts.videos)}
+          {item('live', 'Live', <Target size={18} />, counts.live)}
+          {item('all', 'All', <LayoutGrid size={18} />, counts.all)}
           {item('favorites', 'Favorites', <Heart size={18} />, counts.favorites)}
           {item('memories', 'Memories', <Sparkles size={18} />, counts.trips)}
           {item('people', 'People', <Users size={18} />, counts.people)}
@@ -139,49 +157,17 @@ export function Sidebar(props: Props) {
             <span>Scanning… {status.found ? `${formatCount(status.found)} found` : ''}</span>
           </>
         ) : thumbProgress.pending > 0 ? (
-          <>
-            <LoaderCircle size={14} className="spin" />
-            <span title={`${formatCount(thumbProgress.pending)} previews left`}>Preparing previews · {preparedPct}%</span>
-            <span className="scan-progress" style={{ width: `${preparedPct}%` }} />
-          </>
+          <Running label="Preparing previews" done={total - pending} total={total} noun="previews" />
         ) : peopleProgress.running ? (
-          <>
-            <LoaderCircle size={14} className="spin" />
-            <span title={`${formatCount(peopleProgress.done)} of ${formatCount(peopleProgress.total)} photos analysed`}>
-              {peopleProgress.upgrading ? 'Upgrading face recognition' : 'Finding people'} · {pct(peopleProgress.done, peopleProgress.total)}%
-            </span>
-            <span className="scan-progress" style={{ width: `${pct(peopleProgress.done, peopleProgress.total)}%` }} />
-          </>
+          <Running label={peopleProgress.upgrading ? 'Upgrading face recognition' : 'Finding people'} done={peopleProgress.done} total={peopleProgress.total} noun="photos" />
         ) : smartProgress.running ? (
-          <>
-            <LoaderCircle size={14} className="spin" />
-            <span title={`${formatCount(smartProgress.done)} of ${formatCount(smartProgress.total)} items`}>
-              Preparing smart search · {pct(smartProgress.done, smartProgress.total)}%
-            </span>
-            <span className="scan-progress" style={{ width: `${pct(smartProgress.done, smartProgress.total)}%` }} />
-          </>
+          <Running label="Preparing smart search" done={smartProgress.done} total={smartProgress.total} noun="photos and videos" />
         ) : dupesProgress.running ? (
-          <>
-            <LoaderCircle size={14} className="spin" />
-            <span>Finding duplicates · {pct(dupesProgress.done, dupesProgress.total)}%</span>
-            <span className="scan-progress" style={{ width: `${pct(dupesProgress.done, dupesProgress.total)}%` }} />
-          </>
+          <Running label="Finding duplicates" done={dupesProgress.done} total={dupesProgress.total} noun={dupesProgress.phase === 'comparing' ? 'compared' : 'photos and videos'} />
         ) : props.ocrProgress?.running ? (
-          <>
-            <LoaderCircle size={14} className="spin" />
-            <span title={`${formatCount(props.ocrProgress.done)} of ${formatCount(props.ocrProgress.total)} photos read, for searching their text`}>
-              Reading text in photos · {pct(props.ocrProgress.done, props.ocrProgress.total)}%
-            </span>
-            <span className="scan-progress" style={{ width: `${pct(props.ocrProgress.done, props.ocrProgress.total)}%` }} />
-          </>
+          <Running label="Reading text in photos" done={props.ocrProgress.done} total={props.ocrProgress.total} noun="photos" />
         ) : props.videosProgress?.running ? (
-          <>
-            <LoaderCircle size={14} className="spin" />
-            <span title={`${formatCount(props.videosProgress.done)} of ${formatCount(props.videosProgress.total)} videos read, for finding look-alike videos`}>
-              Comparing videos · {pct(props.videosProgress.done, props.videosProgress.total)}%
-            </span>
-            <span className="scan-progress" style={{ width: `${pct(props.videosProgress.done, props.videosProgress.total)}%` }} />
-          </>
+          <Running label="Comparing videos" done={props.videosProgress.done} total={props.videosProgress.total} noun="videos" />
         ) : (
           <>
             <span className="scan-dot" />

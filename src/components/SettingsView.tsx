@@ -1,5 +1,6 @@
 import {
   Check,
+  CopyX,
   Cpu,
   FolderMinus,
   FolderOpen,
@@ -12,13 +13,17 @@ import {
   RotateCcw,
   ScanFace,
   ScanSearch,
+  ScanText,
+  Search,
   ShieldCheck,
   Sparkles,
   Sun,
+  Trash2,
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api } from '../api'
+import { clearUndo } from '../undo'
 import { formatBytes, formatCount } from '../lib/format'
 import type { GpuInfo, MediaItem, PeopleData, PeopleProgress, Settings, SmartProgress, Theme } from '../types'
 import { AboutCard, NoticesDialog } from './AboutCard'
@@ -46,6 +51,8 @@ const SHORTCUTS: [string, string][] = [
   ['Wheel · double-click', 'Zoom photo'],
   ['F', 'Favorite'],
   ['I', 'Details panel'],
+  ['Ctrl Z', 'Undo the last change'],
+  ['M', 'Mute / unmute video'],
 ]
 
 interface Props {
@@ -62,14 +69,61 @@ interface Props {
   unreachable?: string[]
 }
 
+type DataKind = 'previews' | 'faces' | 'smart' | 'text' | 'duplicates'
+export type DataInfo = Record<DataKind, { bytes: number; files?: number }> & { previews: { bytes: number; files: number } }
+
+const DATA_KINDS: { kind: DataKind; label: string; hint: string; icon: ReactNode; confirm: string; message: string }[] = [
+  {
+    kind: 'previews',
+    label: 'Previews',
+    hint: 'The small pictures in the grid and the full-size previews of HEIC and RAW photos.',
+    icon: <HardDrive size={16} />,
+    confirm: 'Delete all previews?',
+    message: 'They are made again in the background; until then the grid fills in as you scroll.',
+  },
+  {
+    kind: 'faces',
+    label: 'Face data',
+    hint: 'The faces found in your photos, the people they were grouped into, and the names and corrections you made.',
+    icon: <ScanFace size={16} />,
+    confirm: 'Delete all face data?',
+    message: 'Names, groupings and corrections will be removed. If face recognition stays on, your photos are analysed again from scratch.',
+  },
+  {
+    kind: 'smart',
+    label: 'Search index',
+    hint: 'What Pics learned about what is in each photo and video, for searching "beach" or "dog".',
+    icon: <Search size={16} />,
+    confirm: 'Delete the search index?',
+    message: 'Searching by what is in a photo works again as your library is read again.',
+  },
+  {
+    kind: 'text',
+    label: 'Text in photos',
+    hint: 'The words read from screenshots, receipts and signs, for searching their text.',
+    icon: <ScanText size={16} />,
+    confirm: 'Delete the text read from photos?',
+    message: 'Your photos are read again in the background.',
+  },
+  {
+    kind: 'duplicates',
+    label: 'Duplicate fingerprints',
+    hint: 'How each photo and video looks, for finding copies in Clean up. Your "Not duplicates" answers are kept.',
+    icon: <CopyX size={16} />,
+    confirm: 'Delete the duplicate fingerprints?',
+    message: 'Clean up finds duplicates again once your photos and videos have been checked again.',
+  },
+]
+
 export function SettingsView({ settings, items, version, people, peopleProgress, smartProgress, onAddFolder, onToast, onConfirm, unreachable }: Props) {
   const engine = peopleProgress.engine
   const smartEngine = smartProgress.engine
-  const [cache, setCache] = useState<{ bytes: number; files: number } | null>(null)
+  const [data, setData] = useState<DataInfo | null>(null)
+  const refreshData = () => api.dataInfo().then(setData)
   const [gpu, setGpu] = useState<GpuInfo | null>(null)
   const [notices, setNotices] = useState(false)
   useEffect(() => {
-    api.cacheInfo().then(setCache)
+    refreshData()
     api.getGpu().then(setGpu)
   }, [])
 
@@ -223,6 +277,7 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
                     danger: true,
                     onConfirm: () => {
                       api.resetPeople()
+                      clearUndo('people') // (nothing left to undo them on)
                       onToast('Face data deleted')
                     },
                   })
@@ -369,6 +424,23 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
               aria-checked={settings.carryDates}
               className={`switch${settings.carryDates ? ' on' : ''}`}
               onClick={() => api.setSettings({ carryDates: !settings.carryDates })}
+            >
+              <span />
+            </button>
+          </div>
+          <div className="setting-row">
+            <div>
+              <div>Ask before recycling a group's copies</div>
+              <div className="setting-hint">
+                When off, a group's own Recycle button moves its selected copies to the Recycle Bin straight away (Ctrl+Z puts them back). The
+                Recycle button for all groups always asks.
+              </div>
+            </div>
+            <button
+              role="switch"
+              aria-checked={settings.askGroupRecycle}
+              className={`switch${settings.askGroupRecycle ? ' on' : ''}`}
+              onClick={() => api.setSettings({ askGroupRecycle: !settings.askGroupRecycle })}
             >
               <span />
             </button>
@@ -652,24 +724,70 @@ export function SettingsView({ settings, items, version, people, peopleProgress,
         </section>
 
         <section className="card">
-          <h2>Storage</h2>
-          <div className="setting-row">
-            <span className="with-icon">
-              <HardDrive size={16} /> Thumbnail cache
-            </span>
-            <div className="setting-value">
-              {cache ? `${formatBytes(cache.bytes)} · ${formatCount(cache.files)} files` : '…'}
-              <button
-                className="btn ghost"
-                onClick={async () => {
-                  await api.clearCache()
-                  setCache(await api.cacheInfo())
-                  onToast('Thumbnail cache cleared')
-                }}
-              >
-                Clear
-              </button>
+          <h2>Storage and data</h2>
+          <p className="setting-hint">
+            What Pics has made from your photos and videos, on this PC only. Deleting something here doesn't touch your photos: Pics
+            makes it again in the background, newest photos first.
+          </p>
+          {DATA_KINDS.map((k) => (
+            <div key={k.kind} className="setting-row">
+              <div>
+                <div className="with-icon">
+                  {k.icon} {k.label}
+                </div>
+                <div className="setting-hint">{k.hint}</div>
+              </div>
+              <div className="setting-value">
+                {data ? `${formatBytes(data[k.kind].bytes)}${k.kind === 'previews' ? ` · ${formatCount(data.previews.files)} files` : ''}` : '…'}
+                <button
+                  className="btn ghost"
+                  onClick={() =>
+                    onConfirm({
+                      title: k.confirm,
+                      message: k.message,
+                      confirmLabel: 'Delete',
+                      danger: true,
+                      onConfirm: async () => {
+                        await api.deleteData(k.kind)
+                        if (k.kind === 'faces') clearUndo('people')
+                        refreshData()
+                        onToast(`${k.label} deleted. Pics is making it again in the background.`)
+                      },
+                    })
+                  }
+                >
+                  Delete…
+                </button>
+              </div>
             </div>
+          ))}
+          <div className="setting-row">
+            <div>
+              <div className="with-icon">
+                <Trash2 size={16} /> Everything above
+              </div>
+              <div className="setting-hint">A fresh start: previews, face data (with names), search, text and duplicate data.</div>
+            </div>
+            <button
+              className="btn danger"
+              onClick={() =>
+                onConfirm({
+                  title: 'Delete all of Pics’ data?',
+                  message:
+                    "Previews, faces and the names you gave people, the search index, the text read from photos and the duplicate fingerprints are deleted, and everything is analysed again from scratch. Your photos and videos, albums, favorites, ratings and History are kept.",
+                  confirmLabel: 'Delete everything',
+                  danger: true,
+                  onConfirm: async () => {
+                    await api.deleteData('all')
+                    clearUndo('people')
+                    refreshData()
+                    onToast('All data deleted. Pics is analysing your library again.')
+                  },
+                })
+              }
+            >
+              Delete all…
+            </button>
           </div>
         </section>
 
