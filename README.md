@@ -13,7 +13,7 @@ Get the latest version from the [Releases page](../../releases/latest):
 
 Needs Windows 10 or 11, 64-bit. A graphics card is used when there is one (People, smart search, magic eraser, video previews), otherwise the CPU. HEIC photos and HEVC videos need Windows' **HEIF Image Extensions** and **HEVC Video Extensions** from the Microsoft Store (many PCs have them already).
 
-Pics isn't code-signed, so the first time Windows may show "Windows protected your PC": choose **More info → Run anyway**. The very first start can take up to a minute while Windows checks the new program; after that it opens in a couple of seconds.
+Pics isn't code-signed, so the first time Windows may show "Windows protected your PC": choose **More info → Run anyway**. On a PC with **Smart App Control** turned on, Windows may block unsigned apps like this one without offering Run anyway. The very first start can take up to a minute while Windows checks the new program; after that it opens in a couple of seconds.
 
 Everything runs on your computer: photos, faces and searches are never uploaded. Only the map uses the internet, to show OpenStreetMap images.
 
@@ -22,10 +22,10 @@ Everything runs on your computer: photos, faces and searches are never uploaded.
 - **Timeline** of every photo and video in your folders, grouped by day (or by month when zoomed out), with a Google Photos–style date scrubber.
 - **Fast with big libraries** — virtualised GPU-composited grid, previews generated in parallel on every CPU core (libvips) and the GPU's hardware video decoder, built for the whole library in the background, cached on disk, live folder watching.
 - **Real capture dates** from EXIF (photos) and MP4/MOV metadata (videos), falling back to file dates.
-- **Viewer** — zoom & pan (wheel, double-click, drag), filmstrip, slideshow, video playback with seeking, blurred ambient backdrop, details panel (camera, lens, exposure, GPS).
+- **Viewer** — zoom & pan (wheel, double-click, drag), filmstrip, slideshow, blurred ambient backdrop, details panel (camera, lens, exposure, GPS), and Pics' own **video player**: seek bar with a time preview, volume (M mutes), playback speed, picture in picture, loop, full screen (double-click) and Save a copy.
+- **Undo** — **Ctrl+Z** takes back what you just did: moves to the Recycle Bin (the files come back out of it), Clean up moves, Organize, turning photos, date and place edits, ratings, tags, favorites, albums, People changes and "Not duplicates". Most of these also show an **Undo** button in their message.
 - **People** — photos grouped by the faces in them, on-device. Name people (then search by name) and fix any grouping by hand:
-  - **Same person?** review of likely duplicate groups (keyboard **Y** / **N** / **S**); "different" answers are remembered.
-  - **Possible matches** on each person's page — tick the groups that are the same person and merge them at once.
+  - **Possible matches** on each person's page — tick the groups that are the same person and merge them at once, or mark them as not that person (remembered); an **Undo** button takes back a wrong click.
   - **Multi-select** on the People page → *Merge* / *Hide*. Small groups (1–2 photos) are tucked away behind a "show" button.
   - **Faces** tab per person, least-similar faces first, so wrong matches surface at the top.
   - **Move to…** another person or a new one, **Not this person**, **Use as cover**, **Remove person** — on photos or individual faces.
@@ -34,7 +34,8 @@ Everything runs on your computer: photos, faces and searches are never uploaded.
 - **Places** — photos and videos with a GPS position, grouped by town and filterable by country, plus the place name in the details panel. Place names come from a bundled copy of **GeoNames** (161k towns, CC BY 4.0) and are looked up offline. Phone videos' locations are read too.
 - **Memories** — **trips** found automatically from where and when photos were taken (home bases are the places you keep returning to; photos without a location taken during a trip, in the same folders, are included), and **On this day**: photos from today's date in earlier years, as a strip above Photos and on the Memories page.
 - **Edit photos** — rotate, flip, straighten, crop (free or fixed proportions, dragged on the photo), auto-enhance, light, contrast, colour and warmth, with a live preview rendered by the same code that saves. Edits are always **saved as a new copy** next to the original (capture date, camera and place kept); HEIC/RAW are decoded at full size by Windows.
-- **Videos** — hover a video (or Live Photo) to play a silent preview; long videos remember where you stopped; **Live Photos** (an iPhone still + its short clip) show as one photo with a LIVE button.
+- **Videos** — hover a video (or Live Photo) to play a silent preview; long videos remember where you stopped; **Live Photos** (an iPhone still + its short clip) show as one photo that plays its motion once when opened, then with the LIVE button. The Photos tab switches between **Photos**, **Live** (Live Photos only) and **All** (photos and videos).
+- **External drives** — photos on a drive that's unplugged keep their previews, people, text and duplicate data, and Pics carries on where it stopped when the drive is back, even if Windows gives it another letter (drives are recognised by their serial number). Updates keep all of it too.
 - **Albums** — your own collections. Add items from the selection bar, the right-click menu or the viewer, or drag them onto an album in the sidebar. You can rename an album, change its cover or remove items; deleting an album never deletes files.
 - **Clean up** (from DupeLens) — finds **exact copies** and **look-alikes** with DupeLens' fingerprint (72×72 grid, 128-bit difference hash in all 8 rotations/mirrorings + 4 centre crops; match threshold 80–99 %), so resized, re-saved, edited, rotated, mirrored and cropped copies are grouped, and loose groups are flagged “check before removing”. **Videos** are compared by their frames (6 sampled frames plus one per second, read in the background), so re-encoded, resized and **trimmed** copies are found; Compare plays a video group side by side on one clock, with trimmed clips starting at the right moment. Keep rules (highest quality, sharpest, largest, oldest, newest) pre-select the copies to remove; protected folders are always kept; the Select menu adds all WhatsApp copies, lower-resolution copies or everything in a folder (never every copy of a group). Each group also has its own **Recycle** button for just its selected copies, on its card and in Compare (one click never removes every copy). **Compare** shows every copy side by side with synced zoom & pan or a swipe view, with keyboard review (1–9, K keep only, D remove, A auto, S swipe, Space next). Also **Blurry & dark**, **Screenshots**, **Large files**, **Duplicate folders** (≥ 90 % overlap) and **Backup check**, an HTML/CSV report, **Move to folder** (default “Duplicates”, not shown in Pics) or **Recycle Bin**, kept copies can take the original's date, and **History** with undo (Ctrl+Z) — moved files can be put back any time.
 - **Organize** (from DupeLens) — **fix dates** from file names (WhatsApp, screenshots, camera names) so photos sort by when they were taken; **sort into dated folders** (e.g. 2022\12 - December, move or copy); **rename by date** (only camera/phone names, or all); turn **sideways copies** upright to match their best copy (JPEG orientation tag, lossless); **convert HEIC to JPG** keeping date, camera and place, with the originals set aside in “HEIC originals”. Moved and renamed files keep their previews, faces, favorites, albums and duplicate matches, and everything can be undone from History.
@@ -43,6 +44,7 @@ Everything runs on your computer: photos, faces and searches are never uploaded.
 - **Import & export** — **Import** from a phone, camera, memory card or folder: only new files are copied, into dated folders, optionally converting HEIC to JPG (undo from History). **Export** smaller copies for WhatsApp/email, without location or other details, into a folder or one .zip.
 - **Create** — **magic eraser** in the photo editor (brush over people or things; LaMa fills the area on the GPU), **edit videos** (trim, rotate, remove sound, speed, save a frame as a photo — saved as a copy), and **memory movies** of a trip, album or selection (Ken Burns photos, clips, title, music; rendered on the GPU).
 - **Private** — hide photos and videos from every view until unlocked with Windows Hello or a Pics PIN, optionally in a hidden folder in File Explorer (not encryption — the app says so).
+- **Storage and data** (Settings) — see how much space previews, face data, the search index, text and duplicate data take, and delete any of them; Pics makes them again in the background.
 - **Library tools** — Favorites, Recently added, Folders, search (name, person, place, folder, month, year, camera, content), multi-select (Ctrl/Shift-click), move to Recycle Bin, copy image, drag files out to other apps, right-click menu.
 - **Windows 11 look** — Mica window material, light/dark/system theme, accent colors.
 - **Uses the discrete GPU** (e.g. NVIDIA RTX) on dual-graphics laptops — see *Settings → Performance*, which also shows the GPU in use.
@@ -86,7 +88,8 @@ The installer and the portable .zip are written to `release/` (run `npm run mode
 | F / I | Favorite / details panel |
 | E | Edit photo (Ctrl S save copy, Ctrl Z reset, Esc close) |
 | L | Play a Live Photo |
-| Ctrl Z / Ctrl H | Undo the last move / History |
+| Ctrl Z / Ctrl H | Undo the last change / History |
+| M | Mute / unmute a video |
 | Ctrl R | Review duplicates one by one (in Clean up) |
 | + − 0 | Zoom in / out / fit |
 
